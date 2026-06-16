@@ -19,8 +19,9 @@ directly in EURC.
 ## 1. Supply & distribution (fixed, no inflation)
 
 - **Total supply: 20,000,000 VTESS, created once.**
-- **15,000,000 VTESS** seeded into an EURC/VTESS AMM pool on Solana (price
-  discovery + liquidity).
+- **15,000,000 VTESS** seeded into an EURC/VTESS pool on **Raydium**
+  (Solana) at launch. The pool is a **constant-product (CPMM) Standard AMM
+  pool**, not concentrated liquidity. Rationale in §1.1.
 - **5,000,000 VTESS** locked in treasury under a **published vesting schedule**
   (define cliff + linear unlock + purpose up front; this is future circulating
   overhang and must not be an unexplained cliff).
@@ -31,6 +32,40 @@ directly in EURC.
 There is no emission schedule and no halving curve; those belonged to the
 earlier mint-on-use model, which is abandoned. "More tokens in circulation"
 over time comes from the **5M unlocking on schedule**, not from minting.
+
+### 1.1 Venue + curve: Raydium CPMM at bootstrap, CLMM migration gated
+
+The seed pool is **Raydium Standard AMM (constant-product, xy=k)** at
+launch. Concentrated-liquidity migration is **not** done at bootstrap, even
+though Raydium offers CLMM.
+
+Why constant-product first:
+
+- CPMM spreads liquidity across the entire price curve. There is no
+  narrow active band an attacker can push the price outside of.
+- A new EURC/VTESS pair will have shallow, lumpy LP participation in
+  its first months. CLMM at that depth is sandwich-bait: LPs cluster
+  around the perceived fair price, and an attacker who can move price
+  outside the band drains the active range cheaply.
+- The §5.1 oracle architecture (Pyth primary, pool TWAP cross-check)
+  is stricter under CPMM because pool TWAP is harder to spike with a
+  single transaction.
+
+CLMM migration is **governance-gated** and requires all of:
+
+- Phase 3 has already activated (issue #24 — meaningful settled
+  volume).
+- Pool depth at ±2% of mid exceeds the depth threshold for the
+  Pyth-confidence gate for ≥ N consecutive months (specific N is a
+  governance parameter).
+- LP diversity: no single LP holds > X% of total liquidity (X is
+  governance-set; suggested starting value 25%).
+- A migration plan is published with a no-loss path for existing
+  Standard AMM LPs.
+
+Until those conditions are jointly met, the pool stays CPMM. Raydium's
+own CLMM/CPMM coexistence on the same pair is fine — what matters is
+which pool the protocol oracle and the §3 BTC-buy route reference.
 
 ## 2. Layer 1 — EURC (stability + liquidity + settlement)
 
@@ -226,7 +261,8 @@ revocation is the load-bearing piece; the rest follows.
 | Pyth-vs-pool deviation threshold / dwell window / TWAP window | Governable. |
 | Phase 3 liquidity + Pyth-confidence gate | Governable (see issue #24). |
 | BTC custody signers / threshold | Governable with notice period (see issue #20). |
-| AMM venue / curve | Governable. |
+| AMM venue at launch = Raydium; curve at launch = CPMM (Standard AMM) | **Permanent** — invariant of §1.1. Migration to CLMM is gated, not arbitrary. |
+| CLMM migration trigger (depth, dwell, LP concentration thresholds) | Governable. |
 | EURC redeemed only via licensed EMI/CASP counterparty (never direct Circle, never via the protocol itself) | **Permanent** — invariant of §2.1. |
 | EURC redemption ceiling / cadence | Governable; published, enforced by the operating entity. |
 | Identity of the EMI/CASP counterparty | Governable with notice period; rotates outside this doc. |
