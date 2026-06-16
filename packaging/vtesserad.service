@@ -1,6 +1,6 @@
 [Unit]
 Description=Vtessera metering daemon
-Documentation=https://github.com/anomalyco/vtessera
+Documentation=https://github.com/douglasdemaio/vtessera
 After=network.target
 
 [Service]
@@ -8,6 +8,8 @@ Type=simple
 ExecStart=/usr/bin/vtesserad --config /etc/vtessera/vtessera.toml
 DynamicUser=yes
 StateDirectory=vtessera
+StateDirectoryMode=0700
+UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -29,7 +31,20 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged ~@resources
 CapabilityBoundingSet=
 AmbientCapabilities=
+# Default build opens no sockets:
 RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+# If built with --features submit, set instead:
+#   RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+#   IPAddressDeny=any
+#   IPAddressAllow=<your submission endpoint CIDR>
+#
+# Note: DO NOT set ProcSubset=pid here. The daemon must read /proc/meminfo,
+# /proc/stat etc., which ProcSubset=pid hides.
+#
+# Note: DynamicUser=yes randomizes the runtime username. AppArmor profiles
+# pathed by username will not match. The shipped profile uses peer/object
+# rules, not user-pathed rules — keep it that way.
 Restart=on-failure
 
 [Install]

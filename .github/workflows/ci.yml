@@ -23,11 +23,17 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
-      - name: Clippy
+      - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Test
+      - name: Clippy (submit feature)
+        run: cargo clippy --all-targets --features submit -- -D warnings
+
+      - name: Test (default features)
         run: cargo test --locked
+
+      - name: Test (submit feature)
+        run: cargo test --locked --features submit
 
       - name: Audit
         run: |
@@ -39,8 +45,16 @@ jobs:
           cargo install cargo-deny --locked
           cargo deny check
 
-      - name: Build (static musl)
+      - name: Build (static musl, default features)
         run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Build (static musl, submit feature)
+        run: cargo build --release --locked --features submit --target x86_64-unknown-linux-musl
+
+      - name: systemd-analyze security (best-effort)
+        run: |
+          sudo apt-get update && sudo apt-get install -y systemd
+          systemd-analyze security --no-pager packaging/vtesserad.service || true
 
       - name: Upload RPM
         run: |
