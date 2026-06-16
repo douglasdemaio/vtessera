@@ -152,6 +152,47 @@ trivially manipulable, so:
 
 Governance sets the depth/robustness threshold that flips this on.
 
+### 5.1 Oracle: Pyth primary, pool TWAP cross-check
+
+The price feed used by the settlement enclave is **Pyth Network** (Solana-
+native, first-party publisher model, on-chain). The EURC/VTESS pool TWAP
+is a **sanity-check deviation alarm**, never the primary source.
+
+- **Primary:** Pyth VTESS/EUR feed (or VTESS/USD bridged through Pyth's
+  EUR feed, if a direct VTESS/EUR feed is not initially supported).
+- **Cross-check:** the daemon and the settlement enclave both compute a
+  rolling TWAP of the EURC/VTESS pool. If Pyth and the pool TWAP diverge
+  by more than the governance-set deviation threshold for longer than a
+  governance-set dwell window, **settlement halts** and operators are
+  alerted. Settlement resumes automatically once both come back into
+  band, or manually after a governance review.
+
+Why not pool TWAP as primary: own-pool TWAP is circular when the
+oracle's job is to decide what the pool is worth. An attacker willing
+to move enough volume can move the price the protocol uses to settle
+their own job. Pyth's first-party publishers (centralised exchanges,
+market makers) are an off-pool signal that costs more to manipulate
+than the on-pool TWAP.
+
+Why pool TWAP as cross-check anyway: Pyth itself can be wrong —
+stale, paused, or attacked. If Pyth says VTESS/EUR is €0.10 but the
+pool says €1.00, settling against Pyth would let buyers drain hosts.
+The deviation alarm catches that case before it bleeds value.
+
+Three parameters remain governable and start at conservative defaults
+that the board can tighten as data arrives:
+
+- **Deviation threshold** (% divergence between Pyth and pool TWAP that
+  trips the alarm).
+- **Dwell window** (how long the divergence must persist before
+  settlement halts — keeps a single tick from halting the world).
+- **TWAP window** (how far back the pool TWAP averages).
+
+The Phase 3 activation gate (issue #24) checks Pyth's published
+confidence interval and the pool depth jointly: if Pyth's published
+confidence is wider than a governance-set fraction of price, or pool
+depth is below the threshold, Phase 3 stays gated.
+
 ## 6. Governance board
 
 Sets and can adjust: protocol fee %, the reserve-contribution %, the
@@ -181,7 +222,9 @@ revocation is the load-bearing piece; the rest follows.
 | Protocol fee % | Governable. |
 | Reserve-contribution % | Governable. |
 | EURC : BTC : dev split | Governable. |
-| Oracle source + liquidity threshold (Phase 3 gate) | Governable. |
+| Oracle source = Pyth primary, pool TWAP cross-check | **Permanent** — invariant of §5.1. Switching primary away from Pyth is a token-design rev, not a board parameter. |
+| Pyth-vs-pool deviation threshold / dwell window / TWAP window | Governable. |
+| Phase 3 liquidity + Pyth-confidence gate | Governable (see issue #24). |
 | BTC custody signers / threshold | Governable with notice period (see issue #20). |
 | AMM venue / curve | Governable. |
 | EURC redeemed only via licensed EMI/CASP counterparty (never direct Circle, never via the protocol itself) | **Permanent** — invariant of §2.1. |
