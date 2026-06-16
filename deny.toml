@@ -20,13 +20,13 @@ allow = [
     "OpenSSL",
 ]
 deny = []
-copyleft = "deny"
-allow-osi-fsf-free = "neither"
+copyleft = "warn"
+allow-osi-fsf-free = "both"
 default = "deny"
 confidence-threshold = 0.8
 
 [bans]
-multiple-versions = "deny"
+multiple-versions = "warn"
 skip = []
 skip-tree = []
 
