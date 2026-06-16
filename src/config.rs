@@ -38,11 +38,7 @@ impl Config {
                 "sample_interval_secs must be between 1 and 3600".into(),
             ));
         }
-        if self.payout_id.is_empty() {
-            return Err(ConfigError::Validation(
-                "payout_id must not be empty".into(),
-            ));
-        }
+        validate_payout_id(&self.payout_id)?;
         if self.state_dir.as_os_str().is_empty() {
             return Err(ConfigError::Validation(
                 "state_dir must not be empty".into(),
@@ -53,6 +49,35 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// payout_id must be a Solana Ed25519 base58 address: 32–44 chars of the
+/// Bitcoin/Solana base58 alphabet. Length + charset check only; we don't
+/// pull a full base58 decoder into the default-build dep tree (BUILD.md §1.3).
+/// This catches typos and obvious wrong-network strings; the settlement
+/// enclave does the full decode + on-curve check.
+fn validate_payout_id(s: &str) -> Result<(), ConfigError> {
+    if s.is_empty() {
+        return Err(ConfigError::Validation(
+            "payout_id must not be empty".into(),
+        ));
+    }
+    if s.len() < 32 || s.len() > 44 {
+        return Err(ConfigError::Validation(format!(
+            "payout_id must be 32–44 base58 chars (Solana address), got {}",
+            s.len()
+        )));
+    }
+    const BASE58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    for c in s.bytes() {
+        if !BASE58_ALPHABET.contains(&c) {
+            return Err(ConfigError::Validation(format!(
+                "payout_id contains non-base58 character {:?}",
+                c as char
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -73,3 +98,36 @@ impl std::fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payout_id_accepts_solana_address() {
+        // A real-shape Solana base58 pubkey (33 chars, all valid alphabet).
+        assert!(validate_payout_id("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM").is_ok());
+    }
+
+    #[test]
+    fn payout_id_rejects_empty() {
+        assert!(validate_payout_id("").is_err());
+    }
+
+    #[test]
+    fn payout_id_rejects_too_short() {
+        assert!(validate_payout_id("9WzDXwBbmkg8").is_err());
+    }
+
+    #[test]
+    fn payout_id_rejects_too_long() {
+        assert!(validate_payout_id(&"9".repeat(45)).is_err());
+    }
+
+    #[test]
+    fn payout_id_rejects_non_base58_char() {
+        // '0', 'O', 'I', 'l' are not in base58.
+        assert!(validate_payout_id("0WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM").is_err());
+        assert!(validate_payout_id("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWW0").is_err());
+    }
+}

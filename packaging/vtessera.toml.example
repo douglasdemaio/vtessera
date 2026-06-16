@@ -11,8 +11,11 @@ state_dir = "/var/lib/vtessera"
 # Path to the Ed25519 identity key (auto-generated if missing)
 key_path = "/etc/vtessera/identity.key"
 
-# Operator payout identifier (on-chain address or account string)
-payout_id = ""
+# Operator payout identifier. Must be a Solana base58 Ed25519 public key
+# (32–44 characters from the base58 alphabet). Set this before first start
+# — the daemon will refuse to load an empty or malformed value.
+# Example below is a well-known throwaway address; REPLACE before production.
+payout_id = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
 
 # Number of samples per receipt window (optional, default 60)
 # window_size = 60

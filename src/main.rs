@@ -16,9 +16,32 @@ use std::time::Duration;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn usage(program: &str) -> ! {
-    eprintln!("Usage: {program} --config <path> [--once] [--version]");
-    process::exit(1);
+/// Exit codes (documented in BUILD.md §4):
+///   0 = success / --help / --version
+///   1 = runtime error (config invalid, key error, IO)
+///   2 = argument parsing error
+const EXIT_OK: i32 = 0;
+const EXIT_RUNTIME: i32 = 1;
+const EXIT_USAGE: i32 = 2;
+
+fn print_help(program: &str) {
+    println!("vtesserad {VERSION} — Vtessera metering daemon");
+    println!();
+    println!("Usage: {program} --config <path> [--once]");
+    println!("       {program} --version");
+    println!("       {program} --help");
+    println!();
+    println!("Options:");
+    println!("  --config <path>   Path to the TOML config file (required).");
+    println!("  --once            Sample once and exit (does not finalize a window).");
+    println!("  --version         Print version and exit.");
+    println!("  -h, --help        Print this help and exit.");
+}
+
+fn usage_err(program: &str, msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    eprintln!("Usage: {program} --config <path> [--once] [--version] [--help]");
+    process::exit(EXIT_USAGE);
 }
 
 fn main() {
@@ -33,51 +56,57 @@ fn main() {
         match args[i].as_str() {
             "--config" => {
                 i += 1;
-                config_path = Some(PathBuf::from(args.get(i).cloned().unwrap_or_else(|| {
-                    eprintln!("error: --config requires a path argument");
-                    process::exit(1);
-                })));
+                let val = args.get(i).cloned().unwrap_or_else(|| {
+                    usage_err(program, "--config requires a path argument");
+                });
+                config_path = Some(PathBuf::from(val));
             }
             "--once" => {
                 once = true;
             }
             "--version" => {
                 println!("vtesserad {VERSION}");
-                process::exit(0);
+                process::exit(EXIT_OK);
+            }
+            "--help" | "-h" => {
+                print_help(program);
+                process::exit(EXIT_OK);
             }
             other => {
-                eprintln!("error: unknown argument '{other}'");
-                usage(program);
+                usage_err(program, &format!("unknown argument '{other}'"));
             }
         }
         i += 1;
     }
 
     let config_path = config_path.unwrap_or_else(|| {
-        eprintln!("error: --config is required");
-        usage(program);
+        usage_err(program, "--config is required");
     });
 
     let cfg = match config::Config::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: failed to load config: {e}");
-            process::exit(1);
+            process::exit(EXIT_RUNTIME);
         }
     };
 
     if let Err(e) = cfg.validate() {
         eprintln!("error: invalid config: {e}");
-        process::exit(1);
+        process::exit(EXIT_RUNTIME);
     }
 
     let signing_key = match sign::load_or_generate(&cfg.key_path) {
         Ok(k) => k,
         Err(e) => {
             eprintln!("error: failed to load/generate key: {e}");
-            process::exit(1);
+            process::exit(EXIT_RUNTIME);
         }
     };
+
+    // node_id is derived from the signing key's public key — self-attesting
+    // and stable across payout_id rotations. See BUILD.md §4 (receipt.rs).
+    let node_id = receipt::derive_node_id(&signing_key.verifying_key().to_bytes());
 
     let interval = Duration::from_secs(cfg.sample_interval_secs);
     let window_size = cfg.window_size.unwrap_or(60);
@@ -106,9 +135,14 @@ fn main() {
         }
 
         if !samples.is_empty() {
-            let elapsed = samples.last().unwrap().ts_unix - window_start;
+            // saturating_sub: tolerate backward NTP steps (see BUILD.md §4 / metrics.rs
+            // clock-source note). If wall clock went backwards, elapsed becomes 0 and
+            // the window simply doesn't close yet.
+            let elapsed = samples.last().unwrap().ts_unix.saturating_sub(window_start);
             if elapsed >= window_size {
-                if let Err(e) = finalize_window(&cfg, &signing_key, &samples, window_start) {
+                if let Err(e) =
+                    finalize_window(&cfg, &signing_key, &node_id, &samples, window_start)
+                {
                     eprintln!("error: finalize window: {e}");
                 }
                 samples.clear();
@@ -128,6 +162,7 @@ fn main() {
 fn finalize_window(
     cfg: &config::Config,
     signing_key: &ed25519_dalek::SigningKey,
+    node_id: &str,
     samples: &[metrics::ResourceSample],
     window_start: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -155,7 +190,8 @@ fn finalize_window(
 
     let rec = receipt::Receipt {
         schema_ver: 1,
-        node_id: cfg.payout_id.clone(),
+        node_id: node_id.to_string(),
+        payout_id: cfg.payout_id.clone(),
         window_start,
         window_end,
         samples_digest,

@@ -4,14 +4,12 @@ use crate::receipt::{signed_receipt_to_json, SignedReceipt};
 #[derive(Debug)]
 pub enum SubmitError {
     Http(String),
-    Io(std::io::Error),
 }
 
 impl std::fmt::Display for SubmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SubmitError::Http(e) => write!(f, "HTTP error: {e}"),
-            SubmitError::Io(e) => write!(f, "IO error: {e}"),
         }
     }
 }
@@ -23,11 +21,11 @@ pub fn submit_receipt(endpoint: &str, sr: &SignedReceipt) -> Result<(), SubmitEr
     let body = signed_receipt_to_json(sr);
 
     let response = ureq::post(endpoint)
-        .set("Content-Type", "application/json")
-        .send_bytes(&body)
+        .header("Content-Type", "application/json")
+        .send(&body[..])
         .map_err(|e| SubmitError::Http(e.to_string()))?;
 
-    let status = response.status();
+    let status = response.status().as_u16();
     if status != 200 && status != 201 && status != 202 {
         return Err(SubmitError::Http(format!("unexpected status: {status}")));
     }
@@ -49,6 +47,7 @@ mod tests {
         let receipt = Receipt {
             schema_ver: 1,
             node_id: "test".into(),
+            payout_id: "test-payout".into(),
             window_start: 0,
             window_end: 1,
             samples_digest: [0; 32],

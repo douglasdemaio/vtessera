@@ -37,6 +37,7 @@ mod tests {
         let receipt = Receipt {
             schema_ver: 1,
             node_id: "test-node".into(),
+            payout_id: "test-payout".into(),
             window_start: 1000,
             window_end: 2000,
             samples_digest: [0x42; 32],
