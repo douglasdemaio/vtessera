@@ -48,6 +48,51 @@ Roles of this layer:
 - **Stability reserve / floor.** A share of fees accumulates as held EURC,
   providing a euro-denominated floor and deepening pool liquidity over time.
 
+### 2.1 EURC redemption posture (EMI/CASP counterparty)
+
+The protocol receives revenue as EURC on Solana. Circle gates EURC issuance
+and redemption to KYC'd entities, and the protocol itself does not (and
+cannot, as an on-chain governance object) hold a bank relationship. The
+adopted posture is therefore:
+
+> Redemption of EURC to euro fiat is performed exclusively via a **named,
+> contracted EU MiCA-licensed EMI or CASP counterparty.** The protocol never
+> attempts to redeem with Circle directly, and never holds fiat itself.
+
+Implications, all of which are launch-blocking for Phase 2:
+
+- **Counterparty selection.** Sign a service agreement with one or more
+  MiCA-authorised payment institutions / crypto-asset service providers
+  before Phase 2. Names go in a separate counterparty addendum, not this
+  doc, so they can rotate without a token-design rev.
+- **KYC scope is on the counterparty, not on protocol users.** Buyers and
+  hosts continue to interact only with on-chain EURC. The KYC obligation
+  attaches when the protocol's designated operating entity initiates a
+  redemption, and applies only to that entity.
+- **Operating entity required.** The protocol therefore needs a legal
+  entity (likely an EU foundation or non-profit) that holds the
+  counterparty agreement, signs redemption requests, and is itself
+  KYC'd by the counterparty. This entity has no claim on VTESS supply
+  and no discretion over governance-decided splits; its role is mechanical
+  execution of the §4 flow of funds.
+- **Redemption ceiling and cadence are governance-set.** The board (§6)
+  publishes a maximum redemption rate (e.g., quarterly, capped at N% of
+  EURC reserve) so the entity cannot drain the stability floor on its own
+  initiative.
+- **Dev treasury implication.** Dev treasury allocations payable in fiat
+  must route through the same counterparty; otherwise they stay in EURC
+  on-chain. There is no shortcut path.
+- **Transparency obligation.** Every redemption appears on-chain (EURC
+  leaves the reserve address) and is matched off-chain by a counterparty
+  statement; the operating entity publishes the reconciliation at the
+  same cadence as the §3 proof-of-reserves.
+
+This posture has the tradeoff that the operating entity is a centralisation
+point regulators will scrutinise, parallel to (and probably the same scrutiny
+as) the governance board itself. The alternative — perpetual on-chain hold —
+was rejected because it forces every dev-treasury payable into EURC and
+makes it impossible to honour any fiat-denominated commitment.
+
 ## 3. Layer 2 — long-duration BTC reserve
 
 A share of fees is converted to **native BTC** and held as a long-duration
@@ -111,7 +156,9 @@ Governance sets the depth/robustness threshold that flips this on.
 
 Sets and can adjust: protocol fee %, the reserve-contribution %, the
 EURC:BTC:dev split, the 5M unlock schedule, oracle configuration and the
-liquidity threshold for VTESS settlement, and BTC custody/treasury movements.
+liquidity threshold for VTESS settlement, BTC custody/treasury movements,
+and the EURC redemption ceiling / cadence applied to the EMI/CASP
+counterparty (§2.1).
 **The board is itself a centralization point regulators scrutinize** — document
 its mandate, limits, and transparency obligations.
 
@@ -137,6 +184,9 @@ revocation is the load-bearing piece; the rest follows.
 | Oracle source + liquidity threshold (Phase 3 gate) | Governable. |
 | BTC custody signers / threshold | Governable with notice period (see issue #20). |
 | AMM venue / curve | Governable. |
+| EURC redeemed only via licensed EMI/CASP counterparty (never direct Circle, never via the protocol itself) | **Permanent** — invariant of §2.1. |
+| EURC redemption ceiling / cadence | Governable; published, enforced by the operating entity. |
+| Identity of the EMI/CASP counterparty | Governable with notice period; rotates outside this doc. |
 
 Operational invariants enforced by code or process, not by chain state:
 
