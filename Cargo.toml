@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Opt-in compute marketplace client for openSUSE — metering daemon"
 license = "Apache-2.0"
-repository = "https://github.com/anomalyco/vtessera"
+repository = "https://github.com/douglasdemaio/vtessera"
 
 [[bin]]
 name = "vtesserad"
@@ -15,13 +15,13 @@ default = []
 submit = ["ureq"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-sha2 = "0.10"
-hex = "0.4"
-libc = "0.2"
-rand = "0.8"
+# Default-build crates. Additions require justification in PR per BUILD.md §1.3.
+serde = { version = "1", features = ["derive"] }            # config: derive(Deserialize)
+toml = "0.8"                                                 # config: TOML loader
+ed25519-dalek = { version = "2", features = ["rand_core"] }  # signing
+sha2 = "0.10"                                                # SHA-256 over samples
+rand = "0.8"                                                 # ed25519-dalek keygen RNG
+hex = "0.4"                                                  # hex encoding for receipt JSON
 
 # submit feature only
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }

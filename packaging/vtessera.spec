@@ -15,7 +15,7 @@ Version:        0.1.0
 Release:        0
 Summary:        Opt-in compute marketplace metering daemon for openSUSE
 License:        Apache-2.0
-URL:            https://github.com/anomalyco/vtessera
+URL:            https://github.com/douglasdemaio/vtessera
 Source0:        vtessera-%{version}.tar.xz
 BuildRequires:  cargo >= %{rust_version}
 BuildRequires:  rust >= %{rust_version}

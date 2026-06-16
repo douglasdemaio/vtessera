@@ -34,9 +34,22 @@ systemd unit and an AppArmor profile.
    trivial packaging glue. Build toolchain = cargo + rpmbuild only.
 2. **No unsafe:** the crate root must contain `#![forbid(unsafe_code)]`.
 3. **Dependency budget:** the default (no-network) build uses exactly these
-   crates and nothing else: `serde` (derive), `toml`, `ed25519-dalek`, `sha2`.
+   direct crates and nothing else (transitive deps don't count toward the
+   budget — `ed25519-dalek` legitimately pulls in `curve25519-dalek`,
+   `zeroize`, etc.):
+
+   | Crate | Why |
+   | --- | --- |
+   | `serde` (derive) | Config deserialization. |
+   | `toml` | Config format. |
+   | `ed25519-dalek` | Signing. |
+   | `sha2` | `samples_digest` and `node_id` derivation. |
+   | `rand` | Ed25519 keygen RNG (`OsRng`). |
+   | `hex` | Receipt JSON encodes pubkey/sig/digest in hex. |
+
    Any addition must be justified in the PR and pass rule 4. Do **not** add
-   `tokio`, `reqwest`, `clap`, `chrono`, or `sysinfo` to the default build.
+   `tokio`, `reqwest`, `clap`, `chrono`, `sysinfo`, or `libc` to the default
+   build.
 4. **Supply chain:** commit `Cargo.lock`; `cargo deny check` and `cargo audit`
    must pass in CI (config in `deny.toml`). Deny known vulnerabilities,
    duplicate versions, and non-allowlisted licenses.
@@ -47,7 +60,11 @@ systemd unit and an AppArmor profile.
 7. **Static binary:** target `x86_64-unknown-linux-musl`; one self-contained
    artifact, no runtime library deps.
 8. **Reproducible:** pin the Rust toolchain (`rust-toolchain.toml`), build with
-   `--locked`; identical inputs must yield an identical binary hash.
+   `--locked`. Bit-for-bit reproducibility additionally requires
+   `SOURCE_DATE_EPOCH` set, `RUSTFLAGS="--remap-path-prefix=..."` to strip
+   absolute build paths from debuginfo, and a pinned musl sysroot — see §6.
+   "Reproducible" without those preconditions means deterministic given the
+   same toolchain image, lockfile, and source tree.
 9. **Privacy:** receipts contain billing-necessary metering only. No other
    telemetry. No phoning home in the default build.
 10. **Small, reviewable modules:** one responsibility per file; document each
@@ -57,8 +74,10 @@ systemd unit and an AppArmor profile.
 
 ## 2. Toolchain & system packages
 
-- Rust stable, pinned via `rust-toolchain.toml` (use a recent stable, ≥ 1.80),
-  with the `x86_64-unknown-linux-musl` target added.
+- Rust toolchain pinned via `rust-toolchain.toml` to a **specific minor**
+  (currently `1.96.0`), with the `x86_64-unknown-linux-musl` target added.
+  `channel = "stable"` is not acceptable — it floats and breaks rule 1.8.
+  Bumping the pin is an explicit PR.
 - `cargo-deny` and `cargo-audit` (installed in CI via `cargo install --locked`).
 - `rpmbuild` (package `rpm-build`) for local packaging; OBS for signed releases.
 - `musl-tools` / musl target support for the static build.
@@ -103,23 +122,87 @@ vtessera/
 - **config.rs** — `Config { sample_interval_secs: u64, state_dir: PathBuf,
   key_path: PathBuf, resource_caps: Caps, payout_id: String }`. Reject unknown
   fields (`#[serde(deny_unknown_fields)]`), validate ranges, return typed errors.
+
+  `payout_id` is validated as a **Solana base58 Ed25519 address: 32–44 chars
+  from the Bitcoin/Solana base58 alphabet** (charset + length check). Full
+  decode and on-curve verification are the settlement enclave's job.
+
 - **metrics.rs** — read `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`,
   filesystem stats. Produce `ResourceSample { ts_unix, cpu_pct, mem_used_kb,
   disk_free_kb }`. No external crate; parse text directly. Never write.
-- **receipt.rs** — `Receipt { schema_ver, node_id, window_start, window_end,
-  samples_digest, totals }`. Provide canonical (stable-ordered) bytes for
-  signing. `samples_digest` = SHA-256 over the window's samples.
+
+  **Clock source:** `ts_unix` is wall-clock (`SystemTime::now()` =
+  `CLOCK_REALTIME`). It is subject to NTP corrections including backward
+  jumps. The window-finalize check uses `saturating_sub` so a backward NTP
+  step never closes a window with `window_end < window_start`; the window
+  simply doesn't close until forward progress resumes. `ProtectClock=yes`
+  in the unit prevents the daemon from setting the clock.
+
+- **receipt.rs** — `Receipt { schema_ver, node_id, payout_id, window_start,
+  window_end, samples_digest, totals }`. `samples_digest` = SHA-256 over the
+  window's samples (each sample serialized as `ts_unix(u64) || cpu_pct(f64) ||
+  mem_used_kb(u64) || disk_free_kb(u64)`, all little-endian).
+
+  **`node_id`** is **self-attesting**: hex of `SHA-256(pubkey)[..16]` (32
+  lowercase hex chars). A verifier with the signed receipt's pubkey can
+  recompute it. It is *not* the payout address — keep them separate so an
+  operator can rotate `payout_id` without breaking historical identity.
+
+  **Canonical bytes** for signing (all little-endian):
+
+  ```
+  schema_ver           u16
+  node_id_len          u16
+  node_id              utf-8 bytes
+  payout_id_len        u16
+  payout_id            utf-8 bytes
+  window_start         u64
+  window_end           u64
+  samples_digest       [u8; 32]
+  totals.cpu_pct_avg   f64
+  totals.mem_used_kb_avg   u64
+  totals.disk_free_kb_avg  u64
+  totals.sample_count  u32
+  ```
+
+  The length prefixes are mandatory — they disambiguate the boundary between
+  `node_id` and `payout_id`. Any change to this layout bumps `schema_ver`.
+  Reviewer note: `cpu_pct_avg` is currently `f64` and IEEE 754 corner cases
+  (NaN, ±0.0) would produce different signatures; in practice the value is
+  bounded `[0.0, 100.0]` so this is not exploitable, but if you ever feed
+  user-supplied floats here, switch to a fixed-point u32.
+
 - **sign.rs** — load or generate an Ed25519 keypair at `key_path` (mode 0600).
+  On load, the daemon **refuses to start** if the key file's mode allows any
+  group or world access (`mode & 0o077 != 0`).
   `sign(&Receipt) -> SignedReceipt { receipt, pubkey, sig }`. Key never leaves
   the process; never logged.
+
 - **spool.rs** — write `SignedReceipt` as JSON to `state_dir` with an atomic
-  write (temp + rename). Filenames sortable by time. No deletion logic in v0.
+  write (temp + rename). Filenames sortable by time. No deletion logic in v0
+  — operators are responsible for archiving/rotating the spool; see §9 for
+  the eventual rotation module.
+
 - **submit.rs** — compiled only under `--features submit`. Single outbound
   HTTPS POST via `ureq` with `rustls` (no OpenSSL). Endpoint from config. Must
   be absent from the default build's dependency graph.
-- **main.rs** — parse args by hand (no clap): `--config <path>`, `--once`,
-  `--version`. Load config, init signer, loop: sample → on window boundary,
-  build + sign + spool a receipt → sleep. Handle SIGTERM cleanly.
+
+- **main.rs** — parse args by hand (no clap):
+
+  | Arg | Behavior |
+  | --- | --- |
+  | `--config <path>` | Required. Path to TOML config. |
+  | `--once` | Sample once and exit (does not finalize a window). |
+  | `--version` | Print `vtesserad <version>` to stdout, exit 0. |
+  | `-h`, `--help` | Print usage to stdout, exit 0. |
+  | (unknown) | Print error to stderr, exit 2. |
+
+  Exit codes: `0` = success / `--help` / `--version`; `1` = runtime error
+  (config invalid, key error, IO); `2` = argument parsing error.
+
+  Load config, init signer, derive `node_id` from the signing key's pubkey,
+  loop: sample → on window boundary, build + sign + spool a receipt → sleep.
+  Handle SIGTERM cleanly.
 
 ---
 
@@ -135,6 +218,8 @@ Type=simple
 ExecStart=/usr/bin/vtesserad --config /etc/vtessera/vtessera.toml
 DynamicUser=yes
 StateDirectory=vtessera
+StateDirectoryMode=0700
+UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -158,8 +243,17 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 # Default build opens no sockets:
 RestrictAddressFamilies=AF_UNIX
-# If built with --features submit, change the line above to:
-# RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+# If built with --features submit, set instead:
+#   RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+#   IPAddressDeny=any
+#   IPAddressAllow=<your submission endpoint CIDR>
+#
+# Note: DO NOT set ProcSubset=pid — the daemon reads /proc/meminfo and
+# /proc/stat, which that option hides.
+#
+# Note: DynamicUser=yes randomizes the runtime username. AppArmor profiles
+# pathed by username will not match; use peer/object rules.
 Restart=on-failure
 
 [Install]
@@ -174,8 +268,10 @@ exposure score (aim ≤ 2.0, "OK"/"GOOD").
 ## 6. Build & package commands
 
 ```bash
-# build (static, locked, reproducible)
+# build (static, locked, deterministic when env vars are set)
 rustup target add x86_64-unknown-linux-musl
+export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+export RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=$HOME/.cargo=/cargo"
 cargo build --release --locked --target x86_64-unknown-linux-musl
 
 # checks (must all pass)
@@ -207,15 +303,17 @@ upload the RPM as an artifact. No other language runtimes in the workflow.
 ## 8. Definition of done (acceptance criteria)
 
 - [ ] `#![forbid(unsafe_code)]` present; `cargo build` clean with no warnings.
-- [ ] Default build's dependency tree = only the four allowed crates (+ their
-      transitive deps); `submit` deps absent unless the feature is enabled.
+- [ ] Default build's direct dependencies match the table in §1.3 exactly;
+      `submit` deps (`ureq`) absent unless the feature is enabled.
 - [ ] `cargo deny check` and `cargo audit` pass.
 - [ ] Static musl binary runs, samples `/proc`, and writes signed receipts that
       verify against the embedded public key.
 - [ ] No open sockets in the default build (verify with `ss -lntup`).
 - [ ] `systemd-analyze security vtesserad.service` ≤ 2.0.
 - [ ] RPM installs cleanly on openSUSE; service starts as DynamicUser.
-- [ ] Reproducible: two clean builds produce the same binary SHA-256.
+- [ ] Reproducible: two clean builds **with the same `SOURCE_DATE_EPOCH`,
+      `RUSTFLAGS`, toolchain image, and sysroot** produce the same binary
+      SHA-256.
 - [ ] README documents config, build, install, and how to verify a receipt.
 
 ---
