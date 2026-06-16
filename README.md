@@ -1,12 +1,12 @@
 # Vtessera
 
-An **opt-in compute marketplace client for openSUSE**, shipped as a signed RPM.
+An **opt-in compute marketplace client for GNU/Linux operating systems**, shipped as a signed RPM.
 
 A machine owner who wants to rent out spare compute installs `vtesserad`,
 sets a price, and earns when AI agents (or anyone) run workloads on their box.
 The marketplace settles payments per job and meters real usage.
 
-> **This is not a paywall on openSUSE.** The distro, its mirrors, and its
+> **This is not a paywall on distributions.** The distro, its mirrors, and its
 > packages stay free. This is an *optional* package that only people who
 > choose to sell compute install.
 
