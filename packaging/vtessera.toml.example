@@ -1,0 +1,27 @@
+# Vtessera metering daemon configuration
+#
+# Copy this to /etc/vtessera/vtessera.toml and adjust.
+
+# How often to sample resource usage (seconds, 1–3600)
+sample_interval_secs = 60
+
+# Directory for storing signed usage receipts
+state_dir = "/var/lib/vtessera"
+
+# Path to the Ed25519 identity key (auto-generated if missing)
+key_path = "/etc/vtessera/identity.key"
+
+# Operator payout identifier (on-chain address or account string)
+payout_id = ""
+
+# Number of samples per receipt window (optional, default 60)
+# window_size = 60
+
+# Resource capacity caps (optional, used for pricing hints)
+[resource_caps]
+max_cpus = 8
+max_mem_kb = 16777216   # 16 GB
+max_disk_kb = 524288000 # 500 GB
+
+# Submit endpoint — only used when built with --features submit
+# submit_endpoint = "https://api.vtessera.example/receipts"

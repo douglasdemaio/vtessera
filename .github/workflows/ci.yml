@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - name: Deny
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
+
+      - name: Build (static musl)
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Upload RPM
+        run: |
+          # Build RPM (requires rpm-build installed)
+          sudo apt-get update && sudo apt-get install -y rpm-build
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          mkdir -p dist
+          # Build a tarball for the RPM build
+          tar -cJf dist/vtessera-0.1.0.tar.xz \
+            -C target/x86_64-unknown-linux-musl/release vtesserad \
+            packaging/
+          rpmbuild -tb dist/vtessera-0.1.0.tar.xz
+          cp ~/rpmbuild/RPMS/x86_64/vtessera-*.rpm dist/
+        if: github.ref == 'refs/heads/main'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vtessera-rpm
+          path: dist/*.rpm
+        if: github.ref == 'refs/heads/main'

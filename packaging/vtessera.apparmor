@@ -1,0 +1,29 @@
+# vtesserad AppArmor profile
+# v0: metering daemon — reads /proc, writes signed receipts to state dir.
+
+#include <tunables/global>
+
+/usr/bin/vtesserad {
+  #include <abstractions/base>
+  #include <abstractions/opensuse>
+
+  # State directory (DynamicUser)
+  /var/lib/vtessera/** rw,
+
+  # Config
+  /etc/vtessera/vtessera.toml r,
+
+  # Key material
+  /etc/vtessera/identity.key rw,
+
+  # Proc filesystem — read-only sampling
+  /proc/stat r,
+  /proc/meminfo r,
+  /proc/loadavg r,
+  /proc/uptime r,
+
+  # Deny everything else
+  deny /proc/** w,
+  deny /sys/** rw,
+  deny /dev/** rw,
+}
