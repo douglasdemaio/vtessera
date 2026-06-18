@@ -19,7 +19,6 @@ allow = [
     "Zlib",
     "OpenSSL",
 ]
-deny = []
 copyleft = "warn"
 allow-osi-fsf-free = "both"
 default = "deny"
