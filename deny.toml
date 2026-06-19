@@ -21,7 +21,6 @@ allow = [
 ]
 copyleft = "warn"
 allow-osi-fsf-free = "both"
-default = "deny"
 confidence-threshold = 0.8
 
 [bans]
