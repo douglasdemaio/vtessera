@@ -52,7 +52,7 @@ cargo deny check
 
 ```bash
 mkdir -p /etc/vtessera
-cp packaging/vtessera.toml.example /etc/vtessera/vtessera.toml
+cd packaging/vtessera.toml.example /etc/vtessera/vtessera.toml
 # Edit payout_id in the config
 ```
 
@@ -62,7 +62,15 @@ cp packaging/vtessera.toml.example /etc/vtessera/vtessera.toml
 ./vtesserad --config /etc/vtessera/vtessera.toml --once
 ```
 
-3. Run as a daemon:
+3. Install and build:
+
+```bash
+sudo apt-get (or zypper) install rustup
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --locked --target x86_64-unknown-linux-musl
+```
+
+4. Run as a daemon:
 
 ```bash
 cp packaging/vtesserad.service /etc/systemd/system/
