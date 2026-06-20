@@ -282,7 +282,7 @@ cargo audit
 cargo deny check
 
 # package (local)
-rpmbuild -bb packaging/vtessera.spec   # or build via openSUSE OBS for signing
+rpmbuild -bb packaging/vtessera.spec   # or build via an OBS instance for signed releases
 ```
 
 The RPM installs: the binary to `/usr/bin/vtesserad`, the unit to
@@ -310,7 +310,7 @@ upload the RPM as an artifact. No other language runtimes in the workflow.
       verify against the embedded public key.
 - [ ] No open sockets in the default build (verify with `ss -lntup`).
 - [ ] `systemd-analyze security vtesserad.service` ≤ 2.0.
-- [ ] RPM installs cleanly on openSUSE; service starts as DynamicUser.
+- [ ] RPM installs cleanly on a current RPM-based GNU/Linux distribution; service starts as DynamicUser.
 - [ ] Reproducible: two clean builds **with the same `SOURCE_DATE_EPOCH`,
       `RUSTFLAGS`, toolchain image, and sysroot** produce the same binary
       SHA-256.

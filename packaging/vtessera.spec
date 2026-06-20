@@ -13,7 +13,7 @@
 Name:           vtessera
 Version:        0.1.0
 Release:        0
-Summary:        Opt-in compute marketplace metering daemon for openSUSE
+Summary:        Opt-in compute marketplace metering daemon
 License:        Apache-2.0
 URL:            https://github.com/douglasdemaio/vtessera
 Source0:        vtessera-%{version}.tar.xz
@@ -24,7 +24,7 @@ BuildRequires:  musl-tools
 Requires:       systemd
 
 %description
-Vtessera is a metering daemon for the openSUSE compute marketplace.
+Vtessera is a metering daemon for the Vtessera compute marketplace.
 It samples local resource usage from /proc, produces signed usage
 receipts (Ed25519), and writes them to a state directory.
 

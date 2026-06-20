@@ -1,13 +1,13 @@
-# cargo-deny configuration
+# cargo-deny configuration (schema v2)
 
 [advisories]
-vulnerability = "deny"
+version = 2
 unmaintained = "workspace"
-unsound = "workspace"
 yanked = "deny"
 ignore = []
 
 [licenses]
+version = 2
 allow = [
     "Apache-2.0",
     "MIT",
@@ -19,8 +19,6 @@ allow = [
     "Zlib",
     "OpenSSL",
 ]
-copyleft = "warn"
-allow-osi-fsf-free = "both"
 confidence-threshold = 0.8
 
 [bans]

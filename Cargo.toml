@@ -2,7 +2,7 @@
 name = "vtessera"
 version = "0.1.0"
 edition = "2021"
-description = "Opt-in compute marketplace client for openSUSE — metering daemon"
+description = "Opt-in compute marketplace client for GNU/Linux — metering daemon"
 license = "Apache-2.0"
 repository = "https://github.com/douglasdemaio/vtessera"
 

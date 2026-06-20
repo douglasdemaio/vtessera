@@ -1,7 +1,7 @@
 # Vtessera Design
 
 This design specification defines the Vtessera compute marketplace client for
-openSUSE.
+GNU/Linux.
 
 See the authoritative design documents in the repository root and packaging:
 
