@@ -287,6 +287,10 @@ The daemon refuses to start with an empty or malformed value.
 - **`ROADMAP.md`** — Modules 0–5, build order, and milestones for the
   full HNT/AI-agent stack. **Start here** if you're trying to understand
   where Vtessera is going.
+- **`MAINNET-CHECKLIST.md`** — Per-step checklist of what must hold
+  before the escrow program can be deployed to Solana mainnet. The
+  devnet program is live; mainnet is intentionally deferred behind
+  this list.
 - **`BUILD.md`** — Authoritative v0 build specification (scope, hard
   rules, module contracts, systemd hardening, CI, definition of done).
   v0 must not widen beyond this; new modules live in separate crates.

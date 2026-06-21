@@ -441,9 +441,13 @@ production; only the seller's leg changes when the swap goes in.
 
 ## Mainnet criteria (DEFERRED — do not deploy until met)
 
-Devnet works. Mainnet doesn't follow automatically. Before any of the
-DRAFT fee values harden and the program is deployed to mainnet-beta,
-**all** of the following must hold:
+Devnet works. Mainnet doesn't follow automatically. Each gating item
+below is expanded into concrete numbered steps in
+[`MAINNET-CHECKLIST.md`](MAINNET-CHECKLIST.md) — that file is the
+authoritative tracker (this section is the summary).
+
+Before any of the DRAFT fee values harden and the program is deployed
+to mainnet-beta, **all** of the following must hold:
 
 - [ ] **Jupiter swap + Pyth guard wired and tested.** The current stub
   pays the seller in stablecoin; production pays in HNT. Going to

@@ -105,6 +105,27 @@ fn anchor_disc(ix_name: &str) -> [u8; 8] {
     out
 }
 
+fn parse_cli_seller() -> Option<Pubkey> {
+    // Simple positional + flag parsing — no clap dep. Accepts either:
+    //   vtessera-devnet-demo <SELLER_PUBKEY>
+    //   vtessera-devnet-demo --seller <SELLER_PUBKEY>
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--seller" => {
+                if let Some(pk) = args.next() {
+                    return Some(Pubkey::from_str(&pk).expect("invalid --seller pubkey"));
+                }
+            }
+            other if !other.starts_with("--") => {
+                return Some(Pubkey::from_str(other).expect("invalid positional seller pubkey"));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let payer_path: PathBuf = env::var("VTESSERA_PAYER")
         .map(PathBuf::from)
@@ -115,6 +136,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let payer = read_keypair_file(&payer_path)
         .map_err(|e| format!("read payer {}: {e}", payer_path.display()))?;
     println!("payer (buyer + mint authority): {}", payer.pubkey());
+
+    // Optional seller pubkey from CLI. When provided, the seller's earned
+    // slice lands at this address's ATA for the test mint — so an external
+    // observer can verify on Solana Explorer that funds arrived. When
+    // absent, a fresh keypair is generated (the original behaviour).
+    let cli_seller_pubkey = parse_cli_seller();
 
     let program_id = Pubkey::from_str(PROGRAM_ID_STR)?;
     let fee_wallet = Pubkey::from_str(FEE_WALLET_STR)?;
@@ -176,17 +203,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     send_tx(&rpc, &ixs, &[&payer], &payer, "create buyer ATA + mint 10")?;
 
-    // --- 3. Fresh seller keypair + their ATA ---------------------------
-    let seller = Keypair::new();
-    let seller_ata = get_associated_token_address(&seller.pubkey(), &mint_pk);
-    println!("seller: {} ATA: {seller_ata}", seller.pubkey());
+    // --- 3. Seller — either the CLI-provided pubkey or a fresh keypair --
+    // The program never needs the seller to sign anything (settlement
+    // signs finalize_pro_rata; the seller just receives funds), so a
+    // pubkey-only seller works end-to-end.
+    let seller_pubkey = cli_seller_pubkey.unwrap_or_else(|| Keypair::new().pubkey());
+    let seller_ata = get_associated_token_address(&seller_pubkey, &mint_pk);
+    println!(
+        "seller pubkey: {seller_pubkey}  ATA: {seller_ata}{}",
+        if cli_seller_pubkey.is_some() {
+            "  (from CLI)"
+        } else {
+            "  (fresh keypair)"
+        }
+    );
     let create_seller_ata = create_associated_token_account(
         &payer.pubkey(),
-        &seller.pubkey(),
+        &seller_pubkey,
         &mint_pk,
         &spl_token::id(),
     );
-    send_tx(&rpc, &[create_seller_ata], &[&payer], &payer, "create seller ATA")?;
+    send_tx(
+        &rpc,
+        &[create_seller_ata],
+        &[&payer],
+        &payer,
+        "create seller ATA",
+    )?;
 
     // --- 4. Derive contract PDA + escrow ATA ---------------------------
     let job_id: [u8; 32] = {
@@ -243,7 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         program_id,
         accounts: vec![
             AccountMeta::new(buyer.pubkey(), true),
-            AccountMeta::new_readonly(seller.pubkey(), false),
+            AccountMeta::new_readonly(seller_pubkey, false),
             AccountMeta::new_readonly(mint_pk, false),
             AccountMeta::new(buyer_ata, false),
             AccountMeta::new(escrow_ata, false),
