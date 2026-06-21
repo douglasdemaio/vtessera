@@ -24,6 +24,13 @@ pub struct Config {
     pub submit_endpoint: Option<String>,
     #[serde(default)]
     pub window_size: Option<u64>,
+    /// Cap on the number of `receipt_*.json` files kept in `state_dir`.
+    /// When set, the daemon prunes the oldest files after each write so
+    /// the spool can't grow unbounded. `None` (default) means no cap.
+    /// See ROADMAP.md §5 — long-running deployments should always set
+    /// this.
+    #[serde(default)]
+    pub max_spool_files: Option<usize>,
 }
 
 impl Config {

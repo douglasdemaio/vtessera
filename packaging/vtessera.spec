@@ -8,7 +8,10 @@
 #
 
 %define rust_version 1.80
-%define cargo_build_flags --release --locked --target x86_64-unknown-linux-musl
+# vtesserad is a workspace member. -p pins the build to just that crate so the
+# RPM doesn't pull in module crates (executor/offer/node-api/settlement) that
+# may carry deps unsuitable for a static-musl audit surface.
+%define cargo_build_flags -p vtesserad --release --locked --target x86_64-unknown-linux-musl
 
 Name:           vtessera
 Version:        0.1.0

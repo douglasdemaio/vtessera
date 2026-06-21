@@ -89,31 +89,41 @@ systemd unit and an AppArmor profile.
 
 ```
 vtessera/
-├── README.md                  # what it is + build/run quickstart
-├── LICENSE                    # Apache-2.0 (recommended) or MIT
-├── rust-toolchain.toml        # pin stable + musl target
-├── Cargo.toml                 # crate metadata; [features] submit = [...]
-├── Cargo.lock                 # COMMITTED
-├── deny.toml                  # cargo-deny policy (licenses, advisories, bans)
+├── README.md                       # what it is + build/run quickstart
+├── ROADMAP.md                      # modules 1–5 (HNT/AI-agent direction)
+├── LICENSE                         # Apache-2.0 (recommended) or MIT
+├── rust-toolchain.toml             # pin stable + musl target
+├── Cargo.toml                      # workspace root (members = crates/vtesserad, ...)
+├── Cargo.lock                      # COMMITTED
+├── deny.toml                       # cargo-deny policy (licenses, advisories, bans)
 ├── .github/
 │   └── workflows/
-│       └── ci.yml             # fmt, clippy, test, audit, deny, build, rpm
-├── src/
-│   ├── main.rs                # #![forbid(unsafe_code)]; args, config, run loop
-│   ├── config.rs              # load + validate TOML; typed Config struct
-│   ├── metrics.rs             # read /proc, /sys; ResourceSample struct
-│   ├── receipt.rs             # Receipt struct + canonical serialization
-│   ├── sign.rs                # Ed25519 keygen/load + sign(receipt) -> sig
-│   ├── spool.rs               # write signed receipt JSON to state dir
-│   └── submit.rs              # feature="submit" ONLY: outbound POST (ureq+rustls)
+│       └── ci.yml                  # fmt, clippy, test, audit, deny, build, rpm
+├── crates/
+│   └── vtesserad/
+│       ├── Cargo.toml              # crate metadata; [features] submit = [...]
+│       └── src/
+│           ├── main.rs             # #![forbid(unsafe_code)]; args, config, run loop
+│           ├── config.rs           # load + validate TOML; typed Config struct
+│           ├── metrics.rs          # read /proc, /sys; ResourceSample struct
+│           ├── receipt.rs          # Receipt struct + canonical serialization
+│           ├── sign.rs             # Ed25519 keygen/load + sign(receipt) -> sig
+│           ├── spool.rs            # write signed receipt JSON to state dir
+│           └── submit.rs           # feature="submit" ONLY: outbound POST (ureq+rustls)
 ├── packaging/
-│   ├── vtessera.spec           # RPM spec (BuildRequires: rust, cargo)
-│   ├── vtesserad.service       # hardened systemd unit (see §5)
-│   ├── vtessera.apparmor       # AppArmor profile
-│   └── vtessera.toml.example    # documented example config
+│   ├── vtessera.spec               # RPM spec (BuildRequires: rust, cargo)
+│   ├── vtesserad.service           # hardened systemd unit (see §5)
+│   ├── vtessera.apparmor           # AppArmor profile
+│   └── vtessera.toml.example       # documented example config
 └── docs/
-    └── DESIGN.md              # link back to TOKEN-DESIGN.md / SECURITY.md
+    └── DESIGN.md                   # link back to ROADMAP.md / SECURITY.md
 ```
+
+The workspace also hosts the post-v0 modules (`crates/executor`,
+`crates/offer`, `crates/node-api`, `crates/settlement`, and the Anchor
+program under `programs/vtessera-escrow`) as they come online. Those
+crates carry their own dependency budgets — v0's tight surface
+(§1.3) is enforced on `crates/vtesserad` only.
 
 ---
 
@@ -318,8 +328,30 @@ upload the RPM as an artifact. No other language runtimes in the workflow.
 
 ---
 
-## 9. Later modules (separate repos/crates; not now)
+## 9. Later modules (separate workspace crates; not v0)
 
-Job isolation (Kata/Firecracker) · settlement enclave (SEV-SNP/TDX) · Solana
-token + EURC/BTC reserve plumbing per `TOKEN-DESIGN.md`. Each is added behind
-its own crate and review; none expand the v0 daemon's attack surface.
+Tracked in **`ROADMAP.md`**, not here. Summary:
+
+- **Module 1 — Job isolation + accelerators** (`crates/executor`): Kata
+  Containers on Cloud Hypervisor, VFIO GPU passthrough, MIG/vGPU, DCGM
+  per-job metering. Extends v0's receipt with GPU-seconds, VRAM-GB-hours,
+  MIG profile.
+- **Module 2 — Discovery + node API** (`crates/offer`, `crates/node-api`):
+  signed machine-readable offers exposed via MCP; x402 `HTTP 402` payment
+  flow for paid jobs; direct `HTTP 200` for `free` jobs. Inbound network
+  is feature-gated and stays off in v0's RPM.
+- **Module 3 — Settlement + attestation** (`crates/settlement`): verify
+  Ed25519 receipts, aggregate per-device usage, compute completion
+  fraction `f`. Non-TEE first; SEV-SNP/TDX after.
+- **Module 4 — Escrow + swap** (`programs/vtessera-escrow`): one Solana
+  Anchor program. Buyer pays EURC/USDC into a program-owned PDA, flat
+  SOL fee transferred at payment, on finalize the program splits by `f`:
+  earned slice swapped to HNT (Jupiter, Pyth-guarded) minus a burn, paid
+  to the seller; unearned slice refunded to the buyer in the original
+  stablecoin. **Sellers earn HNT — there is no Vtessera token.**
+- **Module 5 — Hardening + ops**: spool rotation, abuse handling,
+  re-running `systemd-analyze security` on every new privileged
+  component.
+
+Each module lands as its own crate with its own review and CI stanza.
+None expands `crates/vtesserad`'s attack surface.

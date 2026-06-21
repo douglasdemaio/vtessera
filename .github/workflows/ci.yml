@@ -29,17 +29,42 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
-      - name: Clippy (default features)
-        run: cargo clippy --all-targets -- -D warnings
+      # vtesserad (v0) — the audited metering daemon. Its dep budget is
+      # enforced via Cargo.toml (BUILD.md §1.3); CI gates the surface.
+      - name: Clippy vtesserad (default features)
+        run: cargo clippy -p vtesserad --all-targets -- -D warnings
 
-      - name: Clippy (submit feature)
-        run: cargo clippy --all-targets --features submit -- -D warnings
+      - name: Clippy vtesserad (submit feature)
+        run: cargo clippy -p vtesserad --all-targets --features submit -- -D warnings
 
-      - name: Test (default features)
-        run: cargo test --locked
+      - name: Test vtesserad (default features)
+        run: cargo test -p vtesserad --locked
 
-      - name: Test (submit feature)
-        run: cargo test --locked --features submit
+      - name: Test vtesserad (submit feature)
+        run: cargo test -p vtesserad --locked --features submit
+
+      # Module crates (ROADMAP.md §1–§3). Each ships behind its own
+      # clippy + test stanza so a regression in (e.g.) the offer crate
+      # doesn't masquerade as a vtesserad failure in CI logs.
+      - name: Clippy module crates
+        run: |
+          cargo clippy -p vtessera-executor --all-targets -- -D warnings
+          cargo clippy -p vtessera-offer --all-targets -- -D warnings
+          cargo clippy -p vtessera-node-api --all-targets -- -D warnings
+          cargo clippy -p vtessera-settlement --all-targets -- -D warnings
+
+      - name: Test module crates
+        run: |
+          cargo test -p vtessera-executor --locked
+          cargo test -p vtessera-offer --locked
+          cargo test -p vtessera-node-api --locked
+          cargo test -p vtessera-settlement --locked
+
+      # Anchor escrow program (Module 4) lives under programs/ and builds
+      # with the Solana BPF toolchain — `anchor build`. It's excluded
+      # from the host workspace, so the host CI doesn't try to compile
+      # it; a follow-up CI job hosts the Anchor toolchain when the
+      # program is wired for devnet deploy.
 
       - name: Audit
         run: |
@@ -51,11 +76,11 @@ jobs:
           cargo install cargo-deny --locked
           cargo deny check
 
-      - name: Build (static musl, default features)
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Build vtesserad (static musl, default features)
+        run: cargo build -p vtesserad --release --locked --target x86_64-unknown-linux-musl
 
-      - name: Build (static musl, submit feature)
-        run: cargo build --release --locked --features submit --target x86_64-unknown-linux-musl
+      - name: Build vtesserad (static musl, submit feature)
+        run: cargo build -p vtesserad --release --locked --features submit --target x86_64-unknown-linux-musl
 
       - name: systemd-analyze security (best-effort)
         run: |

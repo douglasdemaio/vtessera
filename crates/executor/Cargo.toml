@@ -1,0 +1,18 @@
+[package]
+name = "vtessera-executor"
+description = "Vtessera Module 1 — job execution + accelerator passthrough"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "vtessera_executor"
+path = "src/lib.rs"
+
+[dependencies]
+# Pinned via the workspace. The executor crate's threat model is documented in
+# ROADMAP.md §1; production backends (Kata + Cloud Hypervisor + VFIO + DCGM)
+# add their own deps behind cargo features as they land.
+serde = { workspace = true }
+hex = { workspace = true }

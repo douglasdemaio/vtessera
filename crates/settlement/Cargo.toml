@@ -1,0 +1,19 @@
+[package]
+name = "vtessera-settlement"
+description = "Vtessera Module 3 — receipt verification + completion-fraction settlement"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "vtessera_settlement"
+path = "src/lib.rs"
+
+[dependencies]
+# Settlement implements the receipt spec (BUILD.md §4) independently of
+# the vtesserad binary so the verifier can be deployed without dragging
+# the daemon's CLI / file-IO surface along.
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

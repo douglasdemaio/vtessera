@@ -1,0 +1,65 @@
+# vtessera-escrow — Anchor program (Module 4)
+
+The escrow leg of Vtessera. One on-chain program holds buyer
+stablecoin in a program-owned PDA, transfers a flat SOL fee to the
+protocol fee wallet, then on finalize splits the escrow by the
+completion fraction `f` produced by the settlement crate (Module 3):
+
+- `f × price` → Jupiter swap to HNT → burn slice → seller.
+- `(1 − f) × price` → refund to buyer in the original stablecoin.
+
+**No human ever holds the funds.** See `ROADMAP.md` §4.
+
+## DRAFT constants
+
+This program ships with planning constants flagged DRAFT in source:
+
+| Symbol | Current draft | Final by |
+| ------ | ------------- | -------- |
+| `DRAFT_FEE_LAMPORTS` | `100_000` (0.0001 SOL) | First mainnet deploy |
+| `DRAFT_FEE_WALLET_TODO` | `9iBQEn9yMbKVhJKEpMpPByS6pjydPmQDGaznMaCvGkzD` | First mainnet deploy |
+| `DRAFT_MAX_SLIPPAGE_BPS` | `50` (0.5%) | After devnet swap testing |
+| `DRAFT_BURN_BPS` | `100` (1.00%) | After devnet swap testing |
+
+Search the source for `DRAFT ` to find every site that pins a planning
+value. Final values land only once the full flow has been exercised on
+devnet.
+
+## Why this crate is outside the host workspace
+
+Anchor programs build under the **Solana BPF toolchain**
+(`anchor build` / `cargo build-sbf`), not the host's Rust toolchain.
+Including this crate in the workspace would force every plain
+`cargo build` to drag in the BPF dep tree and a pinned Solana version.
+The root `Cargo.toml` therefore lists this crate in `workspace.exclude`,
+and the v0 daemon's CI doesn't touch it.
+
+To build:
+
+```
+# Install Anchor: https://www.anchor-lang.com/docs/installation
+anchor build
+```
+
+## Program ID
+
+`VtsraEscrow11111111111111111111111111111111` is a placeholder. Real
+program ID lands at first deploy.
+
+## Forked from
+
+[`douglasdemaio/forkit`](https://github.com/douglasdemaio/forkit) — the
+recommended escrow starting point for Vtessera. This skeleton diverges
+on the pro-rata release path and the Jupiter swap CPI; the basic
+"deposit → release" structure stays close to forkit.
+
+## Status
+
+**Skeleton.** Compiles under Anchor 0.30; Jupiter swap, Pyth guard, and
+the actual HNT payout to seller are TODO stubs documented inline in
+`src/lib.rs`. Nothing here is deployed. Nothing here is final.
+
+Once the program is deployed and the full agent → 402 → escrow → swap →
+seller flow has run on devnet, the DRAFT constants get replaced with
+their confirmed values and the upgrade authority is set to a public
+multisig / timelock per `ROADMAP.md` §4d.

@@ -207,6 +207,18 @@ fn finalize_window(
         hex::encode(samples_digest)
     );
 
+    // Spool rotation (ROADMAP.md §5). v0 grew receipts forever; production
+    // deployments cap retention via `max_spool_files`. Rotation failures
+    // are logged but never abort the run — the daemon's primary job is to
+    // keep producing receipts.
+    if let Some(keep) = cfg.max_spool_files {
+        match spool::rotate(&cfg.state_dir, keep) {
+            Ok(removed) if removed > 0 => eprintln!("spool: pruned {removed} old receipt(s)"),
+            Ok(_) => {}
+            Err(e) => eprintln!("warning: spool rotation failed: {e}"),
+        }
+    }
+
     #[cfg(feature = "submit")]
     if let Some(ref endpoint) = cfg.submit_endpoint {
         match submit::submit_receipt(endpoint, &signed) {

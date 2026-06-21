@@ -1,0 +1,23 @@
+[package]
+name = "vtessera-node-api"
+description = "Vtessera Module 2 — node HTTP surface (x402 + MCP), pure dispatch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "vtessera_node_api"
+path = "src/lib.rs"
+
+[dependencies]
+# Pure dispatch only. No socket layer here — that lives in a thin binary
+# crate gated behind a Cargo feature so v0's no-inbound-network rule
+# survives by default. See ROADMAP.md §2c.
+vtessera-offer = { path = "../offer" }
+hex = { workspace = true }
+
+[dev-dependencies]
+# Test-only: build a deterministic SigningKey to construct test offers.
+# Production callers receive a SignedOffer they didn't have to sign.
+ed25519-dalek = { workspace = true }

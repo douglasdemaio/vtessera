@@ -20,6 +20,13 @@ payout_id = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
 # Number of samples per receipt window (optional, default 60)
 # window_size = 60
 
+# Cap on retained receipt files in `state_dir`. Unset means unlimited
+# (the daemon never deletes anything — v0 default). For long-running
+# deployments set this so the spool can't grow without bound. The
+# rotator deletes only files matching `receipt_*.json`; anything else
+# in the directory is left alone.
+# max_spool_files = 10000
+
 # Resource capacity caps (optional, used for pricing hints)
 [resource_caps]
 max_cpus = 8

@@ -1,30 +1,51 @@
-[package]
-name = "vtessera"
+# Vtessera workspace.
+#
+# Layout (see ROADMAP.md for module semantics):
+#
+#   crates/vtesserad   v0 metering daemon (the original, unchanged audit surface)
+#   crates/receipt     receipt types + canonical serialization + Ed25519 sign/verify
+#   crates/executor    Module 1 — job execution + accelerator passthrough
+#   crates/offer       Module 2 — signed machine-readable offers (MCP-shaped)
+#   crates/node-api    Module 2 — node HTTP surface (x402 / MCP), feature-gated
+#   crates/settlement  Module 3 — receipt verification + completion-fraction
+#   programs/vtessera-escrow  Module 4 — Solana Anchor escrow program
+#
+# The v0 daemon's tight dependency budget (BUILD.md §1.3) is enforced per-crate,
+# not workspace-wide. New crates carry their own deps. The RPM build only ships
+# `vtesserad`; everything else is built only when explicitly selected with -p.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/vtesserad",
+    "crates/executor",
+    "crates/offer",
+    "crates/node-api",
+    "crates/settlement",
+]
+# Anchor programs build under their own toolchain (`anchor build` / `cargo +solana`)
+# and are excluded from the host workspace so a plain `cargo build` doesn't drag
+# in the Solana BPF toolchain.
+exclude = [
+    "programs/vtessera-escrow",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "Opt-in compute marketplace client for GNU/Linux — metering daemon"
 license = "Apache-2.0"
 repository = "https://github.com/douglasdemaio/vtessera"
 
-[[bin]]
-name = "vtesserad"
-path = "src/main.rs"
-
-[features]
-default = []
-submit = ["ureq"]
-
-[dependencies]
-# Default-build crates. Additions require justification in PR per BUILD.md §1.3.
-serde = { version = "1", features = ["derive"] }            # config: derive(Deserialize)
-toml = "0.8"                                                 # config: TOML loader
-ed25519-dalek = { version = "2", features = ["rand_core"] }  # signing
-sha2 = "0.10"                                                # SHA-256 over samples
-rand = "0.8"                                                 # ed25519-dalek keygen RNG
-hex = "0.4"                                                  # hex encoding for receipt JSON
-
-# submit feature only
-ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
+[workspace.dependencies]
+# Shared crates — pin once here so v0's dep budget (BUILD.md §1.3) and the new
+# crates can't drift independently.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [profile.release]
 opt-level = 2

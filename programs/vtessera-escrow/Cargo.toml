@@ -1,0 +1,31 @@
+[package]
+name = "vtessera-escrow"
+description = "Vtessera Module 4 — non-custodial escrow + stablecoin→HNT swap (Anchor program)"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/douglasdemaio/vtessera"
+
+# This crate is intentionally EXCLUDED from the host Cargo workspace
+# (see /home/douglas/vtessera/Cargo.toml). Solana BPF programs build
+# under their own toolchain — `anchor build` or `cargo build-sbf` —
+# and trying to compile them with the host toolchain pulls in
+# incompatible deps.
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "vtessera_escrow"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+# Version pin lands when the toolchain is actually wired. Anchor 0.30 is
+# the current stable line at time of writing; the program is small enough
+# to track new majors without churn.
+anchor-lang = "0.30"
+anchor-spl = "0.30"

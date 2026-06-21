@@ -1,28 +1,100 @@
 # Vtessera
 
-An **opt-in compute marketplace client for GNU/Linux operating systems**, shipped as a signed RPM.
+**AI-agent compute for the HNT ecosystem.** An opt-in layer for GNU/Linux
+machine owners to rent out CPU and GPU capacity to AI workloads, with
+sellers settling in **HNT** and buyers (AI agents) paying in **EURC or
+USDC**. There is **no Vtessera token** — the protocol is technology that
+plugs into the existing Helium / HNT economy.
 
-A machine owner who wants to rent out spare compute installs `vtesserad`,
-sets a price, and earns when AI agents (or anyone) run workloads on their box.
-The marketplace settles payments per job and meters real usage.
+> **Status.** v0 (`vtesserad`) is a read-only metering daemon: it samples
+> `/proc`, writes signed Ed25519 receipts to a state directory, opens no
+> sockets, and runs no third-party code. The compute-execution, discovery,
+> settlement, and escrow layers described below are in active build under
+> separate workspace crates (see `ROADMAP.md`).
 
-> **This is not a paywall on distributions.** The distro, its mirrors, and its
-> packages stay free. This is an *optional* package that only people who
-> choose to sell compute install.
+## What Vtessera is
 
-## v0 — metering daemon
+- **Technology, not a token.** No mint, no reserve, no DAO, no treasury,
+  no custodian. Sellers earn HNT directly through on-chain settlement.
+- **Agent-native.** The buyer is software. Discovery, contracting, and
+  payment happen machine-to-machine — no signups, no API keys, no
+  dashboards. Sellers advertise their machine to other AIs through
+  **MCP**-shaped resources, and paid endpoints negotiate via **x402**
+  (`HTTP 402 Payment Required`).
+- **Free or paid, the seller decides.** A node can serve compute for
+  **free** (no transaction, no escrow, no fee — it just runs the job) or
+  charge in EURC/USDC. The choice is a single flag in the seller's
+  config.
+- **Non-custodial settlement.** When a job is paid, buyer funds enter a
+  program-owned escrow PDA on Solana. They leave only by on-chain rules:
+  the seller's earned slice is swapped to HNT (Jupiter, Pyth-guarded) and
+  paid out; the unearned slice is refunded to the buyer in the original
+  stablecoin. **No human ever holds the funds.**
 
-The v0 binary (`vtesserad`) samples local resource usage from `/proc`,
-produces **signed usage receipts** (Ed25519), and writes them to a state
-directory. No inbound network listener. Runs unprivileged (DynamicUser).
+## How a job flows
 
-### What v0 does NOT do (later phases)
+```
+agent finds node      ──▶  via MCP (signed offer: GPU, VRAM, price OR free)
+agent contracts node  ──▶  job contract; price OR free
+   ↓
+ free path  ─▶  HTTP 200, job runs, no transaction
+ paid path  ─▶  HTTP 402 (x402) → agent signs stablecoin payment → retries
 
-- Execute third-party workloads (Kata/Firecracker)
-- Settle payments or interact with any blockchain
-- Listen on any port
+paid path on confirmation:
+   buyer EURC/USDC  ─▶  escrow PDA (program-owned, no human withdraw)
+   flat fee         ─▶  protocol fee address (DRAFT, see below)
+   job runs         ─▶  per-job signed receipts (Ed25519, vtesserad)
+   settlement       ─▶  completion fraction f ∈ [0, 1]
+   on finalize:
+      f × price     ─▶  swap to HNT (Jupiter / Pyth guard) → burn slice → SELLER (HNT)
+      (1−f) × price ─▶  refund BUYER in original stablecoin
+```
 
-## Prerequisites
+## Repository layout (Cargo workspace)
+
+```
+vtessera/
+├── README.md                       # this file
+├── ROADMAP.md                      # modules 1–5, build order, milestones
+├── BUILD.md                        # v0 daemon's authoritative build spec
+├── LICENSE                         # Apache-2.0
+├── Cargo.toml                      # workspace root
+├── rust-toolchain.toml             # pinned Rust toolchain + musl target
+├── deny.toml                       # cargo-deny policy
+├── crates/
+│   └── vtesserad/                  # v0 metering daemon (this README's quickstart)
+│       ├── Cargo.toml
+│       └── src/                    # main, config, metrics, receipt, sign, spool, submit
+├── programs/
+│   └── vtessera-escrow/            # (planned) Solana Anchor escrow program — Module 4
+├── packaging/                      # RPM spec, systemd unit, AppArmor profile, example config
+├── docs/
+│   └── DESIGN.md                   # design index
+└── .github/workflows/ci.yml
+```
+
+New module crates (`executor`, `offer`, `node-api`, `settlement`) land under
+`crates/` as they come online; see `ROADMAP.md` for status.
+
+## Where Vtessera fits in the HNT ecosystem
+
+Helium's HNT is the protocol's settlement asset. Every **paid** Vtessera job
+results in an on-market HNT buy (Jupiter swap from the seller's earned
+stablecoin) and a small burn, then HNT to the seller. Free jobs don't touch
+HNT, an oracle, or any chain. The protocol consumes the existing HNT mint,
+on-chain Pyth feeds, and Jupiter routing — it adds an escrow program and a
+discovery layer; nothing else.
+
+## Currencies
+
+- **Buyer pays:** EURC (default — ECB-anchored price stability) or USDC.
+- **Seller earns:** HNT.
+- **Protocol fee:** flat SOL fee. **DRAFT** until the escrow program is
+  deployed and operating end-to-end — both the wallet address and the
+  amount are subject to change before mainnet. See `ROADMAP.md` §0 for the
+  current draft values.
+
+## Prerequisites (v0 daemon)
 
 You need a Rust toolchain. The Rust version and (optionally) the musl
 target are pinned by `rust-toolchain.toml` and installed automatically
@@ -44,14 +116,14 @@ For the static / RPM build path you also need musl. Package names:
 | Debian / Ubuntu            | `sudo apt install musl-tools`         |
 
 You can skip musl entirely if you only want a local glibc build for
-testing — see "Build (quick, glibc)" below.
+testing.
 
 ## Build
 
 ### Build (quick, glibc) — for local testing
 
 ```bash
-cargo build --release
+cargo build -p vtesserad --release
 ```
 
 Binary lands at `target/release/vtesserad`.
@@ -59,35 +131,34 @@ Binary lands at `target/release/vtesserad`.
 ### Build (static musl) — for production / RPM
 
 ```bash
-cargo build --release --locked --target x86_64-unknown-linux-musl
+cargo build -p vtesserad --release --locked --target x86_64-unknown-linux-musl
 ```
 
-Binary lands at `target/x86_64-unknown-linux-musl/release/vtesserad`.
-This is the artifact CI publishes and what the RPM ships.
+Binary lands at `target/x86_64-unknown-linux-musl/release/vtesserad`. This
+is the artifact CI publishes and what the RPM ships.
 
-### All checks
+### All checks (v0)
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --locked
+cargo clippy -p vtesserad --all-targets -- -D warnings
+cargo test -p vtesserad --locked
 cargo audit
 cargo deny check
 ```
 
 ## Quickstart — smoke test (no systemd)
 
-The fastest way to confirm the daemon works on your box:
+The fastest way to confirm the v0 daemon works on your box:
 
 ```bash
 # 1. Build
-cargo build --release
+cargo build -p vtesserad --release
 
 # 2. Drop a config into place
 sudo mkdir -p /etc/vtessera
 sudo cp packaging/vtessera.toml.example /etc/vtessera/vtessera.toml
-# Edit payout_id to your own Solana base58 address (or keep the example
-# placeholder for testing — but replace it before production).
+# Edit payout_id to your own Solana base58 address.
 sudo "${EDITOR:-vi}" /etc/vtessera/vtessera.toml
 
 # 3. Run once. This generates /etc/vtessera/identity.key on first run
@@ -109,10 +180,10 @@ sudo ls /var/lib/vtessera/   # JSON receipts appear here
 ## Install as a systemd service
 
 The shipped unit is hardened (DynamicUser, ProtectSystem=strict, no
-ambient capabilities). That hardening has one consequence worth
-calling out: at runtime `/etc/vtessera` is **read-only**, so the daemon
-cannot auto-generate the identity key from inside the service. You
-need to bootstrap the key once before starting the service.
+ambient capabilities). That hardening has one consequence worth calling
+out: at runtime `/etc/vtessera` is **read-only**, so the daemon cannot
+auto-generate the identity key from inside the service. You need to
+bootstrap the key once before starting the service.
 
 ```bash
 # 1. Install the binary where the unit expects it
@@ -137,8 +208,8 @@ sudo systemctl start vtesserad
 sudo systemctl status vtesserad
 ```
 
-Receipts will land under `/var/lib/vtessera/` (systemd's DynamicUser
-symlinks this to `/var/lib/private/vtessera/` — both paths work).
+Receipts land under `/var/lib/vtessera/` (systemd's DynamicUser symlinks
+this to `/var/lib/private/vtessera/` — both paths work).
 
 Watch live logs:
 
@@ -149,21 +220,21 @@ sudo journalctl -u vtesserad -f
 ## Troubleshooting
 
 **`status=203/EXEC` / `Unable to locate executable '/usr/bin/vtesserad'`**
-The binary isn't installed yet. Run step 1 above (`install -m 0755 ... /usr/bin/vtesserad`).
+The binary isn't installed yet. Run step 1 above
+(`install -m 0755 ... /usr/bin/vtesserad`).
 
 **`error: failed to load/generate key: Read-only file system (os error 30)`**
-The identity key doesn't exist yet and the hardened unit can't create
-it because `/etc` is read-only inside the service sandbox. Run step 3
-above to bootstrap the key once outside systemd.
+The identity key doesn't exist yet and the hardened unit can't create it
+because `/etc` is read-only inside the service sandbox. Run step 3 above
+to bootstrap the key once outside systemd.
 
 **`System call ~@resources is not known, ignoring.`**
 Harmless warning on older systemd. The seccomp filter just drops that
 group; the daemon still starts.
 
 **Service stuck in restart loop**
-`sudo systemctl reset-failed vtesserad` clears the rate-limit, then
-check `journalctl -u vtesserad -e --no-pager -o cat` for the real
-error.
+`sudo systemctl reset-failed vtesserad` clears the rate-limit, then check
+`journalctl -u vtesserad -e --no-pager -o cat` for the real error.
 
 ## Receipt format
 
@@ -173,59 +244,29 @@ operator's Ed25519 public key, and the signature over the canonical
 receipt bytes defined in `BUILD.md` §4.
 
 There is no CLI verify subcommand in v0 — verification is library-only.
-Downstream tools and the future settlement enclave verify receipts by
-calling `sign::verify` against the canonical-byte layout. A standalone
-verifier tool is a later module (see `BUILD.md` §9).
+Downstream tools and the future settlement service verify receipts by
+calling `sign::verify` against the canonical-byte layout. The
+verification path lives in the settlement crate as it lands (see
+`ROADMAP.md` §3).
 
 ## Config
 
-See `packaging/vtessera.toml.example` for all options. Required
-fields: `sample_interval_secs`, `state_dir`, `key_path`, `payout_id`.
+See `packaging/vtessera.toml.example` for all options. Required fields:
+`sample_interval_secs`, `state_dir`, `key_path`, `payout_id`.
 
-`payout_id` must be a Solana base58 Ed25519 address (32–44 chars from
-the base58 alphabet). The daemon refuses to start with an empty or
-malformed value.
-
-## Repository layout
-
-```
-vtessera/
-├── README.md                    # this file
-├── BUILD.md                     # authoritative v0 build specification
-├── TOKEN-DESIGN.md              # VTESS token model (voted multi-asset reserve)
-├── LICENSE                      # Apache-2.0
-├── Cargo.toml / Cargo.lock
-├── rust-toolchain.toml          # pinned Rust toolchain + musl target
-├── deny.toml                    # cargo-deny policy (schema v2)
-├── src/
-│   ├── main.rs                  # entry point, args, run loop
-│   ├── config.rs                # TOML config loading and validation
-│   ├── metrics.rs               # /proc resource sampling
-│   ├── receipt.rs               # Receipt struct + canonical serialization
-│   ├── sign.rs                  # Ed25519 key loading, signing, verification
-│   ├── spool.rs                 # atomic receipt writes to state dir
-│   └── submit.rs                # optional outbound POST (feature=submit)
-├── packaging/
-│   ├── vtessera.spec            # RPM spec (consumed by OBS / local rpmbuild)
-│   ├── vtesserad.service        # hardened systemd unit
-│   ├── vtessera.apparmor        # AppArmor profile
-│   └── vtessera.toml.example    # documented example config
-├── docs/
-│   └── DESIGN.md                # index pointing at BUILD.md / TOKEN-DESIGN.md
-└── .github/workflows/ci.yml
-```
+`payout_id` is the seller's Solana base58 Ed25519 address — the wallet
+that will receive HNT once the settlement and escrow modules are live.
+The daemon refuses to start with an empty or malformed value.
 
 ## Design
 
-- **`BUILD.md`** — authoritative v0 build specification (scope, hard
+- **`ROADMAP.md`** — Modules 0–5, build order, and milestones for the
+  full HNT/AI-agent stack. **Start here** if you're trying to understand
+  where Vtessera is going.
+- **`BUILD.md`** — Authoritative v0 build specification (scope, hard
   rules, module contracts, systemd hardening, CI, definition of done).
-- **`TOKEN-DESIGN.md`** — VTESS token model (fixed supply, voted
-  multi-asset reserve over {SOL, BTC, EURC, USDC}, EURC stability floor,
-  biannual holder vote). Token plumbing is a later phase than the v0
-  daemon; the daemon does not depend on it.
-
-The settlement enclave, job isolation, and on-chain token deployment are
-later modules (see `BUILD.md` §9).
+  v0 must not widen beyond this; new modules live in separate crates.
+- **`docs/DESIGN.md`** — Design index pointing at the documents above.
 
 ## License
 
