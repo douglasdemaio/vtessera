@@ -107,16 +107,30 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
 
-For the static / RPM build path you also need musl. Package names:
+For the static / RPM build path you need the musl **Rust target**:
 
-| Distro | Command |
+```bash
+rustup target add x86_64-unknown-linux-musl
+```
+
+That's it for the **default build** — vtesserad's deps are pure Rust
+and rustup's `x86_64-unknown-linux-musl` target ships everything
+needed to link statically. You do **not** need a system musl-gcc, and
+on openSUSE Tumbleweed there is no `musl` / `musl-devel` package in
+the default repos to install anyway.
+
+You only need an external musl cross-compiler if you also enable the
+optional `submit` feature, which pulls in `rustls` → `ring` (C code)
+and so wants `x86_64-linux-musl-gcc` at link time:
+
+| Distro | Command (only for `--features submit`) |
 | --- | --- |
-| openSUSE Tumbleweed / Leap | `sudo zypper install musl musl-devel` |
-| Fedora / RHEL              | `sudo dnf install musl-gcc`           |
-| Debian / Ubuntu            | `sudo apt install musl-tools`         |
+| Debian / Ubuntu            | `sudo apt install musl-tools`            |
+| Fedora / RHEL              | `sudo dnf install musl-gcc`              |
+| openSUSE Tumbleweed / Leap | install `x86_64-linux-musl-gcc*` from the `devel:tools:cross` OBS repo; no default-repo package today |
 
 You can skip musl entirely if you only want a local glibc build for
-testing.
+testing — see "Build (quick, glibc)" below.
 
 ## Build
 
@@ -138,6 +152,16 @@ Binary lands at `target/x86_64-unknown-linux-musl/release/vtesserad`. This
 is the artifact CI publishes and what the RPM ships.
 
 ### All checks (v0)
+
+`cargo audit` and `cargo deny` aren't included in a default Rust
+install. CI installs them on every run; for a local check run, install
+them once:
+
+```bash
+cargo install cargo-audit cargo-deny --locked
+```
+
+Then the full v0 check suite is:
 
 ```bash
 cargo fmt --check
