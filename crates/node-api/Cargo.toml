@@ -10,6 +10,18 @@ repository.workspace = true
 name = "vtessera_node_api"
 path = "src/lib.rs"
 
+# The HTTP-server binary is gated behind the `serve` feature. The default
+# (library-only) build opens no sockets — that's what node-api ships in
+# tests and what other crates link against.
+[[bin]]
+name = "vtessera-node"
+path = "src/bin/vtessera_node.rs"
+required-features = ["serve"]
+
+[features]
+default = []
+serve = []
+
 [dependencies]
 # Pure dispatch only. No socket layer here — that lives in a thin binary
 # crate gated behind a Cargo feature so v0's no-inbound-network rule

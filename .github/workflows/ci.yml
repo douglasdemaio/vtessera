@@ -51,6 +51,7 @@ jobs:
           cargo clippy -p vtessera-executor --all-targets -- -D warnings
           cargo clippy -p vtessera-offer --all-targets -- -D warnings
           cargo clippy -p vtessera-node-api --all-targets -- -D warnings
+          cargo clippy -p vtessera-node-api --features serve --all-targets -- -D warnings
           cargo clippy -p vtessera-settlement --all-targets -- -D warnings
 
       - name: Test module crates
@@ -58,6 +59,7 @@ jobs:
           cargo test -p vtessera-executor --locked
           cargo test -p vtessera-offer --locked
           cargo test -p vtessera-node-api --locked
+          cargo test -p vtessera-node-api --features serve --locked
           cargo test -p vtessera-settlement --locked
 
       # Anchor escrow program (Module 4) lives under programs/ and builds

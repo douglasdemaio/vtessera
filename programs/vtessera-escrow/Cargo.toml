@@ -7,10 +7,9 @@ license = "Apache-2.0"
 repository = "https://github.com/douglasdemaio/vtessera"
 
 # This crate is intentionally EXCLUDED from the host Cargo workspace
-# (see /home/douglas/vtessera/Cargo.toml). Solana BPF programs build
-# under their own toolchain — `anchor build` or `cargo build-sbf` —
-# and trying to compile them with the host toolchain pulls in
-# incompatible deps.
+# (see /home/douglas/vtessera/Cargo.toml) and instead is a member of
+# the Anchor workspace at /home/douglas/vtessera/programs/Cargo.toml.
+# Anchor / cargo-build-sbf is the only toolchain that should compile it.
 
 [lib]
 crate-type = ["cdylib", "lib"]

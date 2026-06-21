@@ -23,11 +23,15 @@ members = [
     "crates/node-api",
     "crates/settlement",
 ]
-# Anchor programs build under their own toolchain (`anchor build` / `cargo +solana`)
-# and are excluded from the host workspace so a plain `cargo build` doesn't drag
-# in the Solana BPF toolchain.
+# Crates that live outside the host workspace because they pin Solana SDK
+# versions (1.18.x ecosystem) whose crypto dep tree (curve25519-dalek 3,
+# rand_core 0.6.3, zeroize 1.5) conflicts with the host crates' newer
+# ed25519-dalek 2 ecosystem. Each builds independently with its own
+# Cargo.lock so a plain `cargo build` from the root doesn't drag in
+# either toolchain.
 exclude = [
     "programs/vtessera-escrow",
+    "crates/devnet-demo",
 ]
 
 [workspace.package]

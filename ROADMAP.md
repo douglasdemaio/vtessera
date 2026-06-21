@@ -413,6 +413,69 @@ CI is green for the v0 daemon under the workspace layout. Every new
 module crate that lands here ships with its own CI stanza so the green
 status reflects the whole project as modules come online.
 
+### Devnet status
+
+The escrow program is **live on Solana devnet** at
+**`6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`** (program ID;
+ProgramData `Gvu3Vb4ZhxnHV33KCZHcgmWWFyVUXjQ7ocW1KjjiRuuh`).
+
+The full pay → run → settle → split flow has been exercised end-to-end
+against devnet — see `crates/devnet-demo` for the runnable
+demonstration. Sample transactions on devnet:
+
+- `pay_for_compute` — buyer pays 2.000000 micros into escrow PDA, flat
+  SOL fee transferred:
+  `4bMRoN57g1qYnybFHiuiJbQf9uCvpa5ZfrhmbvJDEoXAyND29x9uXy1LCuwNS6AT3yrbvsr6nPyQcf97RyktjC4h`
+- `finalize_pro_rata` — settlement asserts `f = 0.5`; on-chain split:
+  seller 1.000000, buyer refund 1.000000:
+  `2ygddeAFUYRuuxwXk3MkSQarp9ffH5sCYE5xDXLujYcyurrdUC7Xdkk1yTo2Yx3fuo3zcqmvgbWN7nhUkcQ5xmQn`
+
+### What's stubbed vs production
+
+The devnet program ships with the **STUB** payout path (ROADMAP §0):
+the earned slice is paid to the seller in the same stablecoin the buyer
+deposited. The production design swaps to HNT via Jupiter (Pyth-guarded)
+and burns `DRAFT_BURN_BPS`. The IX signature, the buyer-side semantics,
+the pro-rata math, and the refund path are identical between stub and
+production; only the seller's leg changes when the swap goes in.
+
+## Mainnet criteria (DEFERRED — do not deploy until met)
+
+Devnet works. Mainnet doesn't follow automatically. Before any of the
+DRAFT fee values harden and the program is deployed to mainnet-beta,
+**all** of the following must hold:
+
+- [ ] **Jupiter swap + Pyth guard wired and tested.** The current stub
+  pays the seller in stablecoin; production pays in HNT. Going to
+  mainnet with the stub silently breaks the "seller earns HNT" promise.
+- [ ] **Pyth feed addresses pinned** for HNT/USD and EUR/USD. Stale-
+  feed and deviation guards exercised in adversarial tests.
+- [ ] **Burn slice exercised** end-to-end on devnet with a real HNT
+  mint (or its devnet stand-in) so the SPL burn CPI is known to
+  succeed against the same account graph.
+- [ ] **Settlement authority is not a single keypair.** The
+  `settlement_authority` signer in `finalize_pro_rata` must be a
+  Squads / Realms multisig or a timelocked PDA before mainnet.
+- [ ] **Upgrade authority moved to a public multisig/timelock.** A
+  single dev keypair as upgrade authority is an implicit custodian
+  (ROADMAP §4d). Either set the upgrade authority to a multisig or
+  make the program immutable (`solana program set-upgrade-authority
+  --final`).
+- [ ] **Fee constants confirmed.** `DRAFT_FEE_LAMPORTS`,
+  `DRAFT_FEE_WALLET_TODO`, `DRAFT_MAX_SLIPPAGE_BPS`, `DRAFT_BURN_BPS`
+  replaced with finalised values that have been reviewed publicly.
+- [ ] **Third-party audit** of the escrow program. The program is
+  small (~300 LoC) but touches custody and an external swap CPI —
+  reviewable in an afternoon, but ship the review.
+- [ ] **Reproducible BPF build** with documented `cargo build-sbf`
+  inputs and `sha256` of the .so committed.
+
+Until every box is ticked, the devnet program is the only deployment.
+No mainnet test of any size — even "just 2 USDC to see it work" — runs
+before then. The cost of being wrong on mainnet (lost user funds,
+broken neutrality claim, recoverable only by upgrade-key custodial
+intervention) is asymmetric versus the benefit of an earlier demo.
+
 ---
 
 ## Suggested milestones

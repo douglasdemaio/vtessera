@@ -24,6 +24,9 @@
 
 #![forbid(unsafe_code)]
 
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 
 /// What the executor can run.
@@ -40,6 +43,10 @@ pub enum Backend {
     /// end-to-end without a privileged VMM available. Never the production
     /// default.
     NoopCpu,
+    /// Runs the job's command on the host with `std::process::Command`.
+    /// **Not isolated** — see `LocalCpuExecutor`'s docs. Useful for
+    /// integration tests against trusted code, and for the devnet demo.
+    LocalCpu,
     /// Kata Containers on a Cloud Hypervisor backend. The recommended
     /// production path (ROADMAP.md §1a). Wired as a feature in a follow-up.
     KataCloudHypervisor,
@@ -252,6 +259,107 @@ impl Executor for NoopCpuExecutor {
     }
 }
 
+/// Real CPU backend — runs the job's command on the host with
+/// [`std::process::Command`], times execution, and reports real metering.
+///
+/// **This is not isolated.** No cgroups cap, no namespace separation,
+/// no chroot. The guest command runs in the same process group as the
+/// caller. Production isolation (Kata + Cloud Hypervisor, ROADMAP §1a)
+/// arrives behind a separate backend. `LocalCpuExecutor` exists so the
+/// devnet + integration flow can demonstrate signed receipts driven by
+/// **actual** elapsed wall-clock, not synthetic numbers. Operators
+/// running this in production with untrusted code are responsible for
+/// that decision.
+///
+/// `cpu_seconds` is reported as `elapsed_secs × vcpus` on the assumption
+/// that the guest pegs the cores it was given. Real per-process CPU
+/// accounting (`getrusage`, cgroups-v2 `cpu.stat`) is a follow-up — for
+/// now the field is honest about what it can measure and what it can't,
+/// and admission requires `spec.command` to be non-empty so callers know
+/// a real process gets spawned.
+pub struct LocalCpuExecutor;
+
+impl Executor for LocalCpuExecutor {
+    fn run(&self, spec: &JobSpec) -> Result<JobMetering, ExecutorError> {
+        admission_check(spec)?;
+        if !matches!(spec.devices.class, DeviceClass::Cpu) {
+            return Err(ExecutorError::Admission(
+                "LocalCpuExecutor only runs CPU-class jobs".into(),
+            ));
+        }
+        if spec.command.is_empty() {
+            return Err(ExecutorError::Admission(
+                "LocalCpuExecutor requires a non-empty command".into(),
+            ));
+        }
+
+        let mut cmd = Command::new(&spec.command[0]);
+        if spec.command.len() > 1 {
+            cmd.args(&spec.command[1..]);
+        }
+        for (k, v) in &spec.env {
+            cmd.env(k, v);
+        }
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+
+        let started = Instant::now();
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ExecutorError::Backend(format!("spawn {}: {e}", spec.command[0])))?;
+
+        let max = Duration::from_secs(spec.max_duration_secs);
+        let exit = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break s,
+                Ok(None) => {
+                    if started.elapsed() >= max {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let elapsed_secs = started.elapsed().as_secs();
+                        return Ok(JobMetering {
+                            job_id: spec.job_id.clone(),
+                            backend: Backend::LocalCpu,
+                            device: spec.devices.class.clone(),
+                            cpu_seconds: elapsed_secs as f64 * spec.devices.vcpus as f64,
+                            peak_mem_kb: spec.devices.mem_kb,
+                            gpu_seconds: 0.0,
+                            vram_gb_hours: 0.0,
+                            exit_status: ExitStatus::TimedOut,
+                            elapsed_secs,
+                        });
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(ExecutorError::Backend(format!("wait: {e}"))),
+            }
+        };
+
+        let elapsed = started.elapsed();
+        let elapsed_secs = elapsed.as_secs().max(1);
+        let exit_status = if exit.success() {
+            ExitStatus::Completed
+        } else {
+            ExitStatus::Failed {
+                code: exit.code().unwrap_or(-1),
+            }
+        };
+
+        Ok(JobMetering {
+            job_id: spec.job_id.clone(),
+            backend: Backend::LocalCpu,
+            device: spec.devices.class.clone(),
+            cpu_seconds: elapsed_secs as f64 * spec.devices.vcpus as f64,
+            peak_mem_kb: spec.devices.mem_kb,
+            gpu_seconds: 0.0,
+            vram_gb_hours: 0.0,
+            exit_status,
+            elapsed_secs,
+        })
+    }
+}
+
 /// Admission policy (ROADMAP.md §1e).
 ///
 /// Pure function so it's straightforward to test. Backends call this
@@ -367,6 +475,75 @@ mod tests {
         assert!(matches!(
             err,
             ExecutorError::BackendUnimplemented(Backend::KataCloudHypervisor)
+        ));
+    }
+
+    fn cpu_spec(command: Vec<String>, max_duration_secs: u64) -> JobSpec {
+        JobSpec {
+            job_id: "test-local-cpu".into(),
+            image: "n/a".into(),
+            command,
+            env: vec![],
+            devices: DeviceRequirements {
+                class: DeviceClass::Cpu,
+                vcpus: 1,
+                mem_kb: 64 * 1024,
+                min_vram_mb: 0,
+                driver_hint: None,
+            },
+            network: NetworkPolicy::None,
+            max_duration_secs,
+        }
+    }
+
+    #[test]
+    fn local_cpu_runs_true_and_reports_completed() {
+        let spec = cpu_spec(vec!["true".into()], 5);
+        let m = LocalCpuExecutor.run(&spec).expect("true should succeed");
+        assert_eq!(m.backend, Backend::LocalCpu);
+        assert!(matches!(m.exit_status, ExitStatus::Completed));
+        assert!(m.elapsed_secs >= 1);
+    }
+
+    #[test]
+    fn local_cpu_reports_failed_for_nonzero_exit() {
+        let spec = cpu_spec(vec!["false".into()], 5);
+        let m = LocalCpuExecutor.run(&spec).expect("false should still run");
+        assert!(matches!(m.exit_status, ExitStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn local_cpu_times_out_when_exceeded() {
+        let spec = cpu_spec(vec!["sleep".into(), "30".into()], 1);
+        let m = LocalCpuExecutor
+            .run(&spec)
+            .expect("sleep should not error out — just time out");
+        assert!(matches!(m.exit_status, ExitStatus::TimedOut));
+        assert!(
+            m.elapsed_secs <= 3,
+            "timed-out runs should report wall-clock elapsed close to the cap"
+        );
+    }
+
+    #[test]
+    fn local_cpu_rejects_gpu_jobs() {
+        let mut spec = cpu_spec(vec!["true".into()], 5);
+        spec.devices.class = DeviceClass::NvidiaGpu {
+            model: "H100".into(),
+        };
+        spec.devices.min_vram_mb = 40_000;
+        assert!(matches!(
+            LocalCpuExecutor.run(&spec),
+            Err(ExecutorError::Admission(_))
+        ));
+    }
+
+    #[test]
+    fn local_cpu_rejects_empty_command() {
+        let spec = cpu_spec(vec![], 5);
+        assert!(matches!(
+            LocalCpuExecutor.run(&spec),
+            Err(ExecutorError::Admission(_))
         ));
     }
 

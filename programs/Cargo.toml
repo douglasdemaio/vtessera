@@ -1,0 +1,18 @@
+# Anchor workspace for the Solana programs.
+#
+# Separate from the host Cargo workspace (../Cargo.toml). Anchor programs
+# build under the Solana BPF toolchain (cargo-build-sbf) and pin their
+# own Solana / Anchor versions; pulling them into the host workspace
+# would force every plain `cargo build` to drag the BPF dep tree along.
+
+[workspace]
+resolver = "2"
+members = ["vtessera-escrow"]
+
+# Anchor enforces this — it refuses to build if release overflow checks
+# are off, because integer wraparound bugs in a financial program are
+# silently catastrophic.
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
