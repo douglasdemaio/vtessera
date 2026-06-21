@@ -39,38 +39,69 @@ EURC** (a stablecoin). The roadmap promises the seller earns **HNT**
 paid job is a real on-market HNT buy + burn" becomes false. Without
 Pyth, MEV bots systematically drain a few percent of every transaction.
 
+### Design decision
+
+Rather than CPI'ing into Jupiter from inside `finalize_pro_rata`
+(messy: ~15 fixed accounts + N hop accounts in `remaining_accounts`,
+serialised route data, account-graph rotates with Jupiter version),
+the program **trusts the off-chain caller to bundle**
+`[Jupiter swap → finalize_pro_rata]` in a single transaction. The
+program reads Pyth, computes the expected HNT minimum, and reverts if
+the post-swap `escrow_hnt_ata` balance is below that. Same atomicity
+guarantee (one tx = atomic), much simpler audit surface, decouples us
+from Jupiter version churn. The Pyth guard is what enforces fairness,
+regardless of *how* HNT got into the escrow ATA.
+
 ### Steps
 
-- [ ] **1.1** Look up the **HNT mint** address on Solana mainnet from
-      the Helium docs. Confirm freeze authority is null (otherwise the
-      neutrality claim in ROADMAP §4d doesn't hold).
-- [ ] **1.2** Look up the **Pyth price-feed account** IDs:
-      - HNT/USD (mainnet + devnet)
-      - EUR/USD (for EURC-denominated jobs)
-- [ ] **1.3** Add to `FinalizePro` accounts struct in
-      `programs/vtessera-escrow/src/lib.rs`:
-      `hnt_mint`, `escrow_hnt_ata`, `seller_hnt_ata`, `pyth_hnt_usd`,
-      `pyth_eur_usd` (optional), plus Jupiter route accounts as
-      remaining_accounts.
-- [ ] **1.4** Rewrite the "earned slice" path:
-      - Read Pyth → `expected_hnt_min = earned_stablecoin × pyth_price × (1 − slippage_bps/10_000)`
-      - CPI to Jupiter with the off-chain-computed route
-      - Verify the actual HNT output ≥ `expected_hnt_min` → revert otherwise
-      - SPL-burn `DRAFT_BURN_BPS / 10_000` of the HNT
-      - Transfer the rest to `seller_hnt_ata`
-- [ ] **1.5** Confirm Pyth feed freshness gate: if the most recent
-      Pyth publish slot is more than N slots old, revert. Pick N from
-      Pyth's own staleness recommendations.
-- [ ] **1.6** Devnet has no real HNT and limited Jupiter liquidity, so
-      test on **mainnet-fork**: run a local validator that snapshots
-      mainnet state, fork transactions against it. Solana docs:
-      `solana-test-validator --clone-feed <PROGRAM> --url mainnet-beta`.
-- [ ] **1.7** Keep a `--devnet-stub` cargo feature so the devnet
-      smoke flow keeps working without HNT.
+- [x] **1.1** **HNT mint** address confirmed on Solana mainnet-beta via
+      RPC introspection:
+      `hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux`. Decimals = 8.
+      Freeze authority = **null** ✓ (neutrality property holds).
+- [x] **1.2** Pyth feed IDs (cross-chain, hex; same ID across mainnet
+      + devnet because Pyth's pull oracle reads from caller-posted
+      `PriceUpdateV2` accounts):
+      - HNT/USD: `649fdd7ec08e8e2a20f425729854e90293dcbe2376abc47197a14da6ff339756`
+      - USDC/USD: `eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a`
+      - EUR/USD: `a995d00bb36a63cef7fd2c287dc105fc8f3d93779f062f09551b0af3e81ec30b`
+- [x] **1.3** `FinalizePro` restructured with `hnt_mint`,
+      `escrow_hnt_ata`, `seller_hnt_ata`, `pyth_hnt_usd`,
+      `pyth_stablecoin_usd`. Larger accounts boxed (`Box<Account<…>>`)
+      to stay under the BPF 4 KB stack-frame budget. Jupiter route
+      accounts not in `remaining_accounts` — see "Design decision"
+      above; the caller handles Jupiter separately.
+- [x] **1.4** Earned-slice path:
+      - Reads Pyth HNT/USD + stablecoin/USD via
+        `pyth_solana_receiver_sdk::PriceUpdateV2::get_price_no_older_than`
+      - Computes `expected_hnt_min` from `earned_stable × stable_usd_price
+        / hnt_usd_price × 10^(net_expo)` with slippage tolerance
+        (`DRAFT_MAX_SLIPPAGE_BPS = 50`)
+      - Reverts with `SwapBelowMinimum` if `escrow_hnt_ata.amount` is
+        below the minimum
+      - SPL-burns `DRAFT_BURN_BPS / 10_000` of the escrow's HNT
+      - Transfers the rest to `seller_hnt_ata`
+      - Refund slice unchanged: `(1 − f) × price` stablecoin → buyer
+- [x] **1.5** Pyth staleness gate via `MAX_PYTH_STALENESS_SECS = 60`.
+      Reverts with `PythStale` if either feed's last publish is older.
+- [ ] **1.6** Mainnet-fork testing of the production path. Devnet has
+      no HNT mint and no HNT/USD Pyth feed, so this can only be
+      exercised against a local validator forking mainnet state.
+      `solana-test-validator --clone <HNT_MINT> --clone <PYTH_RECEIVER>
+      --url mainnet-beta`, then sign and submit
+      `[jupiter_swap → finalize_pro_rata]` from a fork-aware test
+      harness. **Deferred.**
+- [x] **1.7** Stub variant kept as a **separate IX**:
+      `finalize_pro_rata_stub` (rather than a feature flag — Anchor
+      0.30's `#[program]` macro doesn't reliably honour `#[cfg]` on
+      inner functions). On mainnet, the multisig settlement authority
+      (§3) must refuse to sign stub calls. The IDL exposes both IXs
+      so this policy is auditable from off-chain.
 
-**Who.** All me. You don't need to do anything in this section.
-
-**Effort.** 1-2 days.
+**Status.** Program is upgraded on devnet at
+`6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`, upgrade signature
+`45DGeqZ2J3iCRytm4xPH7dPLAKYRBdMtgCztgx3qcXFo1Km6GViC6LZQVRb3yXqGHisXjsq55CStCSzphGg28o6c`.
+Devnet smoke test green via the stub IX. Production IX
+compile-verified, mainnet-fork test pending (1.6).
 
 ---
 

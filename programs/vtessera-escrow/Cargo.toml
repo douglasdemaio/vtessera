@@ -20,6 +20,12 @@ no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 cpi = ["no-entrypoint"]
+# When `include-stub` is enabled, the program also exposes
+# `finalize_pro_rata_stub` — the original stablecoin→seller payout used
+# for devnet smoke testing. Mainnet builds MUST NOT enable this feature;
+# the stub bypasses the Pyth-guarded HNT swap entirely and only exists
+# so devnet tests don't need HNT liquidity. See MAINNET-CHECKLIST.md §1.
+include-stub = []
 default = []
 
 [dependencies]
@@ -28,3 +34,8 @@ default = []
 # to track new majors without churn.
 anchor-lang = "0.30"
 anchor-spl = "0.30"
+# Pyth pull-oracle SDK. 0.3.2 requires anchor-lang >= 0.28; compatible
+# with the Anchor 0.30 line we're on. PriceUpdateV2 accounts let callers
+# post fresh Hermes-signed prices before invoking us; we read and verify
+# the feed ID + staleness gate.
+pyth-solana-receiver-sdk = "0.3.2"

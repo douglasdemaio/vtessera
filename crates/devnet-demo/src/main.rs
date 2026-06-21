@@ -322,13 +322,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let f_micros: u32 = (f * 1_000_000.0).round() as u32;
     println!("settlement: f = {f:.4}  → f_micros = {f_micros}");
 
-    // --- 7. finalize_pro_rata ------------------------------------------
-    let fin_disc = anchor_disc("finalize_pro_rata");
+    // --- 7. finalize_pro_rata_stub -------------------------------------
+    // Devnet doesn't host the HNT mint or the Pyth feeds the production
+    // `finalize_pro_rata` IX requires, so the demo calls the stub
+    // variant. Mainnet flow uses `finalize_pro_rata` and a bundled
+    // Jupiter swap. See MAINNET-CHECKLIST §1.
+    let fin_disc = anchor_disc("finalize_pro_rata_stub");
     let fin_args = FinalizeProRataArgs { f_micros };
     let mut fin_data = fin_disc.to_vec();
     fin_data.extend_from_slice(&fin_args.try_to_vec()?);
 
-    // Anchor account order in FinalizePro:
+    // Anchor account order in FinalizeProStub:
     //   settlement_authority (signer)
     //   contract (mut)
     //   escrow_stablecoin_ata (mut)
@@ -347,8 +351,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
         data: fin_data,
     };
-    println!("\n--- finalize_pro_rata (f_micros={f_micros}) ---");
-    let fin_sig = send_tx(&rpc, &[fin_ix], &[&payer], &payer, "finalize_pro_rata")?;
+    println!("\n--- finalize_pro_rata_stub (f_micros={f_micros}) ---");
+    let fin_sig = send_tx(
+        &rpc,
+        &[fin_ix],
+        &[&payer],
+        &payer,
+        "finalize_pro_rata_stub",
+    )?;
     println!("finalize signature: {fin_sig}");
 
     // --- 8. Final balances --------------------------------------------
