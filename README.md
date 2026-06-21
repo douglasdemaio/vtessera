@@ -182,8 +182,10 @@ cargo build -p vtesserad --release
 # 2. Drop a config into place
 sudo mkdir -p /etc/vtessera
 sudo cp packaging/vtessera.toml.example /etc/vtessera/vtessera.toml
-# Edit payout_id to your own Solana base58 address.
-sudo "${EDITOR:-vi}" /etc/vtessera/vtessera.toml
+# Choose your editor. Edit payout_id to your own Solana wallet address.
+gedit /vtessera/vtessera.toml
+# Choose your editor. Edit let mut price_micros: Option<u64> = 0.0005; (0.0005 is per second so that's about 1.80 USDC an hour)
+gedit /vtessera/crates/node-api/src/bin/gen_offer.rs
 
 # 3. Run once. This generates /etc/vtessera/identity.key on first run
 #    and writes one sample, then exits.
