@@ -9,7 +9,9 @@
 //! 3. Pays on Solana devnet: the buyer's stablecoin moves into the
 //!    escrow program's per-job contract PDA via `pay_for_compute`.
 //! 4. `POST /jobs` again with an `x-payment` proof header — the node
-//!    accepts (202).
+//!    refuses with 501 while execution is not wired (v0). That's honest:
+//!    the payment is real and sitting in the escrow, so step 5 still
+//!    exercises the money path end to end.
 //! 5. `finalize_pro_rata_stub` (f = 1.0) drains the escrow to the
 //!    seller. On devnet the settlement authority is the payer.
 //!
@@ -19,10 +21,9 @@
 //! USDC `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`) — the payer must
 //! already hold that token, since only Circle can mint it.
 //!
-//! The node's `VerifyAndRun` branch currently dispatches and returns 202
-//! without re-checking the proof on-chain; verification is the binary's
-//! future job (crates/node-api). This client sends the proof anyway so the
-//! wire contract is exercised end to end.
+//! The node's `VerifyAndRun` branch returns 501 Not Implemented until an
+//! executor and an on-chain verifier are wired in (crates/node-api). The
+//! proof is sent anyway so the wire contract is exercised end to end.
 //!
 //! Standalone crate (excluded from the host workspace): same pinned
 //! solana-sdk 1.18 tree as `crates/devnet-demo`.
@@ -390,8 +391,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !accept_body.is_empty() {
         println!("  body: {accept_body}");
     }
-    if accept_resp.status != 202 {
-        return Err(format!("expected 202, got {}", accept_resp.status).into());
+    match accept_resp.status {
+        // v0 is honest: no executor/verifier is wired, so the node refuses
+        // rather than claim a job is running. The payment is still safely
+        // in the escrow — step 5 releases it.
+        501 => println!(
+            "  (expected in v0: execution is not wired, so the node refuses. \
+             The payment is in the escrow; finalize releases it.)"
+        ),
+        other => {
+            return Err(format!(
+                "expected the node to refuse with 501, got {other} — is vtessera-node up to date?"
+            )
+            .into());
+        }
     }
 
     // --- 5. finalize_pro_rata_stub (f = 1.0) ----------------------------

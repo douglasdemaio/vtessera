@@ -232,9 +232,11 @@ scripts/x402-demo.sh
 
 It builds the agent (`crates/x402-client`), points a node at
 `http://127.0.0.1:8402` (reusing one already running there), submits a
-job, pays the x402 challenge into the escrow, and finalizes the split.
-`crates/devnet-demo` is the lower-level variant that exercises
-`pay_for_compute` → `finalize_pro_rata_stub` directly.
+job, and pays the x402 challenge into the escrow. The node currently
+**refuses to run jobs with 501** (v0 has no executor or payment verifier
+wired in) — the demo then finalizes the split, proving the escrow money
+path end to end. `crates/devnet-demo` is the lower-level variant that
+exercises `pay_for_compute` → `finalize_pro_rata_stub` directly.
 
 ## Install as a systemd service
 
