@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Vtessera
+GenericName=Compute node
+Comment=Sell or donate your CPU to AI agents
+Exec=vtessera-gui
+Icon=io.github.douglasdemaio.Vtessera
+Terminal=false
+StartupNotify=true
+Categories=Utility;Network;

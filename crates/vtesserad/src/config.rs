@@ -19,7 +19,24 @@ pub struct Config {
     pub state_dir: PathBuf,
     pub key_path: PathBuf,
     pub resource_caps: Caps,
+    /// Operator payout destination (Solana base58 Ed25519 address). Required
+    /// and validated only when `mode == "paid"`; in free (donate) mode it
+    /// may be empty — receipts then carry an empty `payout_id`.
+    #[serde(default)]
     pub payout_id: String,
+    /// Whether the node sells compute (`"paid"`, default) or donates it
+    /// (`"free"`). In free mode no payout address and no price are required
+    /// and offers are published as `PriceQuote::Free`.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    /// Currency a paid node quotes in: `"eurc"` (default) or `"usdc"`.
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    /// Price per CPU-hour in the quoted currency, as a decimal, e.g. `0.05`.
+    /// Informational in v0 (the metering daemon only records usage); the
+    /// offer builder converts it to `per_device_second_micros`.
+    #[serde(default)]
+    pub price_per_cpu_hour: f64,
     #[serde(default)]
     pub submit_endpoint: Option<String>,
     #[serde(default)]
@@ -31,6 +48,14 @@ pub struct Config {
     /// this.
     #[serde(default)]
     pub max_spool_files: Option<usize>,
+}
+
+fn default_mode() -> String {
+    "paid".into()
+}
+
+fn default_currency() -> String {
+    "eurc".into()
 }
 
 impl Config {
@@ -45,7 +70,29 @@ impl Config {
                 "sample_interval_secs must be between 1 and 3600".into(),
             ));
         }
-        validate_payout_id(&self.payout_id)?;
+        match self.mode.as_str() {
+            "paid" => {
+                validate_payout_id(&self.payout_id)?;
+                if !self.currency.is_empty()
+                    && !matches!(self.currency.as_str(), "eurc" | "usdc")
+                {
+                    return Err(ConfigError::Validation(
+                        "currency must be \"eurc\" or \"usdc\"".into(),
+                    ));
+                }
+                if self.price_per_cpu_hour < 0.0 {
+                    return Err(ConfigError::Validation(
+                        "price_per_cpu_hour must not be negative".into(),
+                    ));
+                }
+            }
+            "free" => {}
+            other => {
+                return Err(ConfigError::Validation(format!(
+                    "mode must be \"paid\" or \"free\", got \"{other}\""
+                )));
+            }
+        }
         if self.state_dir.as_os_str().is_empty() {
             return Err(ConfigError::Validation(
                 "state_dir must not be empty".into(),
@@ -136,5 +183,86 @@ mod tests {
         // '0', 'O', 'I', 'l' are not in base58.
         assert!(validate_payout_id("0WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM").is_err());
         assert!(validate_payout_id("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWW0").is_err());
+    }
+
+    fn base_config() -> Config {
+        Config {
+            sample_interval_secs: 60,
+            state_dir: "/tmp/vtessera".into(),
+            key_path: "/tmp/vtessera/identity.key".into(),
+            resource_caps: Caps {
+                max_cpus: None,
+                max_mem_kb: None,
+                max_disk_kb: None,
+            },
+            payout_id: "".into(),
+            mode: "paid".into(),
+            currency: "eurc".into(),
+            price_per_cpu_hour: 0.0,
+            submit_endpoint: None,
+            window_size: None,
+            max_spool_files: None,
+        }
+    }
+
+    #[test]
+    fn paid_mode_requires_valid_payout() {
+        let mut c = base_config();
+        assert!(matches!(c.validate(), Err(ConfigError::Validation(_))));
+        c.payout_id = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".into();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn free_mode_allows_empty_payout() {
+        let mut c = base_config();
+        c.mode = "free".into();
+        assert!(c.validate().is_ok());
+        // An invalid address must not matter in free mode.
+        c.payout_id = "not-an-address".into();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn mode_must_be_paid_or_free() {
+        let mut c = base_config();
+        c.mode = "barter".into();
+        assert!(matches!(c.validate(), Err(ConfigError::Validation(_))));
+    }
+
+    #[test]
+    fn currency_must_be_eurc_or_usdc() {
+        let mut c = base_config();
+        c.payout_id = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".into();
+        c.currency = "btc".into();
+        assert!(matches!(c.validate(), Err(ConfigError::Validation(_))));
+        c.currency = "usdc".into();
+        assert!(c.validate().is_ok());
+        // Empty currency means "default", still valid.
+        c.currency = "".into();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn price_must_not_be_negative() {
+        let mut c = base_config();
+        c.payout_id = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".into();
+        c.price_per_cpu_hour = -0.5;
+        assert!(matches!(c.validate(), Err(ConfigError::Validation(_))));
+        c.price_per_cpu_hour = 0.25;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn toml_roundtrip_with_defaults() {
+        // A minimal free-mode TOML (no payout_id) must parse and validate.
+        let raw = "\
+            sample_interval_secs = 60\n\
+            state_dir = \"/tmp/vtessera\"\n\
+            key_path = \"/tmp/vtessera/identity.key\"\n\
+            mode = \"free\"\n\
+            [resource_caps]\n";
+        let c: Config = toml::from_str(raw).expect("free-mode TOML should parse");
+        assert!(c.validate().is_ok());
     }
 }
