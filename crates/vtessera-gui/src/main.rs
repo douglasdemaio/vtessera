@@ -239,7 +239,10 @@ fn start_node(ui: &Ui, state: &NodeState) {
     }
 
     let node_id = vtessera_offer::derive_node_id(&key.verifying_key().to_bytes());
-    let bind = format!("0.0.0.0:{}", settings.port);
+    // Bind loopback to match the advertised endpoint (default
+    // http://127.0.0.1:8402): the node has no TLS/auth and must not sit on
+    // a routable interface. The node binary's `--bind` stays configurable.
+    let bind = format!("127.0.0.1:{}", settings.port);
 
     let bin_dir = daemon::bin_dir();
     let opts = daemon::StartOptions {

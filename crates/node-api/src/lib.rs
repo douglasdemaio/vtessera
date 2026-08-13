@@ -19,9 +19,11 @@
 //! - `GET /offer` — returns the seller's signed [`SignedOffer`] as JSON.
 //! - `GET /mcp/manifest` — returns an MCP-shaped resource manifest so an
 //!   agent's tool catalog discovers this node automatically.
-//! - `POST /jobs` — the work endpoint. For free offers, returns 200 and
-//!   the job runs. For paid offers, returns 402 with x402 payment terms;
-//!   on retry with a valid payment proof, returns 200.
+//! - `POST /jobs` — the work endpoint. For paid offers, returns 402 with
+//!   x402 payment terms (the working half of the flow). Submissions are
+//!   otherwise refused with **501 Not Implemented** — never a fake 200/202 —
+//!   until an executor backend and an on-chain payment verifier are wired
+//!   into the node binary.
 //!
 //! This crate does not verify payments — that's the escrow program's job
 //! (Module 4). The node API only encodes the 402 challenge and threads
@@ -86,6 +88,7 @@ impl HttpResponse {
 
 /// State a request handler reads. Owned by the node binary and passed
 /// into [`dispatch`] for each request.
+#[derive(Clone)]
 pub struct NodeState {
     /// Currently published offer.
     pub offer: SignedOffer,
@@ -177,13 +180,21 @@ fn handle_jobs(state: &NodeState, req: HttpRequest) -> HttpResponse {
             resp.headers.push(("x-payment-required".into(), "1".into()));
             resp
         }
-        JobDecision::VerifyAndRun { .. } | JobDecision::RunFree { .. } => {
-            // The binary actually runs the job. From the perspective of
-            // this pure-dispatch crate, the dispatch step itself is
-            // "accept": real implementations replace this branch by
-            // calling the executor and streaming results.
-            HttpResponse::json(202, r#"{"status":"accepted"}"#.into())
+        JobDecision::VerifyAndRun { .. } => {
+            // v0 has neither an executor backend nor an on-chain verifier
+            // wired in, so accepting here would claim a job is running (and
+            // a payment verified) when neither happened. Honest response:
+            // refuse. Wiring vtessera-executor + the settlement verifier is
+            // the follow-up (see ROADMAP.md §1/§3).
+            HttpResponse::json(
+                501,
+                r#"{"status":"not-implemented","reason":"job execution is not wired in v0; payment proof was not verified"}"#.into(),
+            )
         }
+        JobDecision::RunFree { .. } => HttpResponse::json(
+            501,
+            r#"{"status":"not-implemented","reason":"job execution is not wired in v0"}"#.into(),
+        ),
     }
 }
 
@@ -234,7 +245,8 @@ pub fn mcp_manifest(state: &NodeState) -> String {
     s.push_str("\"tools\":[{");
     s.push_str("\"name\":\"submit_job\",");
     s.push_str("\"description\":\"Submit an OCI workload to this node. ");
-    s.push_str("Returns 200 for free offers, 402 (x402 challenge) for paid offers.\",");
+    s.push_str("Returns 402 (x402 challenge) for paid offers; submission is ");
+    s.push_str("currently refused with 501 while execution is not wired (v0).\",");
     s.push_str("\"endpoint\":");
     json_string(&state.offer.body.endpoint, &mut s);
     s.push_str("}]}");
@@ -341,10 +353,13 @@ mod tests {
     }
 
     #[test]
-    fn free_jobs_post_accepts_immediately() {
+    fn free_jobs_post_is_refused_with_501_until_execution_is_wired() {
         let s = state(PriceQuote::Free);
         let r = dispatch(&s, req(HttpMethod::Post, "/jobs", vec![]));
-        assert_eq!(r.status, 202);
+        assert_eq!(r.status, 501);
+        let body = String::from_utf8(r.body).unwrap();
+        assert!(body.contains("\"status\":\"not-implemented\""));
+        assert!(!body.contains("\"status\":\"accepted\""));
     }
 
     #[test]
@@ -368,6 +383,19 @@ mod tests {
             }
             other => panic!("expected VerifyAndRun, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn paid_jobs_post_with_proof_is_refused_with_501_not_verified() {
+        let s = state(paid());
+        let r = dispatch(
+            &s,
+            req(HttpMethod::Post, "/jobs", vec![("x-payment", "0xPROOF")]),
+        );
+        assert_eq!(r.status, 501);
+        let body = String::from_utf8(r.body).unwrap();
+        assert!(body.contains("payment proof was not verified"));
+        assert!(!body.contains("\"status\":\"accepted\""));
     }
 
     #[test]

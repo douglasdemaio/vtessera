@@ -119,13 +119,13 @@ fn main() {
     );
 
     let mut samples: Vec<metrics::ResourceSample> = Vec::new();
-    let mut window_start: u64 = 0;
+    let mut window_start: Option<u64> = None;
 
     loop {
         match metrics::sample(&state_dir_str) {
             Ok(s) => {
-                if window_start == 0 {
-                    window_start = s.ts_unix;
+                if window_start.is_none() {
+                    window_start = Some(s.ts_unix);
                 }
                 samples.push(s);
             }
@@ -134,20 +134,20 @@ fn main() {
             }
         }
 
-        if !samples.is_empty() {
-            // saturating_sub: tolerate backward NTP steps (see BUILD.md §4 / metrics.rs
-            // clock-source note). If wall clock went backwards, elapsed becomes 0 and
-            // the window simply doesn't close yet.
-            let elapsed = samples.last().unwrap().ts_unix.saturating_sub(window_start);
-            if elapsed >= window_size {
-                if let Err(e) =
-                    finalize_window(&cfg, &signing_key, &node_id, &samples, window_start)
-                {
-                    eprintln!("error: finalize window: {e}");
-                }
-                samples.clear();
-                window_start = 0;
-            }
+        if let Some(start) = window_start {
+            // close every completed window (see advance_windows: windows are
+            // epoch-aligned and contiguous, so the closing-sample gap in the
+            // old code is gone).
+            window_start = Some(advance_windows(
+                &mut samples,
+                start,
+                window_size,
+                |win, s, e| {
+                    if let Err(err) = finalize_window(&cfg, &signing_key, &node_id, win, s, e) {
+                        eprintln!("error: finalize window: {err}");
+                    }
+                },
+            ));
         }
 
         if once {
@@ -159,14 +159,46 @@ fn main() {
     }
 }
 
+/// Close out every full window boundary covered by the samples so far.
+///
+/// Boundaries are fixed at `start`, `start + window_size`, `start + 2*window_size`,
+/// … and keyed to wall clock rather than to sample arrival. Consecutive windows
+/// are therefore contiguous and gapless: even when `sample_interval_secs ==
+/// window_size` (or a sampling gap occurs), no wall-clock interval falls
+/// outside a receipt. `finalize` receives each completed window's samples plus
+/// its `[window_start, window_end)` range. Returns the new `window_start`.
+fn advance_windows(
+    samples: &mut Vec<metrics::ResourceSample>,
+    window_start: u64,
+    window_size: u64,
+    mut finalize: impl FnMut(&[metrics::ResourceSample], u64, u64),
+) -> u64 {
+    let mut start = window_start;
+    while let Some(last) = samples.last() {
+        let boundary = start.saturating_add(window_size);
+        if last.ts_unix < boundary {
+            break;
+        }
+        let idx = samples.partition_point(|s| s.ts_unix < boundary);
+        let win: Vec<metrics::ResourceSample> = samples.drain(..idx).collect();
+        // A window with no samples (sampling gap) is skipped: there is no
+        // data to report, and finalizing it would yield a 0/0 receipt.
+        if !win.is_empty() {
+            finalize(&win, start, boundary);
+        }
+        start = boundary;
+    }
+    start
+}
+
 fn finalize_window(
     cfg: &config::Config,
     signing_key: &ed25519_dalek::SigningKey,
     node_id: &str,
     samples: &[metrics::ResourceSample],
     window_start: u64,
+    window_end: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let window_end = samples.last().unwrap().ts_unix;
     let sample_count = samples.len() as u32;
 
     let cpu_sum: f64 = samples.iter().map(|s| s.cpu_pct).sum();
@@ -228,4 +260,90 @@ fn finalize_window(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_at(ts_unix: u64) -> metrics::ResourceSample {
+        metrics::ResourceSample {
+            ts_unix,
+            cpu_pct: 0.0,
+            mem_used_kb: 0,
+            disk_free_kb: 0,
+        }
+    }
+
+    /// Regression test for the window-gap bug: when `sample_interval_secs ==
+    /// window_size` (60/60), every wall-clock second must fall inside a
+    /// receipt. The old code reset `window_start` to zero on close, so
+    /// windows alternated [covered][gap][covered] and half the time was
+    /// unbilled.
+    #[test]
+    fn windows_are_contiguous_when_interval_equals_window() {
+        let mut samples = Vec::new();
+        let mut start = 0u64;
+        let mut wins: Vec<(u64, u64, usize)> = Vec::new();
+
+        let mut tick = |ts: u64| {
+            samples.push(sample_at(ts));
+            start = advance_windows(&mut samples, start, 60, |win, s, e| {
+                wins.push((s, e, win.len()));
+            });
+        };
+
+        for ts in [0u64, 60, 120, 180, 240] {
+            tick(ts);
+        }
+
+        // Gapless consecutive windows, one sample each; the t=240 sample is
+        // still pending in the not-yet-closed [240,300) window.
+        assert_eq!(
+            wins,
+            vec![(0, 60, 1), (60, 120, 1), (120, 180, 1), (180, 240, 1)]
+        );
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].ts_unix, 240);
+    }
+
+    #[test]
+    fn windows_cover_a_sampling_gap() {
+        // No samples arrive between t=0 and t=130: the t=0 sample's window
+        // still closes on its boundary, the [60,120) window is empty (no
+        // data exists — skipped), and the late sample lands in [120,180).
+        let mut samples = Vec::new();
+        let mut wins: Vec<(u64, u64, usize)> = Vec::new();
+        samples.push(sample_at(0));
+        let mut start = advance_windows(&mut samples, 0, 60, |win, s, e| {
+            wins.push((s, e, win.len()));
+        });
+        samples.push(sample_at(130));
+        start = advance_windows(&mut samples, start, 60, |win, s, e| {
+            wins.push((s, e, win.len()));
+        });
+
+        assert_eq!(wins, vec![(0, 60, 1)]);
+        assert_eq!(samples.len(), 1); // the t=130 sample, still in [120,180)
+        assert_eq!(samples[0].ts_unix, 130);
+        assert_eq!(start, 120);
+    }
+
+    #[test]
+    fn multiple_windows_close_on_one_tick() {
+        // A long stall then a burst: 4 windows close in a single advance.
+        let mut samples = Vec::new();
+        let mut wins: Vec<(u64, u64, usize)> = Vec::new();
+        for ts in [0u64, 60, 120, 180] {
+            samples.push(sample_at(ts));
+        }
+        let start = advance_windows(&mut samples, 0, 60, |win, s, e| {
+            wins.push((s, e, win.len()));
+        });
+        assert_eq!(wins, vec![(0, 60, 1), (60, 120, 1), (120, 180, 1)]);
+        assert_eq!(start, 180);
+        // The t=180 sample is pending in the open [180,240) window.
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].ts_unix, 180);
+    }
 }

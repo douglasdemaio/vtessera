@@ -23,6 +23,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use vtessera_node_api::{dispatch, HttpMethod, HttpRequest, NodeState};
@@ -31,6 +33,9 @@ use vtessera_offer::SignedOffer;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound on concurrently served connections. A swarm of idle sockets is
+/// refused (503) rather than allowed to exhaust threads.
+const MAX_CONNECTIONS: usize = 32;
 
 fn usage_and_exit() -> ! {
     eprintln!(
@@ -101,15 +106,37 @@ fn main() {
     });
     eprintln!("vtessera-node: listening on {}", args.bind);
 
+    // Thread-per-connection: a slow or idle client must not stall every
+    // other request behind its 15s read timeout (the previous serial loop
+    // was one socket away from a permanent denial of service). MAX_CONNECTIONS
+    // bounds the worst case; overload is refused up front with 503.
+    let active = Arc::new(AtomicUsize::new(0));
     for incoming in listener.incoming() {
-        match incoming {
-            Ok(stream) => {
-                if let Err(e) = handle_connection(stream, &state) {
-                    eprintln!("connection error: {e}");
-                }
+        let mut stream = match incoming {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("accept error: {e}");
+                continue;
             }
-            Err(e) => eprintln!("accept error: {e}"),
+        };
+
+        if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+            if let Err(e) = write_status(&mut stream, 503, "busy: too many concurrent connections")
+            {
+                eprintln!("refusing overloaded connection: {e}");
+            }
+            continue;
         }
+        active.fetch_add(1, Ordering::Relaxed);
+
+        let state = state.clone();
+        let active = active.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = handle_connection(stream, &state) {
+                eprintln!("connection error: {e}");
+            }
+            active.fetch_sub(1, Ordering::Relaxed);
+        });
     }
 }
 
@@ -226,6 +253,8 @@ fn status_text(code: u16) -> &'static str {
         400 => "Bad Request",
         402 => "Payment Required",
         404 => "Not Found",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
         _ => "Status",
     }
 }
