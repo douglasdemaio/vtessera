@@ -33,6 +33,7 @@ members = [
 exclude = [
     "programs/vtessera-escrow",
     "crates/devnet-demo",
+    "crates/x402-client",
 ]
 
 [workspace.package]
