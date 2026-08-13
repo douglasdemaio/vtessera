@@ -19,7 +19,10 @@ use std::process::{Child, Command, Stdio};
 /// the GUI's log sink.
 pub struct Daemons {
     pub meter: Child,
-    pub node: Child,
+    /// `None` when an already-running node was reused (see [`start`]).
+    pub node: Option<Child>,
+    /// True when the node wasn't spawned because one was already serving.
+    pub node_reused: bool,
 }
 
 /// Options for [`start`].
@@ -51,6 +54,30 @@ fn build_command(bin: &str, extra: Option<&Path>) -> Command {
     cmd
 }
 
+/// Probe `GET /healthz` on `host:port`. Returns true when an HTTP server
+/// answers 200 — used to detect an already-running `vtessera-node` before
+/// spawning a second one (which would fail to bind and exit immediately).
+fn healthz_up(host: &str, port: u16) -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let Ok(mut stream) = TcpStream::connect((host, port)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let req = format!("GET /healthz HTTP/1.1\r\nhost: {host}\r\nconnection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 32];
+    let Ok(n) = stream.read(&mut buf) else {
+        return false;
+    };
+    buf[..n].starts_with(b"HTTP/1.1 200")
+}
+
 /// Spawn both daemons. Caller must already have written the config + offer.
 pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
     let env_dir = bin_dir();
@@ -68,17 +95,38 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
         .spawn()
         .map_err(|e| format!("spawn vtesserad: {e}"))?;
 
-    let mut node_cmd = build_command("vtessera-node", extra);
-    node_cmd
-        .args(["--bind", &opts.bind])
-        .args(["--offer", opts.offer.to_str().unwrap_or_default()])
-        .args(["--escrow", opts.escrow])
-        .args(["--network", opts.network]);
-    let node = node_cmd
-        .spawn()
-        .map_err(|e| format!("spawn vtessera-node: {e}"))?;
+    // If a node is already answering on the configured port (e.g. leaked by
+    // a hard-killed previous session), reusing it beats spawning a second
+    // one that dies on bind. The served offer may be stale — the caller
+    // surfaces that to the user.
+    let port = opts
+        .bind
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(0);
+    let node_reused = port != 0 && healthz_up("127.0.0.1", port);
 
-    Ok(Daemons { meter, node })
+    let node = if node_reused {
+        None
+    } else {
+        let mut node_cmd = build_command("vtessera-node", extra);
+        node_cmd
+            .args(["--bind", &opts.bind])
+            .args(["--offer", opts.offer.to_str().unwrap_or_default()])
+            .args(["--escrow", opts.escrow])
+            .args(["--network", opts.network]);
+        Some(
+            node_cmd
+                .spawn()
+                .map_err(|e| format!("spawn vtessera-node: {e}"))?,
+        )
+    };
+
+    Ok(Daemons {
+        meter,
+        node,
+        node_reused,
+    })
 }
 
 /// Pipe each child's stdout/stderr lines to `on_line`, called on worker
@@ -94,11 +142,13 @@ where
     if let Some(stderr) = daemons.meter.stderr.take() {
         spawn_reader(stderr, "vtesserad", on_line.clone());
     }
-    if let Some(stdout) = daemons.node.stdout.take() {
-        spawn_reader(stdout, "vtessera-node", on_line.clone());
-    }
-    if let Some(stderr) = daemons.node.stderr.take() {
-        spawn_reader(stderr, "vtessera-node", on_line.clone());
+    if let Some(node) = daemons.node.as_mut() {
+        if let Some(stdout) = node.stdout.take() {
+            spawn_reader(stdout, "vtessera-node", on_line.clone());
+        }
+        if let Some(stderr) = node.stderr.take() {
+            spawn_reader(stderr, "vtessera-node", on_line);
+        }
     }
 }
 
@@ -121,15 +171,23 @@ where
 /// Kill both children and reap them. Synchronous; call on the main thread.
 pub fn stop(daemons: &mut Daemons, on_line: &impl Fn(String)) {
     let mut killed = false;
-    for child in [&mut daemons.meter, &mut daemons.node] {
-        if let Err(e) = child.kill() {
+    if let Err(e) = daemons.meter.kill() {
+        if e.kind() != std::io::ErrorKind::InvalidInput {
+            on_line(format!("kill: {e}"));
+        }
+    } else {
+        killed = true;
+    }
+    let _ = daemons.meter.wait();
+    if let Some(node) = daemons.node.as_mut() {
+        if let Err(e) = node.kill() {
             if e.kind() != std::io::ErrorKind::InvalidInput {
                 on_line(format!("kill: {e}"));
             }
         } else {
             killed = true;
         }
-        let _ = child.wait();
+        let _ = node.wait();
     }
     if killed {
         on_line("node stopped".into());
