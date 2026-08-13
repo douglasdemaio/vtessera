@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.douglasdemaio.Vtessera</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Vtessera</name>
+  <summary>Turn your machine into a compute node for AI agents</summary>
+  <description>
+    <p>
+      Vtessera lets GNU/Linux machine owners rent out CPU (and later GPU)
+      capacity to AI agents and other software workloads, settling in HNT
+      while buyers pay in EURC or USDC. It is technology that plugs into
+      the existing Helium economy — there is no Vtessera token.
+    </p>
+    <p>
+      This desktop app turns a machine into a node in a few clicks:
+    </p>
+    <ul>
+      <li>Advertise your machine with a signed, self-hosted offer.</li>
+      <li>Charge a price per CPU-hour in EURC or USDC, or donate your compute for free.</li>
+      <li>Run the metering daemon and the agent-facing node server from one window.</li>
+      <li>Watch the live log and the receipt count as jobs come in.</li>
+    </ul>
+    <p>
+      Free mode runs no transactions at all; paid mode quotes a price and
+      records usage. Settlement in v0 is off-chain — the Solana escrow and
+      HNT swap layers are under active development.
+    </p>
+  </description>
+  <developer id="io.github.douglasdemaio">
+    <name>Douglas DeMaio</name>
+  </developer>
+  <launchable type="desktop-id">io.github.douglasdemaio.Vtessera.desktop</launchable>
+  <url type="homepage">https://github.com/douglasdemaio/vtessera</url>
+  <url type="bugtracker">https://github.com/douglasdemaio/vtessera/issues</url>
+  <categories>
+    <category>Utility</category>
+    <category>Network</category>
+  </categories>
+  <keywords>
+    <keyword>AI</keyword>
+    <keyword>agents</keyword>
+    <keyword>compute</keyword>
+    <keyword>CPU</keyword>
+    <keyword>GPU</keyword>
+    <keyword>HNT</keyword>
+    <keyword>Helium</keyword>
+    <keyword>node</keyword>
+  </keywords>
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-cartoon">none</content_attribute>
+    <content_attribute id="violence-fantasy">none</content_attribute>
+    <content_attribute id="violence-realistic">none</content_attribute>
+    <content_attribute id="violence-bloodshed">none</content_attribute>
+    <content_attribute id="violence-sexual">none</content_attribute>
+    <content_attribute id="drugs-alcohol">none</content_attribute>
+    <content_attribute id="drugs-narcotics">none</content_attribute>
+    <content_attribute id="drugs-tobacco">none</content_attribute>
+    <content_attribute id="sex-nudity">none</content_attribute>
+    <content_attribute id="sex-themes">none</content_attribute>
+    <content_attribute id="sex-homosexuality">none</content_attribute>
+    <content_attribute id="sex-prostitution">none</content_attribute>
+    <content_attribute id="sex-adultery">none</content_attribute>
+    <content_attribute id="sex-appearance">none</content_attribute>
+    <content_attribute id="language-profanity">none</content_attribute>
+    <content_attribute id="language-humor">none</content_attribute>
+    <content_attribute id="language-discrimination">none</content_attribute>
+    <content_attribute id="social-chat">none</content_attribute>
+    <content_attribute id="social-info">none</content_attribute>
+    <content_attribute id="social-audio">none</content_attribute>
+    <content_attribute id="social-location">none</content_attribute>
+    <content_attribute id="social-contacts">none</content_attribute>
+    <content_attribute id="money-purchasing">none</content_attribute>
+    <content_attribute id="money-gambling">none</content_attribute>
+  </content_rating>
+  <screenshots>
+    <screenshot type="default">
+      <image type="source" width="1025" height="721">https://raw.githubusercontent.com/douglasdemaio/vtessera/main/packaging/flatpak/screenshots/vtessera-settings.png</image>
+      <caption>Choose paid or free mode, set a price per CPU-hour and a Solana payout address</caption>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.1.0" date="2026-08-13"/>
+  </releases>
+  <provides>
+    <binary>vtessera-gui</binary>
+  </provides>
+</component>

@@ -1,0 +1,23 @@
+[package]
+name = "vtessera-gui"
+description = "Vtessera desktop app — turn your machine into a compute node for AI agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "vtessera-gui"
+path = "src/main.rs"
+
+[dependencies]
+# GUI. Own dep budget — v0's (BUILD.md §1.3) is per-crate and untouched.
+gtk4 = { version = "0.9", features = ["v4_12"] }
+
+# Workspace crates + shared deps.
+vtessera-offer = { path = "../offer" }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }

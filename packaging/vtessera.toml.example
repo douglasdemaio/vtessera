@@ -12,10 +12,22 @@ state_dir = "/var/lib/vtessera"
 key_path = "/etc/vtessera/identity.key"
 
 # Operator payout identifier. Must be a Solana base58 Ed25519 public key
-# (32–44 characters from the base58 alphabet). Set this before first start
-# — the daemon will refuse to load an empty or malformed value.
+# (32–44 characters from the base58 alphabet). Required only when
+# `mode = "paid"` (the default). In free/donate mode it may be empty.
 # Example below is a well-known throwaway address; REPLACE before production.
 payout_id = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+
+# How this node prices its compute:
+#   mode     = "paid" | "free"   — sell compute, or donate it (no payout
+#                                  address or price required).
+#   currency = "eurc" | "usdc"   — what a paid node quotes in.
+#   price_per_cpu_hour = 0.05    — price per CPU-hour as a decimal, e.g.
+#                                  €0.05 / CPU-hour. Informational in v0;
+#                                  the offer builder converts it to
+#                                  per_device_second_micros.
+# mode = "paid"
+# currency = "eurc"
+# price_per_cpu_hour = 0.05
 
 # Number of samples per receipt window (optional, default 60)
 # window_size = 60
