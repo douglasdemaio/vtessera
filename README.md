@@ -8,9 +8,12 @@ plugs into the existing Helium / HNT economy.
 
 > **Status.** v0 (`vtesserad`) is a read-only metering daemon: it samples
 > `/proc`, writes signed Ed25519 receipts to a state directory, opens no
-> sockets, and runs no third-party code. The compute-execution, discovery,
-> settlement, and escrow layers described below are in active build under
-> separate workspace crates (see `ROADMAP.md`).
+> sockets, and runs no third-party code. The escrow program is built
+> (Anchor) and deployed live on **Solana devnet**; `vtessera-node`
+> advertises a signed offer and negotiates paid jobs over **x402**
+> (`HTTP 402 Payment Required`), demonstrated end-to-end by
+> `crates/x402-client` + `scripts/x402-demo.sh`. The remaining modules
+> are in active build under separate workspace crates (see `ROADMAP.md`).
 
 ## What Vtessera is
 
@@ -57,24 +60,34 @@ vtessera/
 ├── README.md                       # this file
 ├── ROADMAP.md                      # modules 1–5, build order, milestones
 ├── BUILD.md                        # v0 daemon's authoritative build spec
+├── MAINNET-CHECKLIST.md            # pre-flight items before mainnet deploy
 ├── LICENSE                         # Apache-2.0
-├── Cargo.toml                      # workspace root
+├── Cargo.toml                      # workspace root (host crates)
 ├── rust-toolchain.toml             # pinned Rust toolchain + musl target
 ├── deny.toml                       # cargo-deny policy
 ├── crates/
-│   └── vtesserad/                  # v0 metering daemon (this README's quickstart)
-│       ├── Cargo.toml
-│       └── src/                    # main, config, metrics, receipt, sign, spool, submit
+│   ├── vtesserad/                  # v0 metering daemon (this README's quickstart)
+│   ├── vtessera-offer/             # signed-offer types (canonical bytes + Ed25519)
+│   ├── vtessera-node-api/          # agent-facing HTTP server: offer, jobs, 402/x402
+│   ├── vtessera-executor/          # job execution (Module 1, skeleton)
+│   ├── vtessera-settlement/        # receipt verification + settlement (Module 3, skeleton)
+│   ├── vtessera-gui/               # GTK4 desktop app (Flatpak-packaged)
+│   ├── devnet-demo/                # excluded: exercises the devnet escrow end-to-end
+│   └── x402-client/                # excluded: agent that pays the escrow and submits a job
 ├── programs/
-│   └── vtessera-escrow/            # (planned) Solana Anchor escrow program — Module 4
-├── packaging/                      # RPM spec, systemd unit, AppArmor profile, example config
+│   └── vtessera-escrow/            # Anchor escrow program — live on Solana devnet
+├── packaging/                      # RPM spec, systemd unit, AppArmor, example config, Flatpak
+├── scripts/
+│   └── x402-demo.sh                # one-command agent demo against devnet
 ├── docs/
 │   └── DESIGN.md                   # design index
 └── .github/workflows/ci.yml
 ```
 
-New module crates (`executor`, `offer`, `node-api`, `settlement`) land under
-`crates/` as they come online; see `ROADMAP.md` for status.
+`devnet-demo` and `x402-client` are excluded from the host workspace: they
+pin the Solana SDK 1.18.x toolchain, whose crypto dep tree conflicts with
+the host crates' newer ed25519-dalek 2. Each builds standalone with its own
+`Cargo.lock` (see the file headers).
 
 ## Where Vtessera fits in the HNT ecosystem
 
@@ -89,10 +102,10 @@ discovery layer; nothing else.
 
 - **Buyer pays:** EURC (default — ECB-anchored price stability) or USDC.
 - **Seller earns:** HNT.
-- **Protocol fee:** flat SOL fee. **DRAFT** until the escrow program is
-  deployed and operating end-to-end — both the wallet address and the
-  amount are subject to change before mainnet. See `ROADMAP.md` §0 for the
-  current draft values.
+- **Protocol fee:** flat SOL fee. **DRAFT** — the wallet address and the
+  amount are still subject to change before mainnet (the devnet escrow
+  currently settles with a pro-rata stub, no fee, and no HNT swap yet).
+  See `ROADMAP.md` §0 for the current draft values.
 
 ## Prerequisites (v0 daemon)
 
@@ -171,6 +184,12 @@ cargo audit
 cargo deny check
 ```
 
+CI additionally gates the module crates (incl. `vtessera-node-api` with
+`--features serve`) and the GUI crate's formatting — see
+`.github/workflows/ci.yml`. Note `cargo fmt --check` checks the whole
+workspace, so the GUI code must be formatted even on machines without the
+GTK4 dev libraries.
+
 ## Quickstart — smoke test (no systemd)
 
 The fastest way to confirm the v0 daemon works on your box:
@@ -183,9 +202,7 @@ cargo build -p vtesserad --release
 sudo mkdir -p /etc/vtessera
 sudo cp packaging/vtessera.toml.example /etc/vtessera/vtessera.toml
 # Choose your editor. Edit payout_id to your own Solana wallet address.
-gedit /vtessera/vtessera.toml
-# Choose your editor. Edit let mut price_micros: Option<u64> = 0.0005; (0.0005 is per second so that's about 1.80 USDC an hour)
-gedit /vtessera/crates/node-api/src/bin/gen_offer.rs
+gedit /etc/vtessera/vtessera.toml
 
 # 3. Run once. This generates /etc/vtessera/identity.key on first run
 #    and writes one sample, then exits.
@@ -202,6 +219,22 @@ sudo ./target/release/vtesserad --config /etc/vtessera/vtessera.toml
 # wait ~60s, then Ctrl-C
 sudo ls /var/lib/vtessera/   # JSON receipts appear here
 ```
+
+## Devnet agent demo (node + x402)
+
+To see the agent-facing side — `vtessera-node` serving a signed offer and
+negotiating a paid job against the live devnet escrow — run the one-command
+demo (needs a devnet wallet; see the script header):
+
+```bash
+scripts/x402-demo.sh
+```
+
+It builds the agent (`crates/x402-client`), points a node at
+`http://127.0.0.1:8402` (reusing one already running there), submits a
+job, pays the x402 challenge into the escrow, and finalizes the split.
+`crates/devnet-demo` is the lower-level variant that exercises
+`pay_for_compute` → `finalize_pro_rata_stub` directly.
 
 ## Install as a systemd service
 
