@@ -92,8 +92,13 @@ mod tests {
         let dir = std::env::temp_dir().join("vtessera_gui_daemon_cfg");
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("vtessera.toml");
-        write_daemon_config(&settings(), &path, &dir.join("identity.key"), &dir.join("state"))
-            .expect("write");
+        write_daemon_config(
+            &settings(),
+            &path,
+            &dir.join("identity.key"),
+            &dir.join("state"),
+        )
+        .expect("write");
         let raw = std::fs::read_to_string(&path).unwrap();
         for key in [
             "sample_interval_secs",

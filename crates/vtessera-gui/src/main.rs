@@ -92,7 +92,11 @@ impl Ui {
 
     fn read_settings(&self) -> Result<Settings, String> {
         let mode = if self.is_free() { "free" } else { "paid" };
-        let currency = if self.currency_dd.selected() == 1 { "usdc" } else { "eurc" };
+        let currency = if self.currency_dd.selected() == 1 {
+            "usdc"
+        } else {
+            "eurc"
+        };
         let price = self.price_entry.text().trim().parse::<f64>().map_err(|_| {
             format!(
                 "price \"{}\" is not a number",
@@ -118,7 +122,8 @@ impl Ui {
     fn apply_settings(&self, s: &Settings) {
         self.mode_switch.set_active(s.is_free());
         self.payout_entry.set_text(&s.payout_id);
-        self.price_entry.set_text(&format_price(s.price_per_cpu_hour));
+        self.price_entry
+            .set_text(&format_price(s.price_per_cpu_hour));
         self.currency_dd
             .set_selected(if s.currency == "usdc" { 1 } else { 0 });
         self.port_spin.set_value(s.port as f64);
@@ -149,7 +154,9 @@ fn current_node_id() -> Option<String> {
     let mut arr = [0u8; ed25519_dalek::SECRET_KEY_LENGTH];
     arr.copy_from_slice(&raw);
     let key = ed25519_dalek::SigningKey::from_bytes(&arr);
-    Some(vtessera_offer::derive_node_id(&key.verifying_key().to_bytes()))
+    Some(vtessera_offer::derive_node_id(
+        &key.verifying_key().to_bytes(),
+    ))
 }
 
 fn count_receipts() -> usize {
@@ -166,7 +173,8 @@ fn refresh_status(ui: &Ui, state: &NodeState) {
     let running = state.daemons.borrow().is_some();
     ui.start_btn.set_sensitive(!running);
     ui.stop_btn.set_sensitive(running);
-    ui.status_label.set_text(if running { "Running" } else { "Stopped" });
+    ui.status_label
+        .set_text(if running { "Running" } else { "Stopped" });
 
     let node_id = current_node_id().unwrap_or_else(|| "—".into());
     ui.node_id_label.set_text(&node_id);
@@ -249,6 +257,7 @@ fn start_node(ui: &Ui, state: &NodeState) {
             return;
         }
     };
+    let node_reused = daemons.node_reused;
 
     let tx = state.log_pending.clone();
     daemon::pump_output(&mut daemons, move |line| {
@@ -256,21 +265,32 @@ fn start_node(ui: &Ui, state: &NodeState) {
     });
     *state.daemons.borrow_mut() = Some(daemons);
 
-    let kind = if settings.is_free() {
-        "free (donating compute)".to_string()
+    if node_reused {
+        ui.log_line(&format!(
+            "existing node already serving port {} — reusing it (left by a previous session). \
+             Its offer predates these settings; Stop then Start to reload.",
+            settings.port
+        ));
     } else {
-        format!(
-            "paid — {} {}/CPU-hour, payout {}",
-            settings.currency.to_uppercase(),
-            format_price(settings.price_per_cpu_hour),
-            settings.payout_id
-        )
-    };
-    ui.log_line(&format!(
-        "node started — {kind} | node_id {node_id} | serving {}",
-        settings.endpoint
-    ));
-    ui.log_line(&format!("offer written to {}", settings::offer_path().display()));
+        let kind = if settings.is_free() {
+            "free (donating compute)".to_string()
+        } else {
+            format!(
+                "paid — {} {}/CPU-hour, payout {}",
+                settings.currency.to_uppercase(),
+                format_price(settings.price_per_cpu_hour),
+                settings.payout_id
+            )
+        };
+        ui.log_line(&format!(
+            "node started — {kind} | node_id {node_id} | serving {}",
+            settings.endpoint
+        ));
+        ui.log_line(&format!(
+            "offer written to {}",
+            settings::offer_path().display()
+        ));
+    }
 
     refresh_status(ui, state);
 }
@@ -349,7 +369,8 @@ fn build_ui(app: &gtk4::Application) {
     let payout_caption = gtk4::Label::new(Some("Solana payout address"));
     payout_caption.set_xalign(0.0);
     grid.attach(&payout_caption, 0, row, 1, 1);
-    ui.payout_entry.set_placeholder_text(Some("Base58 Solana address"));
+    ui.payout_entry
+        .set_placeholder_text(Some("Base58 Solana address"));
     ui.payout_entry.set_hexpand(true);
     grid.attach(&ui.payout_entry, 1, row, 1, 1);
     row += 1;

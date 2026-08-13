@@ -66,7 +66,8 @@ impl Settings {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let raw = toml::to_string(self).map_err(|e| format!("serialize settings: {e}"))?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
         std::fs::write(path, raw).map_err(|e| format!("write {}: {e}", path.display()))
     }
@@ -77,7 +78,10 @@ impl Settings {
 
     pub fn validate(&self) -> Result<(), String> {
         if !matches!(self.mode.as_str(), "paid" | "free") {
-            return Err(format!("mode must be \"paid\" or \"free\", got \"{}\"", self.mode));
+            return Err(format!(
+                "mode must be \"paid\" or \"free\", got \"{}\"",
+                self.mode
+            ));
         }
         if !matches!(self.currency.as_str(), "eurc" | "usdc") {
             return Err(format!(
@@ -130,7 +134,10 @@ fn validate_payout_id(s: &str) -> Result<(), String> {
     const BASE58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     for c in s.bytes() {
         if !BASE58_ALPHABET.contains(&c) {
-            return Err(format!("payout address contains invalid character {:?}", c as char));
+            return Err(format!(
+                "payout address contains invalid character {:?}",
+                c as char
+            ));
         }
     }
     Ok(())

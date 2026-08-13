@@ -41,7 +41,8 @@ pub fn load_or_generate_key(key_path: &Path) -> Result<SigningKey, String> {
     if let Some(parent) = key_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    fs::write(key_path, key.to_bytes()).map_err(|e| format!("write {}: {e}", key_path.display()))?;
+    fs::write(key_path, key.to_bytes())
+        .map_err(|e| format!("write {}: {e}", key_path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -73,9 +73,7 @@ impl Config {
         match self.mode.as_str() {
             "paid" => {
                 validate_payout_id(&self.payout_id)?;
-                if !self.currency.is_empty()
-                    && !matches!(self.currency.as_str(), "eurc" | "usdc")
-                {
+                if !self.currency.is_empty() && !matches!(self.currency.as_str(), "eurc" | "usdc") {
                     return Err(ConfigError::Validation(
                         "currency must be \"eurc\" or \"usdc\"".into(),
                     ));
