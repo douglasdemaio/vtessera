@@ -106,10 +106,13 @@ jobs:
       # `cargo install --git ... anchor-cli`), so install anchor-cli 0.30.1
       # directly. This avoids compiling avm, whose dependency tree pulls an
       # old openssl-sys that fails against Ubuntu 24.04's OpenSSL 3 headers.
-      # anchor-cli uses reqwest/rustls — no OpenSSL — and builds on stable.
+      # Build with rustc 1.79: anchor 0.30.1's locked time 0.3.29 only
+      # compiles with the parsing/formatting/macros features on rustc <= 1.79
+      # (E0282 type annotations needed for Box<_> on 1.80+).
       - name: Install Anchor CLI
         run: |
-          cargo install --locked anchor-cli --git https://github.com/coral-xyz/anchor --tag v0.30.1
+          rustup toolchain install 1.79.0 --profile minimal
+          cargo +1.79.0 install --locked anchor-cli --git https://github.com/coral-xyz/anchor --tag v0.30.1
           anchor --version
 
       - name: Build escrow program (BPF)
