@@ -173,3 +173,31 @@ jobs:
           name: vtesserad-x86_64-unknown-linux-musl
           path: dist/vtesserad
         if: github.ref == 'refs/heads/main'
+
+  # vtessera-gui (GTK4 desktop app) is excluded from the `check` job because
+  # compiling it needs system GUI dev libs (gtk4, cairo, pango, gdk-pixbuf).
+  # It's also deliberately never built for the musl target (the Flatpak build
+  # takes care of shipping it). This job installs the libs via apt and gates
+  # the GUI crate's surface the same way the module crates are gated.
+  gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install GTK4 build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libcairo2-dev libpango1.0-dev \
+            libgdk-pixbuf-2.0-dev libgraphene-1.0-dev libxkbcommon-dev
+
+      - name: Build vtessera-gui
+        run: cargo build -p vtessera-gui --locked
+
+      - name: Clippy vtessera-gui
+        run: cargo clippy -p vtessera-gui --all-targets -- -D warnings
+
+      - name: Test vtessera-gui
+        run: cargo test -p vtessera-gui --locked
