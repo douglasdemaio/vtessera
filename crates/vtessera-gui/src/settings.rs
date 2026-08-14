@@ -3,8 +3,8 @@
 //! Persisted as `settings.toml` in the user config dir. Distinct from the
 //! daemon's `vtessera.toml` (which only holds the fields `vtesserad`
 //! understands): the GUI keeps its own app-level settings (port, advertised
-//! endpoint, escrow account, network) here and derives the daemon config +
-//! signed offer from them on save.
+//! endpoint, escrow account, network, job backend) here and derives the
+//! daemon config + signed offer from them on save.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_PORT: u16 = 8402;
 pub const DEFAULT_ESCROW: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
 pub const DEFAULT_NETWORK: &str = "solana-devnet";
+/// Job executor the GUI passes to the spawned `vtessera-node` via `--backend`.
+pub const DEFAULT_BACKEND: &str = "noop-cpu";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +36,16 @@ pub struct Settings {
     pub network: String,
     /// Metering sample interval in seconds.
     pub sample_interval_secs: u64,
+    /// Job executor backend passed to `vtessera-node --backend`:
+    /// `"noop-cpu"` (synthetic metering, no execution) or `"local-cpu"`
+    /// (runs the job's command on the host — NOT isolated). Defaults to
+    /// `noop-cpu` so existing `settings.toml` files keep their behavior.
+    #[serde(default = "default_backend")]
+    pub backend: String,
+}
+
+fn default_backend() -> String {
+    DEFAULT_BACKEND.into()
 }
 
 impl Default for Settings {
@@ -48,6 +60,7 @@ impl Default for Settings {
             escrow_account: DEFAULT_ESCROW.into(),
             network: DEFAULT_NETWORK.into(),
             sample_interval_secs: 60,
+            backend: DEFAULT_BACKEND.into(),
         }
     }
 }
@@ -91,6 +104,12 @@ impl Settings {
         }
         if self.sample_interval_secs == 0 || self.sample_interval_secs > 3600 {
             return Err("sample interval must be between 1 and 3600 seconds".into());
+        }
+        if !matches!(self.backend.as_str(), "noop-cpu" | "local-cpu") {
+            return Err(format!(
+                "backend must be \"noop-cpu\" or \"local-cpu\", got \"{}\"",
+                self.backend
+            ));
         }
         if self.port == 0 {
             return Err("port must not be 0".into());
@@ -187,6 +206,7 @@ mod tests {
             escrow_account: DEFAULT_ESCROW.into(),
             network: "solana-devnet".into(),
             sample_interval_secs: 60,
+            backend: DEFAULT_BACKEND.into(),
         }
     }
 
@@ -237,6 +257,38 @@ mod tests {
         let s = Settings::load_or_default(&dir.join("nope.toml"));
         assert_eq!(s.mode, "paid");
         assert_eq!(s.port, DEFAULT_PORT);
+        assert_eq!(s.backend, DEFAULT_BACKEND);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backend_validation_rejects_unknown_backends() {
+        let mut s = valid();
+        s.backend = "docker".into();
+        assert!(s.validate().is_err());
+        for ok in ["noop-cpu", "local-cpu"] {
+            let mut s = valid();
+            s.backend = ok.into();
+            assert!(s.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn old_settings_without_backend_default_to_noop_cpu() {
+        // An existing settings.toml (no `backend` key) must load with the
+        // safe default rather than failing the whole read.
+        let dir = std::env::temp_dir().join("vtessera_gui_settings_backend_default");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = "mode = \"free\"\ncurrency = \"eurc\"\nprice_per_cpu_hour = 0.0\n\
+                   payout_id = \"\"\nport = 8402\nendpoint = \"http://127.0.0.1:8402\"\n\
+                   escrow_account = \"6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma\"\n\
+                   network = \"solana-devnet\"\nsample_interval_secs = 60\n";
+        std::fs::write(&path, old).unwrap();
+        let s = Settings::load_or_default(&path);
+        assert_eq!(s.mode, "free");
+        assert_eq!(s.backend, DEFAULT_BACKEND);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

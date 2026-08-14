@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#fff"/>
+  <g fill="none" stroke="#025043" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+    <!-- outer square -->
+    <rect x="46" y="46" width="420" height="420" rx="6"/>
+    <!-- left computer -->
+    <path d="M54 190h108v112H54"/>
+    <path d="M54 310h116"/>
+    <!-- right computer -->
+    <path d="M458 190H350v112h108"/>
+    <path d="M458 310H342"/>
+  </g>
+
+  <!-- data exchange -->
+  <g fill="#025043">
+    <!-- rightward bit stream -->
+    <rect x="182" y="202" width="14" height="14"/>
+    <rect x="214" y="202" width="14" height="14"/>
+    <rect x="246" y="202" width="14" height="14"/>
+    <path d="M278 202h34v-13l28 20-28 20v-13h-34z"/>
+
+    <!-- leftward bit stream -->
+    <path d="M234 284h-34v-13l-28 20 28 20v-13h34z"/>
+    <rect x="264" y="284" width="14" height="14"/>
+    <rect x="296" y="284" width="14" height="14"/>
+    <rect x="328" y="284" width="14" height="14"/>
+  </g>
+</svg>
