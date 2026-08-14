@@ -72,6 +72,12 @@ jobs:
       # with the Solana BPF toolchain — `anchor build`. It's excluded
       # from the host workspace, so the host CI doesn't try to compile
       # it; this job hosts the Anchor toolchain.
+      #
+      # `--no-idl`: anchor 0.30.1's IDL generation is broken against
+      # current crates.io (anchor-syn calls proc_macro2::Span::source_file,
+      # removed in proc-macro2 >= 1.0.95; downgrading cascades into
+      # quote/borsh MSRV pins). CI only needs the compiled ELF for the
+      # adversarial litesvm suite; the IDL is a deploy-time artifact.
 
       # Adversarial escrow suite (MAINNET-CHECKLIST §2): standalone
       # litesvm crate in tests/adversarial. Needs the compiled program
@@ -118,7 +124,7 @@ jobs:
       - name: Build escrow program (BPF)
         run: |
           cd programs
-          anchor build
+          anchor build --no-idl
           sha256sum target/deploy/vtessera_escrow.so
 
       - name: Program unit tests (drift guard for error codes)
