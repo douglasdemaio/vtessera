@@ -77,10 +77,27 @@ jobs:
       # litesvm crate in tests/adversarial. Needs the compiled program
       # ELF first (`anchor build` in programs/), which needs the SBF
       # toolchain. Pinned versions mirror the dev environment.
+      #
+      # release.solana.com has been intermittently failing TLS handshakes
+      # (curl error 35) from CI runners and from dev machines; the agave
+      # GitHub release is the same toolchain and is reachable. Download
+      # the tarball from the mirror, verify it against the pinned sha256,
+      # and put its bin/ on PATH. curl's own retries ride out transient
+      # GitHub hiccups; the checksum is the integrity gate.
       - name: Install Solana (Agave) toolchain
         run: |
-          sh -c "$(curl -sSfL https://release.solana.com/v3.1.14/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          TAG=v3.1.14
+          EXPECTED=06f97c065cc977cbec2f13ffc9bc9d3b92fef485431fcb370a269de69532ef51
+          TARBALL=solana-release-x86_64-unknown-linux-gnu.tar.bz2
+          cd "$RUNNER_TEMP"
+          curl -sSfL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 600 \
+            -o "$TARBALL" \
+            "https://github.com/anza-xyz/agave/releases/download/$TAG/$TARBALL"
+          echo "$EXPECTED  $TARBALL" | sha256sum -c -
+          mkdir -p solana-release
+          tar -xjf "$TARBALL" -C solana-release
+          echo "$RUNNER_TEMP/solana-release/solana-release/bin" >> "$GITHUB_PATH"
           cargo-build-sbf --version
 
       - name: Install Anchor CLI
