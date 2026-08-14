@@ -204,8 +204,8 @@ sudo cp packaging/vtessera.toml.example /etc/vtessera/vtessera.toml
 # Choose your editor. Edit payout_id to your own Solana wallet address.
 gedit /etc/vtessera/vtessera.toml
 
-# 3. Run once. This generates /etc/vtessera/identity.key on first run
-#    and writes one sample, then exits.
+# 3. Run once. This generates /var/lib/vtessera/identity.key on first
+#    run and writes one sample, then exits.
 sudo ./target/release/vtesserad --config /etc/vtessera/vtessera.toml --once
 ```
 
@@ -244,10 +244,12 @@ without running the job, proving the escrow money path end to end.
 ## Install as a systemd service
 
 The shipped unit is hardened (DynamicUser, ProtectSystem=strict, no
-ambient capabilities). That hardening has one consequence worth calling
-out: at runtime `/etc/vtessera` is **read-only**, so the daemon cannot
-auto-generate the identity key from inside the service. You need to
-bootstrap the key once before starting the service.
+ambient capabilities). No bootstrap step is needed: `StateDirectory=vtessera`
+creates `/var/lib/vtessera` owned by the service's dynamic user, and the
+daemon auto-generates its identity key there (`/var/lib/vtessera/identity.key`,
+mode 0600) on first start. `/etc/vtessera` stays read-only — the key
+never goes in `/etc` (a root-created key there could not be read by the
+dynamic user anyway).
 
 ```bash
 # 1. Install the binary where the unit expects it
@@ -260,10 +262,10 @@ sudo mkdir -p /etc/vtessera
 sudo cp packaging/vtessera.toml.example /etc/vtessera/vtessera.toml
 sudo "${EDITOR:-vi}" /etc/vtessera/vtessera.toml   # set payout_id
 
-# 3. Bootstrap the identity key — run the daemon once as root so it
-#    can write /etc/vtessera/identity.key while /etc is still writable.
-sudo /usr/bin/vtesserad --config /etc/vtessera/vtessera.toml --once
-sudo ls -l /etc/vtessera/identity.key   # should exist, mode 0600
+# 3. If you ran the manual quickstart above as root first, remove its
+#    root-owned key so the service regenerates one under its own user.
+#    (Only needed when /var/lib/vtessera/identity.key already exists.)
+sudo rm -f /var/lib/vtessera/identity.key
 
 # 4. Install and start the service
 sudo cp packaging/vtesserad.service /etc/systemd/system/

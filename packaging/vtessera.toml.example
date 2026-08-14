@@ -9,7 +9,14 @@ sample_interval_secs = 60
 state_dir = "/var/lib/vtessera"
 
 # Path to the Ed25519 identity key (auto-generated if missing)
-key_path = "/etc/vtessera/identity.key"
+#
+# Lives in the state directory, not /etc: the hardened systemd unit
+# (ProtectSystem=strict + DynamicUser, see packaging/vtesserad.service)
+# makes /etc read-only and unprivileged, so a key in /etc can never be
+# written — nor a root-created one read. `StateDirectory=vtessera`
+# instead creates /var/lib/vtessera owned by the service's dynamic user,
+# so the daemon can generate and hold its key there on first start.
+key_path = "/var/lib/vtessera/identity.key"
 
 # Operator payout identifier. Must be a Solana base58 Ed25519 public key
 # (32–44 characters from the base58 alphabet). Required only when

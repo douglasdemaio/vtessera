@@ -6,14 +6,11 @@
 /usr/bin/vtesserad {
   #include <abstractions/base>
 
-  # State directory (DynamicUser)
+  # State directory (DynamicUser) — receipts + identity key
   /var/lib/vtessera/** rw,
 
   # Config
   /etc/vtessera/vtessera.toml r,
-
-  # Key material
-  /etc/vtessera/identity.key rw,
 
   # Proc filesystem — read-only sampling
   /proc/stat r,
