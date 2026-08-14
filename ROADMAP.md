@@ -166,6 +166,16 @@ a bespoke API:
   moderate and rate-limit); decentralize discovery later only if demand
   warrants.
 
+**Status (current):** all three are implemented. Offers sign/verify
+(`crates/offer`); the node serves a real MCP `2024-11-05` endpoint
+(`POST /mcp`, plus a stdio `vtessera-mcp` binary) and an A2A card at
+`/.well-known/agent.json` (`crates/node-api`); `crates/offer-index`
+verifies and serves current offers (push register + optional pull
+seeding) at `GET /offers`. What's still open is the *executor wiring*:
+`submit_job` returns an honest 501 until the backend runs jobs
+(§1/§3) — the marketplace has sellers, discovery, and honest failure
+modes, but no jobs yet.
+
 ### 2b. Paying (or not) — x402
 
 For **paid** compute, use **x402**, the open HTTP-native standard for

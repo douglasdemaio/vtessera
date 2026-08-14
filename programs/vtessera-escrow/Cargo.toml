@@ -39,3 +39,13 @@ anchor-spl = "0.30"
 # post fresh Hermes-signed prices before invoking us; we read and verify
 # the feed ID + staleness gate.
 pyth-solana-receiver-sdk = "0.3.2"
+
+[dev-dependencies]
+# Adversarial test suite (MAINNET-CHECKLIST §2) lives in a SEPARATE
+# standalone crate at /home/douglas/vtessera/tests/adversarial with its
+# own Cargo.lock. The program's 1.18 tree pins subtle = 2.4.1 exactly
+# (via solana-frozen-abi) while LiteSVM's solana-sdk 2.1 tree requires
+# subtle >= 2.6 (CtOption::into_option in solana-curve25519); the two
+# cannot share a lockfile. The adversarial crate loads the compiled
+# `vtessera_escrow.so` (built by cargo-build-sbf here) and encodes all
+# instructions/accounts by hand, so it has no crate dependency on us.

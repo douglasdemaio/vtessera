@@ -18,7 +18,13 @@
 //!
 //! - `GET /offer` — returns the seller's signed [`SignedOffer`] as JSON.
 //! - `GET /mcp/manifest` — returns an MCP-shaped resource manifest so an
-//!   agent's tool catalog discovers this node automatically.
+//!   agent's tool catalog discovers this node automatically. Kept for
+//!   backward compatibility; the real MCP endpoint is `POST /mcp`.
+//! - `POST /mcp` — a real MCP (Model Context Protocol) server
+//!   (protocol `2024-11-05`) over JSON-RPC 2.0 ([`mcp`]); a request in,
+//!   a JSON-RPC response out, `202` (empty) for notifications.
+//! - `GET /.well-known/agent.json` — an A2A agent card so agent-to-agent
+//!   frameworks can discover this node without bespoke client code.
 //! - `POST /jobs` — the work endpoint. For paid offers, returns 402 with
 //!   x402 payment terms (the working half of the flow). Submissions are
 //!   otherwise refused with **501 Not Implemented** — never a fake 200/202 —
@@ -32,6 +38,8 @@
 #![forbid(unsafe_code)]
 
 use vtessera_offer::{PriceQuote, SignedOffer};
+
+pub mod mcp;
 
 /// One inbound HTTP request, framework-agnostic.
 #[derive(Debug, Clone)]
@@ -136,10 +144,19 @@ pub fn dispatch(state: &NodeState, req: HttpRequest) -> HttpResponse {
     match (req.method, req.path.as_str()) {
         (HttpMethod::Get, "/offer") => handle_offer(state),
         (HttpMethod::Get, "/mcp/manifest") => handle_mcp_manifest(state),
+        (HttpMethod::Post, "/mcp") => handle_mcp(state, req),
+        (HttpMethod::Get, "/.well-known/agent.json") => handle_agent_card(state),
         (HttpMethod::Post, "/jobs") => handle_jobs(state, req),
         (HttpMethod::Get, "/healthz") => HttpResponse::text(200, "ok"),
         _ => HttpResponse::text(404, "not found"),
     }
+}
+
+/// Parse a signed offer from the JSON produced by `vtessera_offer::to_json`
+/// (or any serde-compatible rendering of it). Shared by the node and MCP
+/// binaries so offer loading lives in exactly one audited place.
+pub fn parse_signed_offer(raw: &str) -> Result<SignedOffer, String> {
+    serde_json::from_str(raw).map_err(|e| format!("invalid signed offer JSON: {e}"))
 }
 
 fn handle_offer(state: &NodeState) -> HttpResponse {
@@ -148,6 +165,47 @@ fn handle_offer(state: &NodeState) -> HttpResponse {
 
 fn handle_mcp_manifest(state: &NodeState) -> HttpResponse {
     HttpResponse::json(200, mcp_manifest(state))
+}
+
+/// `POST /mcp`: one JSON-RPC message per request body. Notifications are
+/// acknowledged with `202` and no body (streamable-HTTP protocol §6.2);
+/// responses are JSON-RPC responses with `200`.
+fn handle_mcp(state: &NodeState, req: HttpRequest) -> HttpResponse {
+    let line = String::from_utf8_lossy(&req.body).to_string();
+    let server = mcp::McpServer::new(state.clone());
+    match server.handle(&line) {
+        Some(resp) => {
+            let body = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into());
+            HttpResponse::json(200, body)
+        }
+        None => HttpResponse {
+            status: 202,
+            headers: vec![("content-length".into(), "0".into())],
+            body: Vec::new(),
+        },
+    }
+}
+
+/// `GET /.well-known/agent.json`: an A2A (agent-to-agent) card so discovery
+/// frameworks can index this node. Skills map one-to-one onto the MCP
+/// tool catalog.
+fn handle_agent_card(state: &NodeState) -> HttpResponse {
+    let card = serde_json::json!({
+        "name": mcp::MCP_SERVER_NAME,
+        "description": "Vtessera compute seller node: signed compute offers over MCP + x402; paid offers settle to HNT.",
+        "url": state.offer.body.endpoint,
+        "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": { "streaming": false, "pushNotifications": false },
+        "authentication": { "schemes": ["none"], "credentials": false },
+        "skills": [{
+            "id": "submit_job",
+            "name": "Submit compute job",
+            "description": "Submit an OCI workload to this node. Paid offers return 402 (x402) until a signed payment is attached; job execution is not yet wired in v0.",
+            "tags": ["compute"],
+        }],
+    });
+    let body = serde_json::to_string(&card).unwrap_or_else(|_| "{}".into());
+    HttpResponse::json(200, body)
 }
 
 /// Classify an incoming `/jobs` request without running anything. The
@@ -407,5 +465,63 @@ mod tests {
         assert!(body.contains("\"name\":\"submit_job\""));
         assert!(body.contains("\"resources\":["));
         assert!(body.contains("vtessera://offer"));
+    }
+
+    #[test]
+    fn parse_signed_offer_roundtrips_to_json() {
+        let s = state(paid());
+        let r = dispatch(&s, req(HttpMethod::Get, "/offer", vec![]));
+        let body = String::from_utf8(r.body).unwrap();
+        let parsed = parse_signed_offer(&body).expect("offer JSON should parse");
+        assert_eq!(parsed.body.node_id, s.offer.body.node_id);
+        assert_eq!(parsed.pubkey_hex, s.offer.pubkey_hex);
+    }
+
+    #[test]
+    fn parse_signed_offer_rejects_garbage() {
+        assert!(parse_signed_offer("not json").is_err());
+    }
+
+    #[test]
+    fn mcp_post_over_http_handles_initialize() {
+        let s = state(paid());
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+        let r = HttpRequest {
+            method: HttpMethod::Post,
+            path: "/mcp".into(),
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: body.to_vec(),
+        };
+        let resp = dispatch(&s, r);
+        assert_eq!(resp.status, 200);
+        let text = String::from_utf8(resp.body).unwrap();
+        assert!(text.contains("\"jsonrpc\":\"2.0\""));
+        assert!(text.contains("\"serverInfo\""));
+    }
+
+    #[test]
+    fn mcp_post_notification_returns_202_empty() {
+        let s = state(paid());
+        let body = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let r = HttpRequest {
+            method: HttpMethod::Post,
+            path: "/mcp".into(),
+            headers: vec![],
+            body: body.to_vec(),
+        };
+        let resp = dispatch(&s, r);
+        assert_eq!(resp.status, 202);
+        assert!(resp.body.is_empty());
+    }
+
+    #[test]
+    fn agent_card_surfaces_skills() {
+        let s = state(paid());
+        let r = dispatch(&s, req(HttpMethod::Get, "/.well-known/agent.json", vec![]));
+        assert_eq!(r.status, 200);
+        let body = String::from_utf8(r.body).unwrap();
+        assert!(body.contains("\"id\":\"submit_job\""));
+        assert!(body.contains("\"tags\":[\"compute\"]"));
+        assert!(body.contains("\"capabilities\""));
     }
 }

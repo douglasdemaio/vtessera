@@ -17,6 +17,13 @@
 //!   the original stablecoin.
 //! - `cancel_before_start` lets a buyer reclaim escrow with `f = 0` if
 //!   the seller never started the job.
+//! - `init_config` / `update_settlement_authority` manage the single
+//!   on-chain `Config` account holding the **settlement authority**.
+//!   Both finalize IXs require the signer to equal
+//!   `Config::settlement_authority`, so a single keypair can no longer
+//!   finalize arbitrary escrows: on mainnet this is set to a Squads
+//!   multisig PDA (MAINNET-CHECKLIST §3.5). On devnet it's set to the
+//!   deployer keypair by `init_config`.
 //!
 //! ### `finalize_pro_rata_stub` — devnet bypass
 //!
@@ -89,6 +96,10 @@ pub const MAX_PYTH_STALENESS_SECS: u64 = 60;
 // Until then, callers should treat these as configuration, not
 // production parameters.
 
+/// Seed prefix for the program's single `Config` account (settlement
+/// authority holder).
+pub const CONFIG_SEED: &[u8] = b"vtessera_config";
+
 /// **DRAFT.** Flat per-job fee in lamports (0.0001 SOL).
 pub const DRAFT_FEE_LAMPORTS: u64 = 100_000;
 
@@ -111,6 +122,38 @@ pub const DRAFT_BURN_BPS: u16 = 100;
 #[program]
 pub mod vtessera_escrow {
     use super::*;
+
+    /// Create the program's `Config` account and set the settlement
+    /// authority. Called once right after deploy (by the deployer on
+    /// devnet, by whoever holds the deployer key on mainnet).
+    ///
+    /// **Race note:** `init` fails if the account already exists, and
+    /// anyone may call this first. The config PDA is derivable from the
+    /// program ID alone, so a griefer could front-run deploy + init.
+    /// Mitigation: initialize in the same block as the deploy (the
+    /// program is deployed with the config account as a planned
+    /// step of the deploy transaction batch). Cost of a successful
+    /// front-run on devnet is a DoS of finalize; on mainnet it costs
+    /// the griefer real rent and requires winning the deploy block.
+    pub fn init_config(ctx: Context<InitConfig>, settlement_authority: Pubkey) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        config.settlement_authority = settlement_authority;
+        config.bump = ctx.bumps.config;
+        Ok(())
+    }
+
+    /// Change the settlement authority. Only the current settlement
+    /// authority may call this — on mainnet that's the Squads vault PDA
+    /// itself (it can invoke this IX via Squads' execute-transaction CPI
+    /// with its PDA as signer), so the trust anchor can move without a
+    /// redeploy.
+    pub fn update_settlement_authority(
+        ctx: Context<UpdateSettlementAuthority>,
+        new_authority: Pubkey,
+    ) -> Result<()> {
+        ctx.accounts.config.settlement_authority = new_authority;
+        Ok(())
+    }
 
     /// Deposit the contract price into the escrow PDA and pay the flat
     /// protocol fee. Atomic — either both happen or neither.
@@ -470,6 +513,19 @@ fn expected_hnt_atomic(
 
 // ---------- Accounts ------------------------------------------------------
 
+/// Program configuration: the single address allowed to finalize
+/// (settle) jobs. This is what makes the "no single keypair can drain an
+/// escrow" property hold — the value is the Squads vault PDA on mainnet.
+#[account]
+pub struct Config {
+    pub settlement_authority: Pubkey,
+    pub bump: u8,
+}
+
+impl Config {
+    pub const LEN: usize = 32 + 1;
+}
+
 #[account]
 pub struct Contract {
     pub job_id: [u8; 32],
@@ -486,6 +542,39 @@ pub struct Contract {
 
 impl Contract {
     pub const LEN: usize = 32 + 32 + 32 + 8 + 32 + 1 + 1 + 1;
+}
+
+#[derive(Accounts)]
+pub struct InitConfig<'info> {
+    /// Whoever deploys pays for the account. See the `init_config` race
+    /// note in the instruction docs.
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + Config::LEN,
+        seeds = [CONFIG_SEED],
+        bump,
+    )]
+    pub config: Account<'info, Config>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateSettlementAuthority<'info> {
+    pub settlement_authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = config.settlement_authority == settlement_authority.key()
+            @ EscrowError::NotSettlementAuthority,
+    )]
+    pub config: Account<'info, Config>,
 }
 
 #[derive(Accounts)]
@@ -536,9 +625,18 @@ pub struct PayForCompute<'info> {
 /// stablecoin/USD that matches the contract's stablecoin).
 #[derive(Accounts)]
 pub struct FinalizePro<'info> {
-    /// Settlement authority. Pre-mainnet this is a single keypair; on
-    /// mainnet the multisig PDA from MAINNET-CHECKLIST §3.5.
+    /// Settlement authority. Must equal `Config::settlement_authority` —
+    /// the Squads multisig PDA on mainnet (MAINNET-CHECKLIST §3.5), the
+    /// deployer keypair on devnet.
     pub settlement_authority: Signer<'info>,
+
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = config.settlement_authority == settlement_authority.key()
+            @ EscrowError::NotSettlementAuthority,
+    )]
+    pub config: Account<'info, Config>,
 
     #[account(
         mut,
@@ -565,7 +663,12 @@ pub struct FinalizePro<'info> {
     // HNT side (for the seller's earned slice). Boxed because BPF
     // stack-frame budget is 4096 bytes; PriceUpdateV2 (below) is large
     // enough that unboxed Account fields push us over.
-    #[account(address = HNT_MINT @ EscrowError::WrongMint)]
+    // `mut` is load-bearing: the SPL `burn` CPI (below) requires the mint
+    // to be writable or the transaction fails with
+    // "Cross-program invocation with unauthorized signer or writable
+    // account". The devnet stub path never burned so this only surfaces
+    // via the §2 litesvm suite against the production path.
+    #[account(mut, address = HNT_MINT @ EscrowError::WrongMint)]
     pub hnt_mint: Box<Account<'info, Mint>>,
 
     #[account(
@@ -597,6 +700,14 @@ pub struct FinalizePro<'info> {
 #[derive(Accounts)]
 pub struct FinalizeProStub<'info> {
     pub settlement_authority: Signer<'info>,
+
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = config.settlement_authority == settlement_authority.key()
+            @ EscrowError::NotSettlementAuthority,
+    )]
+    pub config: Account<'info, Config>,
 
     #[account(
         mut,
@@ -662,6 +773,8 @@ pub struct JobFinalized {
 
 #[error_code]
 pub enum EscrowError {
+    #[msg("signer is not the configured settlement authority")]
+    NotSettlementAuthority,
     #[msg("contract price must be > 0")]
     ZeroPrice,
     #[msg("completion fraction f_micros must be in [0, 1_000_000]")]
@@ -746,5 +859,26 @@ mod tests {
     fn expected_hnt_atomic_zero_input_zero_output() {
         let out = expected_hnt_atomic(0, 6, 100_000_000, -8, 250_000_000, -8, 50).unwrap();
         assert_eq!(out, 0);
+    }
+
+    /// Drift guard for tests/adversarial/tests/adversarial.rs: the
+    /// adversarial suite mirrors `EscrowError` as local constants because
+    /// its litesvm / solana-sdk 2.1 tree cannot link this crate's 1.18
+    /// tree. Anchor 0.30 encodes custom errors as 6000 + variant index;
+    /// pin every code here so a variant reorder/insert fails this test
+    /// instead of silently mis-asserting in the adversarial suite.
+    #[test]
+    fn escrow_error_codes_are_stable() {
+        assert_eq!(u32::from(EscrowError::NotSettlementAuthority), 6000);
+        assert_eq!(u32::from(EscrowError::ZeroPrice), 6001);
+        assert_eq!(u32::from(EscrowError::FractionOutOfRange), 6002);
+        assert_eq!(u32::from(EscrowError::AlreadyFinal), 6003);
+        assert_eq!(u32::from(EscrowError::WrongMint), 6004);
+        assert_eq!(u32::from(EscrowError::WrongOwner), 6005);
+        assert_eq!(u32::from(EscrowError::MathOverflow), 6006);
+        assert_eq!(u32::from(EscrowError::PythStale), 6007);
+        assert_eq!(u32::from(EscrowError::BadFeedId), 6008);
+        assert_eq!(u32::from(EscrowError::BadOraclePrice), 6009);
+        assert_eq!(u32::from(EscrowError::SwapBelowMinimum), 6010);
     }
 }

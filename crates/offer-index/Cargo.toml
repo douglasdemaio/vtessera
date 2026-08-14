@@ -1,0 +1,33 @@
+[package]
+name = "vtessera-offer-index"
+description = "Vtessera Module 2a — central offer index (verify + serve signed offers)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "vtessera_offer_index"
+path = "src/lib.rs"
+
+# The HTTP server + seed poller are gated behind `serve`, so the default
+# (library-only) build opens no sockets and pulls no network stack.
+[[bin]]
+name = "vtessera-offer-index"
+path = "src/bin/offer_index.rs"
+required-features = ["serve"]
+
+[features]
+default = []
+serve = ["dep:ureq"]
+
+[dependencies]
+# Pure dispatch only. Socket + outbound (ureq) live behind `serve`.
+vtessera-offer = { path = "../offer" }
+vtessera-mini-http = { path = "../mini-http" }
+serde_json = { workspace = true }
+ureq = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Test-only: build a deterministic SigningKey to construct test offers.
+ed25519-dalek = { workspace = true }

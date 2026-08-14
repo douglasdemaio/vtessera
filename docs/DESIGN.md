@@ -23,14 +23,19 @@ This document is an index. The authoritative design lives in:
 | ---- | ------------------ | ------ |
 | `crates/vtesserad` | v0 metering daemon | shipped (CI green) |
 | `crates/executor` | Module 1 — execution + accelerators | skeleton |
-| `crates/offer` | Module 2 — signed offers (MCP-shaped) | skeleton |
-| `crates/node-api` | Module 2 — x402 / MCP HTTP surface (feature-gated) | skeleton |
+| `crates/offer` | Module 2 — signed machine-readable offers | shipped |
+| `crates/node-api` | Module 2 — x402 / MCP HTTP surface (feature-gated) | shipped |
+| `crates/mini-http` | Module 2 — shared HTTP/1.1 server primitives | shipped |
+| `crates/offer-index` | Module 2a — central offer index (verify + serve) | shipped |
 | `crates/settlement` | Module 3 — receipt verification + `f` | skeleton |
-| `programs/vtessera-escrow` | Module 4 — Anchor escrow program | skeleton |
+| `programs/vtessera-escrow` | Module 4 — Anchor escrow program | shipped (devnet) |
 
 Skeleton crates land with the types, traits, and tests that pin the
 interface; the heavy implementation work (Kata + VFIO, DCGM telemetry,
-Jupiter CPI, etc.) lands per the ROADMAP milestones.
+Jupiter CPI, executor wiring, etc.) lands per the ROADMAP milestones.
+"Shipped" means the crate's contract is implemented and tested; job
+execution (the executor backend) and on-chain payment verification are
+still unwired, and the node API returns honest 501s until they land.
 
 ## Why HNT, not a Vtessera token
 

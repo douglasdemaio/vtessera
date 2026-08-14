@@ -52,6 +52,9 @@ jobs:
           cargo clippy -p vtessera-offer --all-targets -- -D warnings
           cargo clippy -p vtessera-node-api --all-targets -- -D warnings
           cargo clippy -p vtessera-node-api --features serve --all-targets -- -D warnings
+          cargo clippy -p vtessera-mini-http --all-targets -- -D warnings
+          cargo clippy -p vtessera-offer-index --all-targets -- -D warnings
+          cargo clippy -p vtessera-offer-index --features serve --all-targets -- -D warnings
           cargo clippy -p vtessera-settlement --all-targets -- -D warnings
 
       - name: Test module crates
@@ -60,13 +63,52 @@ jobs:
           cargo test -p vtessera-offer --locked
           cargo test -p vtessera-node-api --locked
           cargo test -p vtessera-node-api --features serve --locked
+          cargo test -p vtessera-mini-http --locked
+          cargo test -p vtessera-offer-index --locked
+          cargo test -p vtessera-offer-index --features serve --locked
           cargo test -p vtessera-settlement --locked
 
       # Anchor escrow program (Module 4) lives under programs/ and builds
       # with the Solana BPF toolchain — `anchor build`. It's excluded
       # from the host workspace, so the host CI doesn't try to compile
-      # it; a follow-up CI job hosts the Anchor toolchain when the
-      # program is wired for devnet deploy.
+      # it; this job hosts the Anchor toolchain.
+
+      # Adversarial escrow suite (MAINNET-CHECKLIST §2): standalone
+      # litesvm crate in tests/adversarial. Needs the compiled program
+      # ELF first (`anchor build` in programs/), which needs the SBF
+      # toolchain. Pinned versions mirror the dev environment.
+      - name: Install Solana (Agave) toolchain
+        run: |
+          sh -c "$(curl -sSfL https://release.solana.com/v3.1.14/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          cargo-build-sbf --version
+
+      - name: Install Anchor CLI
+        run: |
+          cargo install --locked avm
+          avm install 0.30.1
+          avm use 0.30.1
+          echo "$HOME/.avm/bin" >> "$GITHUB_PATH"
+          anchor --version
+
+      - name: Build escrow program (BPF)
+        run: |
+          cd programs
+          anchor build
+          sha256sum target/deploy/vtessera_escrow.so
+
+      - name: Program unit tests (drift guard for error codes)
+        run: |
+          cd programs/vtessera-escrow
+          cargo fmt --check
+          cargo test --locked
+
+      - name: Adversarial suite (litesvm, §2)
+        run: |
+          cd tests/adversarial
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --locked
 
       - name: Audit
         run: |

@@ -327,6 +327,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "create escrow ATA",
     )?;
 
+    // --- 3b. init_config: settlement authority = payer (devnet) ----------
+    // Finalize IXs require the signer to match the config's settlement
+    // authority. On mainnet this is the Squads vault PDA (§3.5); the
+    // devnet flow pins it to the payer. Idempotent across runs.
+    let (config_pda, _config_bump) =
+        Pubkey::find_program_address(&[b"vtessera_config"], &program_id);
+    let cfg_disc = anchor_disc("init_config");
+    let mut cfg_data = cfg_disc.to_vec();
+    cfg_data.extend_from_slice(&payer.pubkey().to_bytes());
+    let cfg_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new(config_pda, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data: cfg_data,
+    };
+    match rpc.get_account(&config_pda) {
+        Ok(_) => println!("config PDA {config_pda} already initialized; skipping init_config"),
+        Err(_) => {
+            send_tx(&rpc, &[cfg_ix], &[&payer], &payer, "init_config")?;
+        }
+    }
+
     let pay_disc = anchor_disc("pay_for_compute");
     let pay_args = PayForComputeArgs {
         job_id,
@@ -419,13 +444,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fin_data.extend_from_slice(&fin_args.try_to_vec()?);
 
     // Anchor account order in FinalizeProStub:
-    //   settlement_authority (signer), contract (mut),
-    //   escrow_stablecoin_ata (mut), buyer_stablecoin_ata (mut),
-    //   seller_stablecoin_ata (mut), token_program
+    //   settlement_authority (signer), config,
+    //   contract (mut), escrow_stablecoin_ata (mut),
+    //   buyer_stablecoin_ata (mut), seller_stablecoin_ata (mut),
+    //   token_program
     let fin_ix = Instruction {
         program_id,
         accounts: vec![
             AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(buyer_ata, false),

@@ -10,24 +10,31 @@ repository.workspace = true
 name = "vtessera_node_api"
 path = "src/lib.rs"
 
-# The HTTP-server binary is gated behind the `serve` feature. The default
-# (library-only) build opens no sockets — that's what node-api ships in
-# tests and what other crates link against.
+# The HTTP-server binaries are gated behind the `serve` feature. The
+# default (library-only) build opens no sockets — that's what node-api
+# ships in tests and what other crates link against.
 [[bin]]
 name = "vtessera-node"
 path = "src/bin/vtessera_node.rs"
 required-features = ["serve"]
 
+[[bin]]
+name = "vtessera-mcp"
+path = "src/bin/vtessera_mcp.rs"
+required-features = ["serve"]
+
 [features]
 default = []
-serve = []
+serve = ["dep:vtessera-mini-http"]
 
 [dependencies]
 # Pure dispatch only. No socket layer here — that lives in a thin binary
 # crate gated behind a Cargo feature so v0's no-inbound-network rule
 # survives by default. See ROADMAP.md §2c.
 vtessera-offer = { path = "../offer" }
+vtessera-mini-http = { path = "../mini-http", optional = true }
 hex = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # Test-only: build a deterministic SigningKey to construct test offers.

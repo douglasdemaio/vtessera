@@ -16,6 +16,11 @@ repository = "https://github.com/douglasdemaio/vtessera"
 name = "vtessera-devnet-demo"
 path = "src/main.rs"
 
+# MAINNET-CHECKLIST §6.1 — varied-parameter devnet soak runner.
+[[bin]]
+name = "soak"
+path = "src/bin/soak.rs"
+
 [dependencies]
 # Solana SDK pinned to the 1.18 line — matches what's already cached on
 # this dev box. Bump together when bumping the on-chain program toolchain.
