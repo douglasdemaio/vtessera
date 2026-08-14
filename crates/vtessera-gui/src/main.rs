@@ -42,6 +42,7 @@ struct Ui {
     escrow_entry: gtk4::Entry,
     network_entry: gtk4::Entry,
     interval_spin: gtk4::SpinButton,
+    backend_dd: gtk4::DropDown,
     error_label: gtk4::Label,
     status_label: gtk4::Label,
     node_id_label: gtk4::Label,
@@ -104,6 +105,7 @@ impl Ui {
             )
         })?;
         let port = self.port_spin.value() as u16;
+        let backend = backend_from_dropdown(&self.backend_dd);
         let settings = Settings {
             mode: mode.into(),
             currency: currency.into(),
@@ -114,6 +116,7 @@ impl Ui {
             escrow_account: self.escrow_entry.text().trim().to_string(),
             network: self.network_entry.text().trim().to_string(),
             sample_interval_secs: self.interval_spin.value() as u64,
+            backend: backend.into(),
         };
         settings.validate()?;
         Ok(settings)
@@ -131,7 +134,18 @@ impl Ui {
         self.escrow_entry.set_text(&s.escrow_account);
         self.network_entry.set_text(&s.network);
         self.interval_spin.set_value(s.sample_interval_secs as f64);
+        self.backend_dd
+            .set_selected(if s.backend == "local-cpu" { 1 } else { 0 });
         self.sync_mode_sensitivity();
+    }
+}
+
+/// Map the backend dropdown's selected index to the `--backend` string.
+fn backend_from_dropdown(dd: &gtk4::DropDown) -> &'static str {
+    if dd.selected() == 1 {
+        "local-cpu"
+    } else {
+        "noop-cpu"
     }
 }
 
@@ -252,6 +266,7 @@ fn start_node(ui: &Ui, state: &NodeState) {
         bind,
         escrow: &settings.escrow_account,
         network: &settings.network,
+        backend: &settings.backend,
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,
@@ -286,8 +301,8 @@ fn start_node(ui: &Ui, state: &NodeState) {
             )
         };
         ui.log_line(&format!(
-            "node started — {kind} | node_id {node_id} | serving {}",
-            settings.endpoint
+            "node started — {kind} | node_id {node_id} | backend {} | serving {}",
+            settings.backend, settings.endpoint
         ));
         ui.log_line(&format!(
             "offer written to {}",
@@ -330,6 +345,10 @@ fn build_ui(app: &gtk4::Application) {
             0.0,
             0,
         ),
+        backend_dd: gtk4::DropDown::from_strings(&[
+            "noop-cpu (simulate)",
+            "local-cpu (run on host)",
+        ]),
         error_label: gtk4::Label::new(None),
         status_label: gtk4::Label::new(None),
         node_id_label: gtk4::Label::new(None),
@@ -428,10 +447,19 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&ui.interval_spin, 1, row, 1, 1);
     row += 1;
 
+    let backend_caption = gtk4::Label::new(Some("Job backend"));
+    backend_caption.set_xalign(0.0);
+    grid.attach(&backend_caption, 0, row, 1, 1);
+    ui.backend_dd.set_hexpand(true);
+    ui.backend_dd.set_halign(gtk4::Align::Start);
+    grid.attach(&ui.backend_dd, 1, row, 1, 1);
+    row += 1;
+
     let hint = gtk4::Label::new(Some(
         "The endpoint must be reachable from the internet for agents to connect. \
          Paid mode only collects a price + payout address; settlement runs \
-         off-chain in v0.",
+         off-chain in v0. 'local-cpu' runs job commands on this machine with \
+         no isolation — only enable it for trusted workloads.",
     ));
     hint.set_wrap(true);
     hint.set_xalign(0.0);

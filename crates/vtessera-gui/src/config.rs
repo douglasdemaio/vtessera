@@ -80,6 +80,7 @@ mod tests {
             escrow_account: crate::settings::DEFAULT_ESCROW.into(),
             network: "solana-devnet".into(),
             sample_interval_secs: 60,
+            backend: crate::settings::DEFAULT_BACKEND.into(),
         }
     }
 

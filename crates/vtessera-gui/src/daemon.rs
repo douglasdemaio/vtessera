@@ -7,6 +7,9 @@
 //!
 //! Both are shipped in the Flatpak (`/app/bin`) and looked up on `PATH`.
 //! `VTESSERA_BIN_DIR` overrides the lookup for local (non-Flatpak) runs.
+//!
+//! The executor the node runs free jobs on is chosen by the GUI settings
+//! and passed through as `--backend` (`noop-cpu` or `local-cpu`).
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -35,6 +38,9 @@ pub struct StartOptions<'a> {
     pub bind: String,
     pub escrow: &'a str,
     pub network: &'a str,
+    /// `vtessera-node --backend`: `"noop-cpu"` (synthetic metering) or
+    /// `"local-cpu"` (runs job commands on the host, not isolated).
+    pub backend: &'a str,
 }
 
 /// Directory holding the built binaries, when set (local runs). In the
@@ -114,7 +120,8 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
             .args(["--bind", &opts.bind])
             .args(["--offer", opts.offer.to_str().unwrap_or_default()])
             .args(["--escrow", opts.escrow])
-            .args(["--network", opts.network]);
+            .args(["--network", opts.network])
+            .args(["--backend", opts.backend]);
         Some(
             node_cmd
                 .spawn()
