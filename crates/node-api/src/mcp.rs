@@ -11,10 +11,11 @@
 //! no I/O of its own — the caller owns the transport.
 //!
 //! Honesty invariant (matches `dispatch`): a tool call never fakes
-//! success. Because v0 has no wired executor backend, `submit_job`
-//! returns the x402 402 challenge as tool *content* for unpaid paid
-//! offers, and an explicit not-implemented result for everything that
-//! would have to run.
+//! success. With a runner wired in, `submit_job` actually runs the job and
+//! returns its metering; without one it returns the x402 402 challenge as
+//! tool *content* for unpaid paid offers, and an explicit not-implemented
+//! result for everything that would have to run. Paid offers with a
+//! payment proof stay refused until the on-chain verifier lands (Module 4).
 
 #![forbid(unsafe_code)]
 
@@ -138,8 +139,9 @@ impl McpServer {
                 "Read the signed compute offer from the vtessera://offer resource, ",
                 "then call submit_job. Paid offers negotiate via x402: submit without ",
                 "a payment to receive the 402 challenge body, sign it, and resubmit ",
-                "with the proof in the `payment` argument. Job execution is not yet ",
-                "wired in v0, so submissions currently fail with 'not implemented'."
+                "with the proof in the `payment` argument. Free offers run directly. ",
+                "Paid submissions with a payment proof fail with 'not implemented' ",
+                "until on-chain verification is wired."
             ),
         }))
     }
@@ -205,7 +207,8 @@ impl McpServer {
         };
 
         // Same decision the HTTP surface makes: 402 for unpaid paid
-        // offers, honest 501 for anything that would run.
+        // offers; free offers run through the binary-supplied runner;
+        // paid-with-proof stays an honest refusal until the verifier lands.
         match classify_job_request(&self.state, &req) {
             JobDecision::PaymentRequired(challenge) => Ok(json!({
                 "content": [{
@@ -217,17 +220,29 @@ impl McpServer {
             JobDecision::VerifyAndRun { .. } => Ok(json!({
                 "content": [{
                     "type": "text",
-                    "text": r#"{"status":"not-implemented","reason":"job execution is not wired in v0; payment proof was not verified"}"#,
+                    "text": r#"{"status":"not-implemented","reason":"payment proof was not verified; on-chain verification is not wired"}"#,
                 }],
                 "isError": true,
             })),
-            JobDecision::RunFree { .. } => Ok(json!({
-                "content": [{
-                    "type": "text",
-                    "text": r#"{"status":"not-implemented","reason":"job execution is not wired in v0"}"#,
-                }],
-                "isError": true,
-            })),
+            JobDecision::RunFree { body } => match &self.state.runner {
+                Some(runner) => match runner.run(&body) {
+                    Ok(json) => Ok(json!({
+                        "content": [{ "type": "text", "text": json }],
+                        "isError": false,
+                    })),
+                    Err(e) => Ok(json!({
+                        "content": [{ "type": "text", "text": e.message }],
+                        "isError": true,
+                    })),
+                },
+                None => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": r#"{"status":"not-implemented","reason":"job execution is not wired; start the node with an executor backend"}"#,
+                    }],
+                    "isError": true,
+                })),
+            },
         }
     }
 
@@ -315,7 +330,27 @@ mod tests {
             offer: signed(price),
             escrow_account: "Esc1111111111111111111111111111111111111111".into(),
             network: "solana-devnet".into(),
+            runner: None,
         })
+    }
+
+    /// MCP server with a fake runner so the free path can be exercised
+    /// without linking the executor into the test crate's default build.
+    fn server_with_runner(price: PriceQuote, runner: impl crate::JobRunner + 'static) -> McpServer {
+        let mut state = server(price).state;
+        state.runner = Some(std::sync::Arc::new(runner));
+        McpServer::new(state)
+    }
+
+    struct FakeRunner;
+    impl crate::JobRunner for FakeRunner {
+        fn run(&self, body: &[u8]) -> Result<String, crate::JobRunError> {
+            match body {
+                b"boom" => Err(crate::JobRunError::server("backend exploded")),
+                b"" => Err(crate::JobRunError::bad_request("empty job body")),
+                _ => Ok(r#"{"status":"accepted","job_id":"j-1"}"#.into()),
+            }
+        }
     }
 
     fn paid() -> PriceQuote {
@@ -410,6 +445,31 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("not-implemented"));
+    }
+
+    #[test]
+    fn tools_call_free_offer_runs_through_the_wired_runner() {
+        let srv = server_with_runner(PriceQuote::Free, FakeRunner);
+        let r = call(
+            &srv,
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"{...}"}}}"#,
+        );
+        assert_eq!(r["result"]["isError"], json!(false));
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"status\":\"accepted\""));
+        assert!(text.contains("\"job_id\":\"j-1\""));
+    }
+
+    #[test]
+    fn tools_call_free_offer_surfaces_runner_errors() {
+        let srv = server_with_runner(PriceQuote::Free, FakeRunner);
+        let r = call(
+            &srv,
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"boom"}}}"#,
+        );
+        assert_eq!(r["result"]["isError"], json!(true));
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("backend exploded"));
     }
 
     #[test]

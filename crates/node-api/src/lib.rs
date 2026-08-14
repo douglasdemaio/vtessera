@@ -26,16 +26,19 @@
 //! - `GET /.well-known/agent.json` — an A2A agent card so agent-to-agent
 //!   frameworks can discover this node without bespoke client code.
 //! - `POST /jobs` — the work endpoint. For paid offers, returns 402 with
-//!   x402 payment terms (the working half of the flow). Submissions are
-//!   otherwise refused with **501 Not Implemented** — never a fake 200/202 —
-//!   until an executor backend and an on-chain payment verifier are wired
-//!   into the node binary.
+//!   x402 payment terms. Free submissions (and, once an on-chain verifier
+//!   exists, paid ones with a verified proof) run through a [`JobRunner`]
+//!   the **binary** supplies — this crate stays executor-free by default.
+//!   With no runner wired, submissions are refused with **501 Not
+//!   Implemented** — never a fake 200/202.
 //!
 //! This crate does not verify payments — that's the escrow program's job
 //! (Module 4). The node API only encodes the 402 challenge and threads
 //! the proof to the verifier.
 
 #![forbid(unsafe_code)]
+
+use std::sync::Arc;
 
 use vtessera_offer::{PriceQuote, SignedOffer};
 
@@ -94,6 +97,49 @@ impl HttpResponse {
     }
 }
 
+/// Error running a submitted job. Carries the HTTP status the lib should
+/// respond with — 400 for a malformed spec or an admission rejection,
+/// 500 for a backend failure. The message is human-readable and not part
+/// of any wire contract.
+#[derive(Debug, Clone)]
+pub struct JobRunError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl JobRunError {
+    /// The submitted job spec was unparsable or failed admission.
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        JobRunError {
+            status: 400,
+            message: message.into(),
+        }
+    }
+
+    /// The executor backend failed while running the job.
+    pub fn server(message: impl Into<String>) -> Self {
+        JobRunError {
+            status: 500,
+            message: message.into(),
+        }
+    }
+}
+
+/// Runs a job on behalf of the node.
+///
+/// The lib is transport-only: it formats the response, it never executes.
+/// The node/MCP binaries implement this by wrapping a `vtessera-executor`
+/// backend (feature-gated, so the default library build links nothing
+/// privileged). `None` in [`NodeState::runner`] keeps the honest 501
+/// default.
+pub trait JobRunner: Send + Sync {
+    /// `body` is the raw `POST /jobs` request body (a JSON job spec, the
+    /// executor's `JobSpec` shape). `Ok(json)` is the response body for a
+    /// 200 (job accepted + metering); `Err` carries the status and a
+    /// human-readable reason.
+    fn run(&self, body: &[u8]) -> Result<String, JobRunError>;
+}
+
 /// State a request handler reads. Owned by the node binary and passed
 /// into [`dispatch`] for each request.
 #[derive(Clone)]
@@ -108,6 +154,9 @@ pub struct NodeState {
     /// "solana-mainnet-beta", "solana-devnet". Surfaced in the 402 body
     /// so the agent picks the right chain.
     pub network: String,
+    /// Optional job runner supplied by the binary. `None` means free
+    /// submissions are refused with 501 (execution not wired).
+    pub runner: Option<Arc<dyn JobRunner>>,
 }
 
 /// Outcome of handling a `/jobs` request when the offer is paid.
@@ -239,19 +288,33 @@ fn handle_jobs(state: &NodeState, req: HttpRequest) -> HttpResponse {
             resp
         }
         JobDecision::VerifyAndRun { .. } => {
-            // v0 has neither an executor backend nor an on-chain verifier
-            // wired in, so accepting here would claim a job is running (and
-            // a payment verified) when neither happened. Honest response:
-            // refuse. Wiring vtessera-executor + the settlement verifier is
-            // the follow-up (see ROADMAP.md §1/§3).
+            // The x402 payment proof isn't verified on-chain yet: the host
+            // workspace has no Solana client (the verifier lives with the
+            // escrow work, Module 4, in the excluded crates). Accepting here
+            // would claim a payment was verified when it wasn't. Honest
+            // response: refuse.
             HttpResponse::json(
                 501,
-                r#"{"status":"not-implemented","reason":"job execution is not wired in v0; payment proof was not verified"}"#.into(),
+                r#"{"status":"not-implemented","reason":"payment proof was not verified; on-chain verification is not wired"}"#.into(),
             )
         }
-        JobDecision::RunFree { .. } => HttpResponse::json(
+        JobDecision::RunFree { body } => run_free(state, &body),
+    }
+}
+
+/// Run a free job through the binary-supplied runner.
+///
+/// Without a runner this is the honest 501 — the lib never fakes
+/// acceptance of a job nothing is executing.
+fn run_free(state: &NodeState, body: &[u8]) -> HttpResponse {
+    match &state.runner {
+        Some(runner) => match runner.run(body) {
+            Ok(json) => HttpResponse::json(200, json),
+            Err(e) => HttpResponse::json(e.status, e.message),
+        },
+        None => HttpResponse::json(
             501,
-            r#"{"status":"not-implemented","reason":"job execution is not wired in v0"}"#.into(),
+            r#"{"status":"not-implemented","reason":"job execution is not wired; start the node with an executor backend"}"#.into(),
         ),
     }
 }
@@ -363,6 +426,27 @@ mod tests {
             offer: signed(price),
             escrow_account: "Esc1111111111111111111111111111111111111111".into(),
             network: "solana-devnet".into(),
+            runner: None,
+        }
+    }
+
+    fn state_with_runner(price: PriceQuote, runner: impl JobRunner + 'static) -> NodeState {
+        NodeState {
+            runner: Some(Arc::new(runner)),
+            ..state(price)
+        }
+    }
+
+    /// Test runner: echoes a fixed accepted response for a non-empty body,
+    /// rejects an empty one with 400, and fails with 500 for `"boom"`.
+    struct FakeRunner;
+    impl JobRunner for FakeRunner {
+        fn run(&self, body: &[u8]) -> Result<String, JobRunError> {
+            match body {
+                b"boom" => Err(JobRunError::server("backend exploded")),
+                b"" => Err(JobRunError::bad_request("empty job body")),
+                _ => Ok(r#"{"status":"accepted","job_id":"j-1"}"#.into()),
+            }
         }
     }
 
@@ -418,6 +502,39 @@ mod tests {
         let body = String::from_utf8(r.body).unwrap();
         assert!(body.contains("\"status\":\"not-implemented\""));
         assert!(!body.contains("\"status\":\"accepted\""));
+    }
+
+    #[test]
+    fn free_jobs_post_runs_through_the_wired_runner() {
+        let s = state_with_runner(PriceQuote::Free, FakeRunner);
+        let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+        r.body = br#"{"job_id":"x"}"#.to_vec();
+        let resp = dispatch(&s, r);
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8(resp.body).unwrap();
+        assert!(body.contains("\"status\":\"accepted\""));
+        assert!(body.contains("\"job_id\":\"j-1\""));
+    }
+
+    #[test]
+    fn free_jobs_post_with_bad_body_returns_400_from_runner() {
+        let s = state_with_runner(PriceQuote::Free, FakeRunner);
+        let resp = dispatch(&s, req(HttpMethod::Post, "/jobs", vec![]));
+        assert_eq!(resp.status, 400);
+        let body = String::from_utf8(resp.body).unwrap();
+        assert!(body.contains("empty job body"));
+        assert!(!body.contains("\"status\":\"accepted\""));
+    }
+
+    #[test]
+    fn free_jobs_post_with_backend_failure_returns_500_from_runner() {
+        let s = state_with_runner(PriceQuote::Free, FakeRunner);
+        let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+        r.body = b"boom".to_vec();
+        let resp = dispatch(&s, r);
+        assert_eq!(resp.status, 500);
+        let body = String::from_utf8(resp.body).unwrap();
+        assert!(body.contains("backend exploded"));
     }
 
     #[test]

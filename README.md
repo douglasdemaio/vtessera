@@ -69,7 +69,7 @@ vtessera/
 │   ├── vtesserad/                  # v0 metering daemon (this README's quickstart)
 │   ├── vtessera-offer/             # signed-offer types (canonical bytes + Ed25519)
 │   ├── vtessera-node-api/          # agent-facing HTTP server: offer, jobs, 402/x402
-│   ├── vtessera-executor/          # job execution (Module 1, skeleton)
+│   ├── vtessera-executor/          # job execution backends (Module 1: noop-cpu, local-cpu)
 │   ├── vtessera-settlement/        # receipt verification + settlement (Module 3, skeleton)
 │   ├── vtessera-gui/               # GTK4 desktop app (Flatpak-packaged)
 │   ├── devnet-demo/                # excluded: exercises the devnet escrow end-to-end
@@ -232,11 +232,14 @@ scripts/x402-demo.sh
 
 It builds the agent (`crates/x402-client`), points a node at
 `http://127.0.0.1:8402` (reusing one already running there), submits a
-job, and pays the x402 challenge into the escrow. The node currently
-**refuses to run jobs with 501** (v0 has no executor or payment verifier
-wired in) — the demo then finalizes the split, proving the escrow money
-path end to end. `crates/devnet-demo` is the lower-level variant that
-exercises `pay_for_compute` → `finalize_pro_rata_stub` directly.
+job, and pays the x402 challenge into the escrow. Free jobs run through
+the node's wired executor (`--backend noop-cpu` by default, or
+`local-cpu` for unisolated host execution). A paid job's proof is still
+**not verified** — that path stays an honest 501 until the on-chain
+payment verifier lands (Module 4) — so the demo finalizes the split
+without running the job, proving the escrow money path end to end.
+`crates/devnet-demo` is the lower-level variant that exercises
+`pay_for_compute` → `finalize_pro_rata_stub` directly.
 
 ## Install as a systemd service
 

@@ -1155,6 +1155,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "serde_json",
+ "vtessera-executor",
  "vtessera-mini-http",
  "vtessera-offer",
 ]

@@ -22,7 +22,7 @@ This document is an index. The authoritative design lives in:
 | Path | Module (ROADMAP §) | Status |
 | ---- | ------------------ | ------ |
 | `crates/vtesserad` | v0 metering daemon | shipped (CI green) |
-| `crates/executor` | Module 1 — execution + accelerators | skeleton |
+| `crates/executor` | Module 1 — execution + accelerators | shipped (CPU backends wired) |
 | `crates/offer` | Module 2 — signed machine-readable offers | shipped |
 | `crates/node-api` | Module 2 — x402 / MCP HTTP surface (feature-gated) | shipped |
 | `crates/mini-http` | Module 2 — shared HTTP/1.1 server primitives | shipped |
@@ -32,10 +32,13 @@ This document is an index. The authoritative design lives in:
 
 Skeleton crates land with the types, traits, and tests that pin the
 interface; the heavy implementation work (Kata + VFIO, DCGM telemetry,
-Jupiter CPI, executor wiring, etc.) lands per the ROADMAP milestones.
-"Shipped" means the crate's contract is implemented and tested; job
-execution (the executor backend) and on-chain payment verification are
-still unwired, and the node API returns honest 501s until they land.
+Jupiter CPI, etc.) lands per the ROADMAP milestones. "Shipped" means
+the crate's contract is implemented and tested. Job execution is wired
+through the `JobRunner` hook in `crates/node-api`: the `serve`-gated
+`vtessera-node`/`vtessera-mcp` binaries supply the executor from
+`crates/executor` via `--backend` (`noop-cpu` default, `local-cpu` for
+unisolated host execution). On-chain payment verification is still
+unwired, so paid jobs return honest 501s until it lands.
 
 ## Why HNT, not a Vtessera token
 
