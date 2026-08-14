@@ -171,10 +171,13 @@ a bespoke API:
 (`POST /mcp`, plus a stdio `vtessera-mcp` binary) and an A2A card at
 `/.well-known/agent.json` (`crates/node-api`); `crates/offer-index`
 verifies and serves current offers (push register + optional pull
-seeding) at `GET /offers`. What's still open is the *executor wiring*:
-`submit_job` returns an honest 501 until the backend runs jobs
-(§1/§3) — the marketplace has sellers, discovery, and honest failure
-modes, but no jobs yet.
+seeding) at `GET /offers`. Executor wiring is in: the `serve`-gated
+`vtessera-node`/`vtessera-mcp` binaries take `--backend` (default
+`noop-cpu`; `local-cpu` for unisolated host execution) and run free
+offers' jobs through the executor in `crates/executor` (§1). What's
+still open is the **paid** path: a submitted payment proof is not yet
+verified on-chain, so paid jobs return an honest 501 until the verifier
+lands (§3/§4).
 
 ### 2b. Paying (or not) — x402
 
@@ -503,7 +506,11 @@ intervention) is asymmetric versus the benefit of an earlier demo.
    offers exposed via MCP; central offer index; **free path working
    end-to-end** (agent finds a node, runs a job, no payment). Plus
    settlement computing the completion fraction `f`. No on-chain money
-   yet.
+   yet. **Partial:** the free path runs today — a node with `--backend`
+   executes free-offer jobs through `crates/executor` (noop-cpu or
+   local-cpu) and returns metering over HTTP and MCP. What M3 still
+   wants is the Kata/Cloud Hypervisor CPU isolation from §1 and the
+   offer-index wiring in the live demo flow.
 4. **M4 — Paid go-live:** Module 0 cleared; x402 payment + escrow
    program live — agent pays EURC/USDC (escrow for committed jobs,
    pay-as-you-go for short ones) + fee, pro-rata release (earned → HNT

@@ -12,12 +12,14 @@
 #   VTESSERA_NODE_URL    node base URL (default http://127.0.0.1:8402)
 #   VTESSERA_JOB_SECONDS agreed device-seconds (default 60)
 #   VTESSERA_OFFER_MODE  free|paid for the locally-started node (default paid)
+#   VTESSERA_BACKEND     noop-cpu|local-cpu executor for the local node (default noop-cpu)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_URL="${VTESSERA_NODE_URL:-http://127.0.0.1:8402}"
 JOB_SECONDS="${VTESSERA_JOB_SECONDS:-60}"
 OFFER_MODE="${VTESSERA_OFFER_MODE:-paid}"
+BACKEND="${VTESSERA_BACKEND:-noop-cpu}"
 PORT="${VTESSERA_NODE_PORT:-8402}"
 ESCROW="6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma"
 
@@ -41,7 +43,8 @@ else
         --bind "127.0.0.1:$PORT" \
         --offer "$OFFER_FILE" \
         --escrow "$ESCROW" \
-        --network solana-devnet >/dev/null 2>&1 &
+        --network solana-devnet \
+        --backend "$BACKEND" >/dev/null 2>&1 &
     NODE_PID=$!
     started_node=1
     for _ in $(seq 1 30); do
