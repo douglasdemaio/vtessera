@@ -1,0 +1,12 @@
+[package]
+name = "vtessera-mini-http"
+description = "Vtessera Module 2 — shared hand-rolled HTTP/1.1 server primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately dependency-free. This crate is the one audited HTTP parser
+# shared by the agent-facing binaries (vtessera-node, vtessera-offer-index);
+# it must stay tiny so the review surface does not drift.
+[dependencies]

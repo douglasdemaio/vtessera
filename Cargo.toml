@@ -7,6 +7,8 @@
 #   crates/executor    Module 1 — job execution + accelerator passthrough
 #   crates/offer       Module 2 — signed machine-readable offers (MCP-shaped)
 #   crates/node-api    Module 2 — node HTTP surface (x402 / MCP), feature-gated
+#   crates/mini-http   Module 2 — shared hand-rolled HTTP/1.1 server primitives
+#   crates/offer-index Module 2a — central offer index (verify + serve offers)
 #   crates/settlement  Module 3 — receipt verification + completion-fraction
 #   programs/vtessera-escrow  Module 4 — Solana Anchor escrow program
 #
@@ -21,6 +23,8 @@ members = [
     "crates/executor",
     "crates/offer",
     "crates/node-api",
+    "crates/mini-http",
+    "crates/offer-index",
     "crates/settlement",
     "crates/vtessera-gui",
 ]
@@ -34,6 +38,7 @@ exclude = [
     "programs/vtessera-escrow",
     "crates/devnet-demo",
     "crates/x402-client",
+    "tests/adversarial",
 ]
 
 [workspace.package]
@@ -51,6 +56,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
+serde_json = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [profile.release]

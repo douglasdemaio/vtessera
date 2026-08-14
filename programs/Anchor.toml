@@ -1,3 +1,9 @@
+# Anchor 0.30 defaults program discovery to `<anchor-root>/programs/*`;
+# this Anchor.toml lives at the anchor root (programs/), so list the
+# member explicitly or `anchor build` silently finds nothing.
+[workspace]
+members = ["vtessera-escrow"]
+
 [toolchain]
 
 [features]

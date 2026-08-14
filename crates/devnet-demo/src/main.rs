@@ -7,9 +7,10 @@
 //!    without depending on a faucet being up).
 //! 2. Funds a buyer keypair with that token.
 //! 3. Generates a fresh seller keypair.
-//! 4. Calls `pay_for_compute` on the deployed escrow program — buyer's
-//!    tokens move into a program-owned escrow PDA, flat SOL fee
-//!    transfers to the fee wallet.
+//! 4. Initializes the program's `Config` account (`settlement_authority`
+//!    = the payer, on devnet) and calls `pay_for_compute` on the deployed
+//!    escrow program — buyer's tokens move into a program-owned escrow
+//!    PDA, flat SOL fee transfers to the fee wallet.
 //! 5. Runs the (no-op) executor for one job to produce metering.
 //! 6. Computes the completion fraction `f` via the settlement crate.
 //! 7. Calls `finalize_pro_rata` — escrow splits by `f`: earned slice to
@@ -246,21 +247,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         out.copy_from_slice(&d);
         out
     };
-    let (contract_pda, _bump) =
-        Pubkey::find_program_address(&[b"contract", &job_id], &program_id);
+    let (contract_pda, _bump) = Pubkey::find_program_address(&[b"contract", &job_id], &program_id);
     let escrow_ata = get_associated_token_address(&contract_pda, &mint_pk);
     println!("\n--- escrow accounts ---");
     println!("job_id (hex): {}", hex_string(&job_id));
     println!("contract PDA: {contract_pda}");
     println!("escrow ATA:   {escrow_ata}");
 
-    let create_escrow_ata = create_associated_token_account(
-        &payer.pubkey(),
-        &contract_pda,
-        &mint_pk,
-        &spl_token::id(),
-    );
-    send_tx(&rpc, &[create_escrow_ata], &[&payer], &payer, "create escrow ATA")?;
+    let create_escrow_ata =
+        create_associated_token_account(&payer.pubkey(), &contract_pda, &mint_pk, &spl_token::id());
+    send_tx(
+        &rpc,
+        &[create_escrow_ata],
+        &[&payer],
+        &payer,
+        "create escrow ATA",
+    )?;
+
+    // --- 4b. init_config: settlement authority = payer (devnet) ----------
+    // Mainnet sets this to the Squads vault PDA (MAINNET-CHECKLIST §3.5);
+    // the devnet demo pins it to the payer so the demo can sign
+    // finalize_pro_rata_stub. Finalize IXs reject signers that don't
+    // match the config's settlement authority.
+    let (config_pda, _config_bump) =
+        Pubkey::find_program_address(&[b"vtessera_config"], &program_id);
+    println!("\n--- init_config (settlement_authority = payer) ---");
+    println!("config PDA: {config_pda}");
+    let cfg_disc = anchor_disc("init_config");
+    let mut cfg_data = cfg_disc.to_vec();
+    cfg_data.extend_from_slice(&payer.pubkey().to_bytes());
+    // Anchor account order in InitConfig: authority (signer), config (init), system_program.
+    let cfg_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new(config_pda, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data: cfg_data,
+    };
+    // Idempotent: if a previous run already initialized the config with
+    // the same authority, skip. If it exists with a *different* authority
+    // the finalize step will fail loudly, which is the desired signal.
+    match rpc.get_account(&config_pda) {
+        Ok(_) => println!("  config account already exists; skipping init_config"),
+        Err(_) => {
+            send_tx(&rpc, &[cfg_ix], &[&payer], &payer, "init_config")?;
+        }
+    }
 
     // --- 5. pay_for_compute -------------------------------------------
     let price: u64 = 2_000_000; // 2.000000 stablecoin
@@ -334,6 +368,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Anchor account order in FinalizeProStub:
     //   settlement_authority (signer)
+    //   config
     //   contract (mut)
     //   escrow_stablecoin_ata (mut)
     //   buyer_stablecoin_ata (mut)
@@ -342,7 +377,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fin_ix = Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(payer.pubkey(), true), // settlement authority = payer (devnet stub)
+            AccountMeta::new_readonly(payer.pubkey(), true), // settlement authority = payer (devnet)
+            AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(buyer_ata, false),
@@ -352,13 +388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         data: fin_data,
     };
     println!("\n--- finalize_pro_rata_stub (f_micros={f_micros}) ---");
-    let fin_sig = send_tx(
-        &rpc,
-        &[fin_ix],
-        &[&payer],
-        &payer,
-        "finalize_pro_rata_stub",
-    )?;
+    let fin_sig = send_tx(&rpc, &[fin_ix], &[&payer], &payer, "finalize_pro_rata_stub")?;
     println!("finalize signature: {fin_sig}");
 
     // --- 8. Final balances --------------------------------------------
@@ -371,7 +401,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("escrow ATA:  {escrow_after} micros");
     println!("buyer ATA:   {buyer_after} micros  (started 10_000_000, paid {price}, expected refund (1-f)*price)");
     println!("seller ATA:  {seller_after} micros  (expected f*price)");
-    println!("payer SOL:   {:.6} (started {:.6})",
+    println!(
+        "payer SOL:   {:.6} (started {:.6})",
         post_lamports as f64 / 1_000_000_000.0,
         pre_lamports as f64 / 1_000_000_000.0,
     );

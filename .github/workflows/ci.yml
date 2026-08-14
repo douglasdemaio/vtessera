@@ -52,6 +52,9 @@ jobs:
           cargo clippy -p vtessera-offer --all-targets -- -D warnings
           cargo clippy -p vtessera-node-api --all-targets -- -D warnings
           cargo clippy -p vtessera-node-api --features serve --all-targets -- -D warnings
+          cargo clippy -p vtessera-mini-http --all-targets -- -D warnings
+          cargo clippy -p vtessera-offer-index --all-targets -- -D warnings
+          cargo clippy -p vtessera-offer-index --features serve --all-targets -- -D warnings
           cargo clippy -p vtessera-settlement --all-targets -- -D warnings
 
       - name: Test module crates
@@ -60,13 +63,82 @@ jobs:
           cargo test -p vtessera-offer --locked
           cargo test -p vtessera-node-api --locked
           cargo test -p vtessera-node-api --features serve --locked
+          cargo test -p vtessera-mini-http --locked
+          cargo test -p vtessera-offer-index --locked
+          cargo test -p vtessera-offer-index --features serve --locked
           cargo test -p vtessera-settlement --locked
 
       # Anchor escrow program (Module 4) lives under programs/ and builds
       # with the Solana BPF toolchain — `anchor build`. It's excluded
       # from the host workspace, so the host CI doesn't try to compile
-      # it; a follow-up CI job hosts the Anchor toolchain when the
-      # program is wired for devnet deploy.
+      # it; this job hosts the Anchor toolchain.
+      #
+      # `--no-idl`: anchor 0.30.1's IDL generation is broken against
+      # current crates.io (anchor-syn calls proc_macro2::Span::source_file,
+      # removed in proc-macro2 >= 1.0.95; downgrading cascades into
+      # quote/borsh MSRV pins). CI only needs the compiled ELF for the
+      # adversarial litesvm suite; the IDL is a deploy-time artifact.
+
+      # Adversarial escrow suite (MAINNET-CHECKLIST §2): standalone
+      # litesvm crate in tests/adversarial. Needs the compiled program
+      # ELF first (`anchor build` in programs/), which needs the SBF
+      # toolchain. Pinned versions mirror the dev environment.
+      #
+      # release.solana.com has been intermittently failing TLS handshakes
+      # (curl error 35) from CI runners and from dev machines; the agave
+      # GitHub release is the same toolchain and is reachable. Download
+      # the tarball from the mirror, verify it against the pinned sha256,
+      # and put its bin/ on PATH. curl's own retries ride out transient
+      # GitHub hiccups; the checksum is the integrity gate.
+      - name: Install Solana (Agave) toolchain
+        run: |
+          set -euo pipefail
+          TAG=v3.1.14
+          EXPECTED=06f97c065cc977cbec2f13ffc9bc9d3b92fef485431fcb370a269de69532ef51
+          TARBALL=solana-release-x86_64-unknown-linux-gnu.tar.bz2
+          cd "$RUNNER_TEMP"
+          curl -sSfL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 600 \
+            -o "$TARBALL" \
+            "https://github.com/anza-xyz/agave/releases/download/$TAG/$TARBALL"
+          echo "$EXPECTED  $TARBALL" | sha256sum -c -
+          mkdir -p solana-release
+          tar -xjf "$TARBALL" -C solana-release
+          RELEASE_DIR="$RUNNER_TEMP/solana-release/solana-release"
+          echo "$RELEASE_DIR/bin" >> "$GITHUB_PATH"
+          export PATH="$RELEASE_DIR/bin:$PATH"
+          cargo-build-sbf --version
+
+      # Anchor CLI is a thin `cargo install` wrapper itself (avm just runs
+      # `cargo install --git ... anchor-cli`), so install anchor-cli 0.30.1
+      # directly. This avoids compiling avm, whose dependency tree pulls an
+      # old openssl-sys that fails against Ubuntu 24.04's OpenSSL 3 headers.
+      # Build with rustc 1.79: anchor 0.30.1's locked time 0.3.29 only
+      # compiles with the parsing/formatting/macros features on rustc <= 1.79
+      # (E0282 type annotations needed for Box<_> on 1.80+).
+      - name: Install Anchor CLI
+        run: |
+          rustup toolchain install 1.79.0 --profile minimal
+          cargo +1.79.0 install --locked anchor-cli --git https://github.com/coral-xyz/anchor --tag v0.30.1
+          anchor --version
+
+      - name: Build escrow program (BPF)
+        run: |
+          cd programs
+          anchor build --no-idl
+          sha256sum target/deploy/vtessera_escrow.so
+
+      - name: Program unit tests (drift guard for error codes)
+        run: |
+          cd programs/vtessera-escrow
+          cargo fmt --check
+          cargo test --locked
+
+      - name: Adversarial suite (litesvm, §2)
+        run: |
+          cd tests/adversarial
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --locked
 
       - name: Audit
         run: |
