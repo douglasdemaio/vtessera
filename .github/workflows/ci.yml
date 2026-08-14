@@ -97,7 +97,9 @@ jobs:
           echo "$EXPECTED  $TARBALL" | sha256sum -c -
           mkdir -p solana-release
           tar -xjf "$TARBALL" -C solana-release
-          echo "$RUNNER_TEMP/solana-release/solana-release/bin" >> "$GITHUB_PATH"
+          RELEASE_DIR="$RUNNER_TEMP/solana-release/solana-release"
+          echo "$RELEASE_DIR/bin" >> "$GITHUB_PATH"
+          export PATH="$RELEASE_DIR/bin:$PATH"
           cargo-build-sbf --version
 
       - name: Install Anchor CLI
