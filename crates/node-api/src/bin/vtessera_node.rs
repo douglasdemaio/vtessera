@@ -39,6 +39,14 @@
 //!   GET  /.well-known/agent.json  (A2A agent card)
 //!   POST /jobs                    (x402 challenge / free-job execution)
 //!   GET  /healthz
+//!
+//! Offer-index wiring (Module 2a): with `--publish <index-url>` the node
+//! registers its signed offer with the index on startup and refreshes it
+//! every `--publish-interval` seconds, and enforces first-come-first-served
+//! claims through the index: a free job only runs if the submitting agent
+//! (the `X-Agent-Id` header) is the node's current claimant — or the node is
+//! unclaimed and this submit claims it. Without `--publish` the node is
+//! standalone and anonymous free jobs run as before.
 
 use std::env;
 use std::fs;
@@ -46,9 +54,12 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use vtessera_executor::{Backend, Executor, ExecutorError, JobMetering, JobSpec};
 use vtessera_mini_http::{serve, Method as MiniMethod, Request as MiniRequest, Response};
+use vtessera_node_api::index::{AdmitError, IndexClient, IndexQuery};
 use vtessera_node_api::{
     dispatch, parse_signed_offer, HttpMethod, HttpRequest, JobRunError, JobRunner, NodeState,
 };
@@ -57,12 +68,16 @@ use vtessera_settlement::{
     derive_node_id, load_node_key, sign_job_receipt, JobReceipt, JOB_RECEIPT_SCHEMA_VER,
 };
 
+const DEFAULT_PUBLISH_INTERVAL_SECS: u64 = 60;
+const INDEX_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn usage_and_exit() -> ! {
     eprintln!(
         "usage: vtessera-node --bind <host:port> --offer <path.json> \
         --escrow <pda> --network <id> \
         --key <identity.key> --state-dir <dir> \
-        [--backend noop-cpu|local-cpu]"
+        [--backend noop-cpu|local-cpu] \
+        [--publish <index-url>] [--publish-interval <secs>]"
     );
     process::exit(2);
 }
@@ -75,6 +90,8 @@ struct Args {
     key_path: String,
     state_dir: String,
     backend: BackendChoice,
+    publish: Option<String>,
+    publish_interval: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +144,8 @@ fn parse_args() -> Args {
     let mut key_path: Option<String> = None;
     let mut state_dir: Option<String> = None;
     let mut backend = BackendChoice::NoopCpu;
+    let mut publish: Option<String> = None;
+    let mut publish_interval: u64 = DEFAULT_PUBLISH_INTERVAL_SECS;
     let mut it = env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -136,6 +155,12 @@ fn parse_args() -> Args {
             "--network" => network = it.next(),
             "--key" => key_path = it.next(),
             "--state-dir" => state_dir = it.next(),
+            "--publish" => publish = it.next(),
+            "--publish-interval" => {
+                if let Some(s) = it.next() {
+                    publish_interval = s.parse().unwrap_or(DEFAULT_PUBLISH_INTERVAL_SECS);
+                }
+            }
             "--backend" => {
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 backend = BackendChoice::parse(&raw).unwrap_or_else(|| usage_and_exit());
@@ -156,6 +181,8 @@ fn parse_args() -> Args {
             key_path: k,
             state_dir: s,
             backend,
+            publish,
+            publish_interval: Duration::from_secs(publish_interval),
         },
         _ => usage_and_exit(),
     }
@@ -231,6 +258,114 @@ fn backend_tag(m: &JobMetering) -> &'static str {
     }
 }
 
+/// `ureq`-backed [`IndexClient`]. `http_status_as_error(false)` so a 409
+/// claim conflict is inspectable (its body names the current claimant).
+struct UreqIndexClient {
+    index_url: String,
+    node_id: String,
+    agent: ureq::Agent,
+}
+
+impl UreqIndexClient {
+    fn new(index_url: String, node_id: String) -> Self {
+        let agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(INDEX_TIMEOUT))
+            .build();
+        let agent = ureq::Agent::new_with_config(agent);
+        UreqIndexClient {
+            index_url,
+            node_id,
+            agent,
+        }
+    }
+
+    fn claim_url(&self) -> String {
+        format!(
+            "{}/offers/{}/claim",
+            self.index_url.trim_end_matches('/'),
+            self.node_id
+        )
+    }
+
+    fn offers_url(&self, query: &IndexQuery) -> String {
+        let mut params: Vec<String> = Vec::new();
+        if let Some(mode) = &query.mode {
+            params.push(format!("mode={mode}"));
+        }
+        if let Some(device) = &query.device {
+            params.push(format!("device={device}"));
+        }
+        if query.available {
+            params.push("available=1".into());
+        }
+        let qs = if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        };
+        format!("{}/offers{qs}", self.index_url.trim_end_matches('/'))
+    }
+}
+
+impl IndexClient for UreqIndexClient {
+    fn admit(&self, agent_id: &str) -> Result<(), AdmitError> {
+        let body = format!(r#"{{"agent_id":"{agent_id}"}}"#);
+        let resp = self
+            .agent
+            .post(&self.claim_url())
+            .header("content-type", "application/json")
+            .send(&body)
+            .map_err(|e| AdmitError::Unreachable(format!("claim request failed: {e}")))?;
+        match resp.status().as_u16() {
+            200 | 201 => Ok(()),
+            409 => {
+                let owner = resp
+                    .into_body()
+                    .read_to_string()
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(str::to_string))
+                    .unwrap_or_else(|| "another agent".into());
+                Err(AdmitError::Taken(owner))
+            }
+            404 => Err(AdmitError::Unreachable(
+                "node not registered with the index".into(),
+            )),
+            other => Err(AdmitError::Unreachable(format!(
+                "unexpected index status {other}"
+            ))),
+        }
+    }
+
+    fn discover(&self, query: &IndexQuery) -> Result<String, String> {
+        let resp = self
+            .agent
+            .get(&self.offers_url(query))
+            .call()
+            .map_err(|e| format!("discover request failed: {e}"))?;
+        resp.into_body()
+            .read_to_string()
+            .map_err(|e| format!("read index response: {e}"))
+    }
+}
+
+/// Register the signed offer with the index. Non-fatal: the caller logs and
+/// retries on the next tick.
+fn publish_offer(index: &UreqIndexClient, offer_json: &str) -> Result<(), String> {
+    let url = format!("{}/offers", index.index_url.trim_end_matches('/'));
+    let resp = index
+        .agent
+        .post(&url)
+        .header("content-type", "application/json")
+        .send(offer_json)
+        .map_err(|e| e.to_string())?;
+    match resp.status().as_u16() {
+        200 | 201 => Ok(()),
+        other => Err(format!("index rejected the offer: status {other}")),
+    }
+}
+
 fn main() {
     let args = parse_args();
 
@@ -281,11 +416,29 @@ fn main() {
     };
     let runner = args.backend.build(&identity);
 
+    // Offer-index wiring: register the offer with the index now, then keep
+    // refreshing it on an interval. Registration failures are logged, never
+    // fatal — the index keeps the last good offer meanwhile.
+    let index: Option<Arc<dyn IndexClient>> = match &args.publish {
+        Some(url) => {
+            let client = UreqIndexClient::new(url.clone(), node_id.clone());
+            let offer_json = vtessera_offer::to_json(&offer);
+            match publish_offer(&client, &offer_json) {
+                Ok(()) => eprintln!("vtessera-node: registered offer with index {url}"),
+                Err(e) => eprintln!("vtessera-node: publish to {url} failed (will retry): {e}"),
+            }
+            spawn_publisher(url.clone(), offer_json, args.publish_interval);
+            Some(Arc::new(client) as Arc<dyn IndexClient>)
+        }
+        None => None,
+    };
+
     let state = NodeState {
         offer,
         escrow_account: args.escrow_account,
         network: args.network,
         runner: Some(runner),
+        index,
     };
 
     let listener = TcpListener::bind(&args.bind).unwrap_or_else(|e| {
@@ -293,8 +446,13 @@ fn main() {
         process::exit(1);
     });
     eprintln!(
-        "vtessera-node: listening on {} (backend {:?})",
-        args.bind, args.backend
+        "vtessera-node: listening on {} (backend {:?}{})",
+        args.bind,
+        args.backend,
+        match &args.publish {
+            Some(u) => format!(", publishing to {u}"),
+            None => String::new(),
+        }
     );
 
     // Thread-per-connection with a hard cap lives in mini-http: a slow or
@@ -323,4 +481,20 @@ fn main() {
         },
         32,
     );
+}
+
+/// Background loop that refreshes the node's offer at the index on an
+/// interval. Failures are logged and retried next tick — the process never
+/// exits on a publish failure.
+fn spawn_publisher(index_url: String, offer_json: String, interval: Duration) {
+    thread::spawn(move || {
+        let client = UreqIndexClient::new(index_url.clone(), String::new());
+        loop {
+            thread::sleep(interval);
+            match publish_offer(&client, &offer_json) {
+                Ok(()) => {}
+                Err(e) => eprintln!("vtessera-node: publish refresh failed (will retry): {e}"),
+            }
+        }
+    });
 }

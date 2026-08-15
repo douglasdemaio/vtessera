@@ -42,6 +42,8 @@ use std::sync::Arc;
 
 use vtessera_offer::{PriceQuote, SignedOffer};
 
+#[cfg(feature = "serve")]
+pub mod index;
 pub mod mcp;
 
 /// One inbound HTTP request, framework-agnostic.
@@ -157,6 +159,12 @@ pub struct NodeState {
     /// Optional job runner supplied by the binary. `None` means free
     /// submissions are refused with 501 (execution not wired).
     pub runner: Option<Arc<dyn JobRunner>>,
+    /// Optional offer-index client (Module 2a wiring). `Some` means the
+    /// node publishes its offer and enforces first-come-first-served claims
+    /// via the index; `None` (and builds without the `serve` feature)
+    /// behaves as a standalone node with no claim gate.
+    #[cfg(feature = "serve")]
+    pub index: Option<Arc<dyn index::IndexClient>>,
 }
 
 /// Outcome of handling a `/jobs` request when the offer is paid.
@@ -298,7 +306,7 @@ fn handle_jobs(state: &NodeState, req: HttpRequest) -> HttpResponse {
                 r#"{"status":"not-implemented","reason":"payment proof was not verified; on-chain verification is not wired"}"#.into(),
             )
         }
-        JobDecision::RunFree { body } => run_free(state, &body),
+        JobDecision::RunFree { body } => run_free(state, &body, header(&req.headers, "x-agent-id")),
     }
 }
 
@@ -306,7 +314,10 @@ fn handle_jobs(state: &NodeState, req: HttpRequest) -> HttpResponse {
 ///
 /// Without a runner this is the honest 501 — the lib never fakes
 /// acceptance of a job nothing is executing.
-fn run_free(state: &NodeState, body: &[u8]) -> HttpResponse {
+fn run_free(state: &NodeState, body: &[u8], agent_id: Option<String>) -> HttpResponse {
+    if let Err(resp) = check_claim_gate(state, agent_id.as_deref()) {
+        return resp;
+    }
     match &state.runner {
         Some(runner) => match runner.run(body) {
             Ok(json) => HttpResponse::json(200, json),
@@ -317,6 +328,51 @@ fn run_free(state: &NodeState, body: &[u8]) -> HttpResponse {
             r#"{"status":"not-implemented","reason":"job execution is not wired; start the node with an executor backend"}"#.into(),
         ),
     }
+}
+
+/// First-come-first-served admission gate: with a claim gate configured, a
+/// free job only runs if the submitting agent is the node's current claimant
+/// (or the node is unclaimed and this submit claims it). Refusals are
+/// `Err(HttpResponse)` so callers just return them.
+///
+/// Without `serve`, or with no index configured, this always admits — a
+/// standalone node behaves as before.
+#[cfg(feature = "serve")]
+fn check_claim_gate(state: &NodeState, agent_id: Option<&str>) -> Result<(), HttpResponse> {
+    let Some(index) = &state.index else {
+        return Ok(());
+    };
+    let Some(agent) = agent_id else {
+        return Err(HttpResponse::json(
+            409,
+            r#"{"status":"refused","reason":"agent identity required"}"#.into(),
+        ));
+    };
+    match index.admit(agent) {
+        Ok(()) => Ok(()),
+        Err(index::AdmitError::Taken(owner)) => Err(HttpResponse::json(
+            409,
+            serde_json::to_string(&serde_json::json!({
+                "status": "refused",
+                "reason": format!("node claimed by {owner}"),
+            }))
+            .unwrap_or_else(|_| r#"{"status":"refused"}"#.into()),
+        )),
+        Err(index::AdmitError::Unreachable(reason)) => Err(HttpResponse::json(
+            503,
+            serde_json::to_string(&serde_json::json!({
+                "status": "refused",
+                "reason": "cannot verify claim availability",
+                "detail": reason,
+            }))
+            .unwrap_or_else(|_| r#"{"status":"refused"}"#.into()),
+        )),
+    }
+}
+
+#[cfg(not(feature = "serve"))]
+fn check_claim_gate(_state: &NodeState, _agent_id: Option<&str>) -> Result<(), HttpResponse> {
+    Ok(())
 }
 
 fn header(headers: &[(String, String)], name: &str) -> Option<String> {
@@ -427,6 +483,8 @@ mod tests {
             escrow_account: "Esc1111111111111111111111111111111111111111".into(),
             network: "solana-devnet".into(),
             runner: None,
+            #[cfg(feature = "serve")]
+            index: None,
         }
     }
 
@@ -640,5 +698,103 @@ mod tests {
         assert!(body.contains("\"id\":\"submit_job\""));
         assert!(body.contains("\"tags\":[\"compute\"]"));
         assert!(body.contains("\"capabilities\""));
+    }
+
+    #[cfg(feature = "serve")]
+    mod claim_gate {
+        use super::*;
+        use crate::index::{AdmitError, IndexClient, IndexQuery};
+        use std::sync::{Arc, Mutex};
+
+        struct FakeIndex {
+            admit_result: Mutex<Result<(), AdmitError>>,
+        }
+
+        impl Default for FakeIndex {
+            fn default() -> Self {
+                Self {
+                    admit_result: Mutex::new(Ok(())),
+                }
+            }
+        }
+
+        impl FakeIndex {
+            fn with(result: Result<(), AdmitError>) -> Arc<Self> {
+                Arc::new(Self {
+                    admit_result: Mutex::new(result),
+                })
+            }
+        }
+
+        impl IndexClient for FakeIndex {
+            fn admit(&self, _agent_id: &str) -> Result<(), AdmitError> {
+                self.admit_result.lock().unwrap().clone()
+            }
+
+            fn discover(&self, _query: &IndexQuery) -> Result<String, String> {
+                Ok(r#"{"count":0,"offers":[]}"#.into())
+            }
+        }
+
+        fn job_req(headers: Vec<(&str, &str)>) -> HttpRequest {
+            let mut r = req(HttpMethod::Post, "/jobs", headers);
+            r.body = br#"{"job_id":"x"}"#.to_vec();
+            r
+        }
+
+        #[test]
+        fn gated_job_runs_when_unclaimed_admits() {
+            let mut s = state_with_runner(PriceQuote::Free, FakeRunner);
+            s.index = Some(FakeIndex::with(Ok(())));
+            let r = dispatch(&s, job_req(vec![("x-agent-id", "agent-a")]));
+            assert_eq!(r.status, 200);
+            assert!(String::from_utf8(r.body)
+                .unwrap()
+                .contains("\"status\":\"accepted\""));
+        }
+
+        #[test]
+        fn gated_job_is_refused_when_taken() {
+            let mut s = state_with_runner(PriceQuote::Free, FakeRunner);
+            s.index = Some(FakeIndex::with(Err(AdmitError::Taken(
+                "agent-other".into(),
+            ))));
+            let r = dispatch(&s, job_req(vec![("x-agent-id", "agent-a")]));
+            assert_eq!(r.status, 409);
+            assert!(String::from_utf8(r.body)
+                .unwrap()
+                .contains("node claimed by agent-other"));
+        }
+
+        #[test]
+        fn gated_job_without_agent_id_is_refused() {
+            let mut s = state_with_runner(PriceQuote::Free, FakeRunner);
+            s.index = Some(FakeIndex::with(Ok(())));
+            let r = dispatch(&s, job_req(vec![]));
+            assert_eq!(r.status, 409);
+            assert!(String::from_utf8(r.body)
+                .unwrap()
+                .contains("agent identity required"));
+        }
+
+        #[test]
+        fn gated_job_fails_closed_when_index_unreachable() {
+            let mut s = state_with_runner(PriceQuote::Free, FakeRunner);
+            s.index = Some(FakeIndex::with(Err(AdmitError::Unreachable(
+                "conn refused".into(),
+            ))));
+            let r = dispatch(&s, job_req(vec![("x-agent-id", "agent-a")]));
+            assert_eq!(r.status, 503);
+            assert!(String::from_utf8(r.body)
+                .unwrap()
+                .contains("cannot verify claim availability"));
+        }
+
+        #[test]
+        fn no_index_behaves_as_standalone_node() {
+            let s = state_with_runner(PriceQuote::Free, FakeRunner);
+            let r = dispatch(&s, job_req(vec![]));
+            assert_eq!(r.status, 200);
+        }
     }
 }

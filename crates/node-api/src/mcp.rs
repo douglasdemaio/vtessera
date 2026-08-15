@@ -42,6 +42,8 @@ pub const ERROR_TOOL_NOT_FOUND: i64 = -32004;
 
 const RESOURCE_OFFER_URI: &str = "vtessera://offer";
 const TOOL_SUBMIT_JOB: &str = "submit_job";
+#[cfg(feature = "serve")]
+const TOOL_DISCOVER: &str = "discover";
 
 /// One MCP server over a [`NodeState`]. Cheap to construct per request.
 pub struct McpServer {
@@ -147,32 +149,71 @@ impl McpServer {
     }
 
     fn tools_list(&self) -> Result<Value, i64> {
-        Ok(json!({
-            "tools": [{
-                "name": TOOL_SUBMIT_JOB,
+        let submit_job = serde_json::json!({
+            "name": TOOL_SUBMIT_JOB,
+            "description": concat!(
+                "Submit an OCI workload to this node. For paid offers the first ",
+                "call returns the x402 payment challenge (HTTP 402) as text; ",
+                "pass the signed payment back via the `payment` argument. ",
+                "Free offers run when the node has an executor backend wired; ",
+                "paid submissions with a payment proof fail honestly until ",
+                "on-chain verification lands. When the node is claim-gated, ",
+                "pass the `agent_id` this node is claimed by (or claim it)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job": {
+                        "type": "string",
+                        "description": "JSON body of the job (workload description)",
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent identifier for first-come-first-served claim enforcement on a publish-wired node",
+                    },
+                    "payment": {
+                        "type": "string",
+                        "description": "x402 payment proof header value, returned by the 402 challenge flow",
+                    },
+                },
+                "required": ["job"],
+            },
+        });
+        #[cfg(feature = "serve")]
+        let mut tools = vec![submit_job];
+        #[cfg(not(feature = "serve"))]
+        let tools = vec![submit_job];
+        #[cfg(feature = "serve")]
+        if self.state.index.is_some() {
+            tools.push(serde_json::json!({
+                "name": TOOL_DISCOVER,
                 "description": concat!(
-                    "Submit an OCI workload to this node. For paid offers the first ",
-                    "call returns the x402 payment challenge (HTTP 402) as text; ",
-                    "pass the signed payment back via the `payment` argument. Job ",
-                    "execution is not yet wired in v0, so submissions currently ",
-                    "fail with 'not implemented'."
+                    "List compute offers currently registered with the node's ",
+                    "offer index, with claim status. Returns the index's JSON; ",
+                    "read the `endpoint` from an offer body to submit a job there."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "job": {
+                        "mode": {
                             "type": "string",
-                            "description": "JSON body of the job (workload description)",
+                            "enum": ["free", "paid"],
+                            "description": "Only offers of this pricing mode",
                         },
-                        "payment": {
+                        "device": {
                             "type": "string",
-                            "description": "x402 payment proof header value, returned by the 402 challenge flow",
+                            "enum": ["cpu", "nvidia_gpu", "nvidia_mig", "amd_gpu"],
+                            "description": "Only offers advertising this device",
+                        },
+                        "available": {
+                            "type": "boolean",
+                            "description": "Only offers with no active claim",
                         },
                     },
-                    "required": ["job"],
                 },
-            }]
-        }))
+            }));
+        }
+        Ok(serde_json::json!({ "tools": tools }))
     }
 
     fn tools_call(&self, params: Option<Value>) -> Result<Value, i64> {
@@ -182,6 +223,10 @@ impl McpServer {
             .and_then(|n| n.as_str())
             .ok_or(ERROR_INVALID_PARAMS)?;
         if name != TOOL_SUBMIT_JOB {
+            #[cfg(feature = "serve")]
+            if name == TOOL_DISCOVER {
+                return self.tool_discover(params.get("arguments").cloned());
+            }
             return Err(ERROR_TOOL_NOT_FOUND);
         }
         let arguments = params
@@ -197,6 +242,9 @@ impl McpServer {
         let mut headers: Vec<(String, String)> = Vec::new();
         if let Some(p) = arguments.get("payment").and_then(|p| p.as_str()) {
             headers.push(("x-payment".into(), p.to_string()));
+        }
+        if let Some(a) = arguments.get("agent_id").and_then(|a| a.as_str()) {
+            headers.push(("x-agent-id".into(), a.to_string()));
         }
 
         let req = crate::HttpRequest {
@@ -224,25 +272,68 @@ impl McpServer {
                 }],
                 "isError": true,
             })),
-            JobDecision::RunFree { body } => match &self.state.runner {
-                Some(runner) => match runner.run(&body) {
-                    Ok(json) => Ok(json!({
-                        "content": [{ "type": "text", "text": json }],
-                        "isError": false,
-                    })),
-                    Err(e) => Ok(json!({
-                        "content": [{ "type": "text", "text": e.message }],
-                        "isError": true,
-                    })),
-                },
-                None => Ok(json!({
-                    "content": [{
-                        "type": "text",
-                        "text": r#"{"status":"not-implemented","reason":"job execution is not wired; start the node with an executor backend"}"#,
-                    }],
-                    "isError": true,
-                })),
-            },
+            JobDecision::RunFree { body } => {
+                // Same claim gate and runner path as the HTTP surface —
+                // one enforcement point for both.
+                let agent_id = arguments.get("agent_id").and_then(|a| a.as_str());
+                let resp = crate::run_free(&self.state, &body, agent_id.map(str::to_string));
+                let text = String::from_utf8_lossy(&resp.body).to_string();
+                Ok(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "isError": resp.status != 200,
+                }))
+            }
+        }
+    }
+
+    /// `discover`: query the node's configured offer index for current
+    /// offers. Only reachable under `serve` with an index wired in; without
+    /// one this is an honest error, not a fake empty list.
+    #[cfg(feature = "serve")]
+    fn tool_discover(&self, arguments: Option<Value>) -> Result<Value, i64> {
+        let arguments = arguments.unwrap_or_else(|| json!({}));
+        let Some(index) = &self.state.index else {
+            return Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": r#"{"status":"not-configured","reason":"index not configured; start the node with --publish"}"#,
+                }],
+                "isError": true,
+            }));
+        };
+        let mode = arguments
+            .get("mode")
+            .and_then(|m| m.as_str())
+            .map(str::to_string);
+        let device = arguments
+            .get("device")
+            .and_then(|d| d.as_str())
+            .map(str::to_string);
+        let available = arguments
+            .get("available")
+            .and_then(|a| a.as_bool())
+            .unwrap_or(false);
+        let query = crate::index::IndexQuery {
+            mode,
+            device,
+            available,
+        };
+        match index.discover(&query) {
+            Ok(body) => Ok(json!({
+                "content": [{ "type": "text", "text": body }],
+                "isError": false,
+            })),
+            Err(e) => Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&json!({
+                        "status": "discover-failed",
+                        "reason": e,
+                    }))
+                    .unwrap_or_else(|_| r#"{"status":"discover-failed"}"#.into()),
+                }],
+                "isError": true,
+            })),
         }
     }
 
@@ -331,6 +422,8 @@ mod tests {
             escrow_account: "Esc1111111111111111111111111111111111111111".into(),
             network: "solana-devnet".into(),
             runner: None,
+            #[cfg(feature = "serve")]
+            index: None,
         })
     }
 
@@ -539,5 +632,172 @@ mod tests {
         let srv = server(paid());
         let r = srv.handle("not json").unwrap();
         assert_eq!(r["error"]["code"], ERROR_PARSE);
+    }
+
+    #[cfg(feature = "serve")]
+    mod gate {
+        use super::*;
+        use crate::index::{AdmitError, IndexClient, IndexQuery};
+        use std::sync::{Arc, Mutex};
+
+        struct FakeIndex {
+            calls: Mutex<Vec<String>>,
+            admit_result: Mutex<Result<(), AdmitError>>,
+            discover_body: Mutex<Result<String, String>>,
+        }
+
+        impl Default for FakeIndex {
+            fn default() -> Self {
+                Self {
+                    calls: Mutex::new(Vec::new()),
+                    admit_result: Mutex::new(Ok(())),
+                    discover_body: Mutex::new(Ok(r#"{"count":1,"offers":[]}"#.into())),
+                }
+            }
+        }
+
+        impl FakeIndex {
+            fn admitting() -> Arc<Self> {
+                Arc::new(Self::default())
+            }
+        }
+
+        impl IndexClient for FakeIndex {
+            fn admit(&self, agent_id: &str) -> Result<(), AdmitError> {
+                self.calls.lock().unwrap().push(agent_id.to_string());
+                self.admit_result.lock().unwrap().clone()
+            }
+
+            fn discover(&self, query: &IndexQuery) -> Result<String, String> {
+                self.calls.lock().unwrap().push(format!(
+                    "mode={:?} device={:?} available={}",
+                    query.mode, query.device, query.available
+                ));
+                self.discover_body.lock().unwrap().clone()
+            }
+        }
+
+        fn gated_server(price: PriceQuote, index: Arc<FakeIndex>) -> McpServer {
+            let mut state = server(price).state;
+            state.index = Some(index);
+            McpServer::new(state)
+        }
+
+        #[test]
+        fn tools_list_advertises_discover_when_index_is_wired() {
+            let srv = gated_server(PriceQuote::Free, FakeIndex::admitting());
+            let r = call(&srv, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+            let tools = r["result"]["tools"].as_array().unwrap();
+            let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+            assert_eq!(names, vec!["submit_job", "discover"]);
+        }
+
+        #[test]
+        fn tools_list_omits_discover_without_index() {
+            let srv = server(PriceQuote::Free);
+            let r = call(&srv, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+            let tools = r["result"]["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0]["name"], "submit_job");
+        }
+
+        #[test]
+        fn discover_returns_index_offers() {
+            let index = FakeIndex::admitting();
+            let srv = gated_server(PriceQuote::Free, index.clone());
+            let r = call(
+                &srv,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"discover","arguments":{"mode":"free","available":true}}}"#,
+            );
+            assert_eq!(r["result"]["isError"], json!(false));
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("\"count\":1"));
+            let call = index.calls.lock().unwrap().first().unwrap().clone();
+            assert!(call.contains("mode=Some(\"free\")"));
+            assert!(call.contains("available=true"));
+        }
+
+        #[test]
+        fn discover_without_index_is_honest_error() {
+            let srv = server(PriceQuote::Free);
+            let r = call(
+                &srv,
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"discover","arguments":{}}}"#,
+            );
+            assert_eq!(r["result"]["isError"], json!(true));
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("not-configured"));
+        }
+
+        #[test]
+        fn discover_failure_is_error() {
+            let index = FakeIndex::admitting();
+            *index.discover_body.lock().unwrap() = Err("index unreachable".into());
+            let srv = gated_server(PriceQuote::Free, index);
+            let r = call(
+                &srv,
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"discover","arguments":{}}}"#,
+            );
+            assert_eq!(r["result"]["isError"], json!(true));
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("discover-failed"));
+        }
+
+        #[test]
+        fn submit_job_forwards_agent_id_through_gate() {
+            let index = FakeIndex::admitting();
+            let srv = gated_server(PriceQuote::Free, index.clone());
+            let mut state = srv.state;
+            state.runner = Some(Arc::new(FakeRunner));
+            let srv = McpServer::new(state);
+            let r = call(
+                &srv,
+                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"{...}","agent_id":"agent-demo"}}}"#,
+            );
+            assert_eq!(r["result"]["isError"], json!(false));
+            assert_eq!(index.calls.lock().unwrap()[0], "agent-demo");
+        }
+
+        #[test]
+        fn gated_submit_job_without_agent_id_is_refused() {
+            let index = FakeIndex::admitting();
+            let srv = gated_server(PriceQuote::Free, index);
+            let r = call(
+                &srv,
+                r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"{...}"}}}"#,
+            );
+            assert_eq!(r["result"]["isError"], json!(true));
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("agent identity required"));
+        }
+
+        #[test]
+        fn gated_submit_job_is_refused_when_taken() {
+            let index = FakeIndex::admitting();
+            *index.admit_result.lock().unwrap() = Err(AdmitError::Taken("agent-other".into()));
+            let srv = gated_server(PriceQuote::Free, index);
+            let r = call(
+                &srv,
+                r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"{...}","agent_id":"agent-demo"}}}"#,
+            );
+            assert_eq!(r["result"]["isError"], json!(true));
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("node claimed by agent-other"));
+        }
+
+        #[test]
+        fn gated_submit_job_fails_closed_when_index_unreachable() {
+            let index = FakeIndex::admitting();
+            *index.admit_result.lock().unwrap() =
+                Err(AdmitError::Unreachable("connection refused".into()));
+            let srv = gated_server(PriceQuote::Free, index);
+            let r = call(
+                &srv,
+                r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"{...}","agent_id":"agent-demo"}}}"#,
+            );
+            assert_eq!(r["result"]["isError"], json!(true));
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("cannot verify claim availability"));
+        }
     }
 }

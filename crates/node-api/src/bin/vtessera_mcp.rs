@@ -170,6 +170,7 @@ fn main() {
         escrow_account: args.escrow_account,
         network: args.network,
         runner: Some(runner),
+        index: None,
     });
 
     eprintln!(
