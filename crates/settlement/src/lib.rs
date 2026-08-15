@@ -486,8 +486,8 @@ impl std::error::Error for SettleError {}
 
 /// Compute the completion fraction for one job. The escrow program
 /// uses this number to split the buyer's stablecoin between
-/// `f × price` (swapped to HNT, paid to seller) and `(1 − f) × price`
-/// (refunded to buyer in the original stablecoin).
+/// `f × price` (paid to the seller in the same stablecoin) and
+/// `(1 − f) × price` (refunded to the buyer).
 pub fn settle(contract: &JobContract, usage: &JobUsage) -> Result<Settlement, SettleError> {
     if contract.job_id != usage.job_id {
         return Err(SettleError::JobIdMismatch);

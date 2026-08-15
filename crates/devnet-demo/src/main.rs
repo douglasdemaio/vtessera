@@ -8,13 +8,14 @@
 //! 2. Funds a buyer keypair with that token.
 //! 3. Generates a fresh seller keypair.
 //! 4. Initializes the program's `Config` account (`settlement_authority`
-//!    = the payer, on devnet) and calls `pay_for_compute` on the deployed
-//!    escrow program — buyer's tokens move into a program-owned escrow
-//!    PDA, flat SOL fee transfers to the fee wallet.
+//!    = the payer and the protocol fee wallet + 0.0001 SOL fee, on devnet)
+//!    and calls `pay_for_compute` on the deployed escrow program — buyer's
+//!    tokens move into a program-owned escrow PDA, flat SOL fee transfers
+//!    to the fee wallet.
 //! 5. Runs the (no-op) executor for one job to produce metering.
 //! 6. Computes the completion fraction `f` via the settlement crate.
 //! 7. Calls `finalize_pro_rata` — escrow splits by `f`: earned slice to
-//!    seller, refund to buyer.
+//!    the seller's stablecoin ATA, refund to buyer.
 //! 8. Prints final on-chain balances + transaction signatures.
 //!
 //! No mainnet exposure. Total devnet cost is a small fraction of one
@@ -35,7 +36,6 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::{read_keypair_file, Keypair, Signer},
     system_instruction, system_program,
-    sysvar::rent,
     transaction::Transaction,
 };
 use spl_associated_token_account::{
@@ -79,9 +79,13 @@ fn settle_f(device_seconds: f64, agreed_device_seconds: u64) -> f64 {
 
 /// Devnet program ID — see ROADMAP.md §0, programs/Anchor.toml.
 const PROGRAM_ID_STR: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
-/// DRAFT fee wallet from the roadmap. Drives a real lamport transfer on
-/// devnet so the IX exercises every account in the production graph.
-const FEE_WALLET_STR: &str = "9iBQEn9yMbKVhJKEpMpPByS6pjydPmQDGaznMaCvGkzD";
+/// Protocol fee wallet from the design spec. Drives a real lamport
+/// transfer on devnet so the IX exercises every account in the production
+/// graph. The program validates it against the wallet pinned in `Config`.
+const FEE_WALLET_STR: &str = "J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh";
+/// 0.0001 SOL per agent↔node transaction, charged on pay, finalize and
+/// cancel to fund protocol infrastructure.
+const FEE_LAMPORTS: u64 = 100_000;
 const DEVNET_RPC: &str = "https://api.devnet.solana.com";
 
 /// `pay_for_compute` IX args, encoded with borsh after the 8-byte
@@ -264,11 +268,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "create escrow ATA",
     )?;
 
-    // --- 4b. init_config: settlement authority = payer (devnet) ----------
+    // --- 4b. init_config: settlement authority + fee config (devnet) ----
     // Mainnet sets this to the Squads vault PDA (MAINNET-CHECKLIST §3.5);
-    // the devnet demo pins it to the payer so the demo can sign
-    // finalize_pro_rata_stub. Finalize IXs reject signers that don't
-    // match the config's settlement authority.
+    // the devnet demo pins the settlement authority to the payer so the
+    // demo can sign finalize_pro_rata, and pins the protocol fee wallet +
+    // FEE_LAMPORTS. Finalize IXs reject signers that don't match the
+    // config's settlement authority; pay/finalize/cancel reject a fee
+    // wallet that doesn't match config.fee_wallet.
     let (config_pda, _config_bump) =
         Pubkey::find_program_address(&[b"vtessera_config"], &program_id);
     println!("\n--- init_config (settlement_authority = payer) ---");
@@ -276,6 +282,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg_disc = anchor_disc("init_config");
     let mut cfg_data = cfg_disc.to_vec();
     cfg_data.extend_from_slice(&payer.pubkey().to_bytes());
+    cfg_data.extend_from_slice(&fee_wallet.to_bytes());
+    cfg_data.extend_from_slice(&FEE_LAMPORTS.to_le_bytes());
     // Anchor account order in InitConfig: authority (signer), config (init), system_program.
     let cfg_ix = Instruction {
         program_id,
@@ -287,12 +295,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         data: cfg_data,
     };
     // Idempotent: if a previous run already initialized the config with
-    // the same authority, skip. If it exists with a *different* authority
-    // the finalize step will fail loudly, which is the desired signal.
+    // the same authority + fee config, skip. If it exists with a
+    // *different* authority the finalize step will fail loudly, which is
+    // the desired signal. A stale config from the pre-stablecoin program
+    // (41-byte layout) must be cleared before redeploy.
+    const CONFIG_LEN: usize = 8 + 32 + 32 + 8 + 1; // disc + Config::LEN
     match rpc.get_account(&config_pda) {
-        Ok(_) => println!("  config account already exists; skipping init_config"),
+        Ok(acct) if acct.data.len() == CONFIG_LEN => {
+            println!("  config account already exists; skipping init_config")
+        }
+        Ok(acct) => {
+            return Err(format!(
+                "config PDA {config_pda} exists with {} bytes (expected {CONFIG_LEN}) — stale \
+                 layout from the pre-stablecoin program; clear it (or redeploy the program) \
+                 before running against the new program",
+                acct.data.len()
+            )
+            .into());
+        }
         Err(_) => {
             send_tx(&rpc, &[cfg_ix], &[&payer], &payer, "init_config")?;
+        }
+    }
+
+    // The protocol fee lands in `fee_wallet` on every pay/finalize/cancel.
+    // The runtime refuses a SOL transfer that leaves the receiver below
+    // rent exemption (0-byte account needs 890,880 lamports), so on devnet
+    // top it up if it doesn't exist yet. On mainnet the operator funds it.
+    match rpc.get_account(&fee_wallet) {
+        Ok(acct) if acct.lamports >= rpc.get_minimum_balance_for_rent_exemption(acct.data.len())? => {}
+        _ => {
+            let sig = rpc.request_airdrop(&fee_wallet, 1_000_000_000)?;
+            rpc.confirm_transaction(&sig)?;
+            println!("  fee wallet {fee_wallet} funded on devnet (rent-exempt)");
         }
     }
 
@@ -314,6 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   escrow_stablecoin_ata (mut)
     //   contract (init, mut)
     //   fee_wallet (mut)
+    //   config
     //   token_program
     //   system_program
     let pay_ix = Instruction {
@@ -326,11 +362,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(fee_wallet, false),
+            AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
-            // Anchor also needs the rent sysvar for `init` accounts under
-            // some IDL versions; include defensively.
-            AccountMeta::new_readonly(rent::id(), false),
         ],
         data: pay_data,
     };
@@ -356,39 +390,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let f_micros: u32 = (f * 1_000_000.0).round() as u32;
     println!("settlement: f = {f:.4}  → f_micros = {f_micros}");
 
-    // --- 7. finalize_pro_rata_stub -------------------------------------
-    // Devnet doesn't host the HNT mint or the Pyth feeds the production
-    // `finalize_pro_rata` IX requires, so the demo calls the stub
-    // variant. Mainnet flow uses `finalize_pro_rata` and a bundled
-    // Jupiter swap. See MAINNET-CHECKLIST §1.
-    let fin_disc = anchor_disc("finalize_pro_rata_stub");
+    // --- 7. finalize_pro_rata -------------------------------------------
+    // The production finalize: seller is paid the earned slice in the
+    // contract's stablecoin mint, buyer gets the refund. Devnet has no
+    // HNT/Pyth feeds — none are needed now; the escrow settles in whatever
+    // stablecoin the buyer deposited.
+    let fin_disc = anchor_disc("finalize_pro_rata");
     let fin_args = FinalizeProRataArgs { f_micros };
     let mut fin_data = fin_disc.to_vec();
     fin_data.extend_from_slice(&fin_args.try_to_vec()?);
 
-    // Anchor account order in FinalizeProStub:
-    //   settlement_authority (signer)
+    // Anchor account order in FinalizePro:
+    //   settlement_authority (signer, mut)
     //   config
     //   contract (mut)
     //   escrow_stablecoin_ata (mut)
     //   buyer_stablecoin_ata (mut)
     //   seller_stablecoin_ata (mut)
+    //   fee_wallet (mut)
     //   token_program
+    //   system_program
     let fin_ix = Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(payer.pubkey(), true), // settlement authority = payer (devnet)
+            AccountMeta::new(payer.pubkey(), true), // settlement authority = payer (devnet)
             AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(buyer_ata, false),
             AccountMeta::new(seller_ata, false),
+            AccountMeta::new(fee_wallet, false),
             AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: fin_data,
     };
-    println!("\n--- finalize_pro_rata_stub (f_micros={f_micros}) ---");
-    let fin_sig = send_tx(&rpc, &[fin_ix], &[&payer], &payer, "finalize_pro_rata_stub")?;
+    println!("\n--- finalize_pro_rata (f_micros={f_micros}) ---");
+    let fin_sig = send_tx(&rpc, &[fin_ix], &[&payer], &payer, "finalize_pro_rata")?;
     println!("finalize signature: {fin_sig}");
 
     // --- 8. Final balances --------------------------------------------

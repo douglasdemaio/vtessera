@@ -241,7 +241,7 @@ fn handle_mcp(state: &NodeState, req: HttpRequest) -> HttpResponse {
 fn handle_agent_card(state: &NodeState) -> HttpResponse {
     let card = serde_json::json!({
         "name": mcp::MCP_SERVER_NAME,
-        "description": "Vtessera compute seller node: signed compute offers over MCP + x402; paid offers settle to HNT.",
+        "description": "Vtessera compute seller node: signed compute offers over MCP + x402; paid offers settle in EURC/USDC.",
         "url": state.offer.body.endpoint,
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": { "streaming": false, "pushNotifications": false },
@@ -360,7 +360,7 @@ pub fn mcp_manifest(state: &NodeState) -> String {
     s.push_str("\"uri\":\"vtessera://offer\",");
     s.push_str("\"name\":\"Vtessera compute offer\",");
     s.push_str("\"description\":\"Signed machine-readable offer of compute on this node. ");
-    s.push_str("Free or paid (EURC/USDC, settled to seller in HNT).\",");
+    s.push_str("Free or paid (EURC/USDC, settled to the seller in the same stablecoin).\",");
     s.push_str("\"mimeType\":\"application/json\"");
     s.push_str("}],");
     s.push_str("\"tools\":[{");

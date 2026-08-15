@@ -135,7 +135,7 @@ impl McpServer {
                 "version": MCP_SERVER_VERSION,
             },
             "instructions": concat!(
-                "Vtessera node: rentable CPU/GPU compute, settled on Solana in HNT. ",
+                "Vtessera node: rentable CPU/GPU compute, settled on Solana in EURC or USDC. ",
                 "Read the signed compute offer from the vtessera://offer resource, ",
                 "then call submit_job. Paid offers negotiate via x402: submit without ",
                 "a payment to receive the 402 challenge body, sign it, and resubmit ",
@@ -253,7 +253,7 @@ impl McpServer {
                 "name": "Vtessera compute offer",
                 "description": concat!(
                     "Signed machine-readable offer of compute on this node. ",
-                    "Free or paid (EURC/USDC, settled to seller in HNT)."
+                    "Free or paid (EURC/USDC, settled to the seller in the same stablecoin)."
                 ),
                 "mimeType": "application/json",
             }]

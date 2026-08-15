@@ -12,7 +12,7 @@
 //! - picks a random `f_micros` from a weighted pool (`0`, `1`,
 //!   `500_000`, `990_000`, `1_000_000`, plus a uniform random draw)
 //! - with probability `CANCEL_P`, fires `cancel_before_start` instead of
-//!   `pay` + `finalize_pro_rata_stub` — the buyer-side full refund
+//!   `pay` + `finalize_pro_rata` — the buyer-side full refund
 //! - uses a random seller pubkey
 //! - logs the outcome; any unexpected failure bumps the error count
 //!
@@ -38,7 +38,7 @@
 //!
 //! ## What "expected" means per iteration
 //!
-//! - **Finalize path:** after `pay` + `finalize_pro_rata_stub(f_micros)`,
+//! - **Finalize path:** after `pay` + `finalize_pro_rata(f_micros)`,
 //!   the escrow ATA is drained; seller received `earned = price * f`
 //!   (truncated toward zero) and the buyer's balance is
 //!   `start + refund`, `refund = price - earned`. An `f_micros = 1_000_000`
@@ -74,7 +74,6 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::{read_keypair_file, Keypair, Signer},
     system_instruction, system_program,
-    sysvar::rent,
     transaction::Transaction,
 };
 use spl_associated_token_account::{
@@ -87,11 +86,15 @@ use spl_token::state::{Account as TokenAccount, Mint};
 // demo's file is intentionally self-contained; see its module comment.
 
 const PROGRAM_ID_STR: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
-const FEE_WALLET_STR: &str = "9iBQEn9yMbKVhJKEpMpPByS6pjydPmQDGaznMaCvGkzD";
+/// Protocol fee wallet from the design spec. Driven by the lamport
+/// transfer in every pay/finalize/cancel.
+const FEE_WALLET_STR: &str = "J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh";
+/// 0.0001 SOL per agent↔node transaction.
+const FEE_LAMPORTS: u64 = 100_000;
 const DEVNET_RPC: &str = "https://api.devnet.solana.com";
 
 /// Probability of firing `cancel_before_start` instead of
-/// `pay` + `finalize_pro_rata_stub`, per iteration.
+/// `pay` + `finalize_pro_rata`, per iteration.
 const CANCEL_P: f64 = 0.2;
 
 /// Stablecoin decimals for the test mint — matches the demo.
@@ -246,22 +249,46 @@ fn setup(rpc: &RpcClient, payer: Keypair) -> Result<Env, Box<dyn std::error::Err
     send_tx(rpc, &[create_ata], &[&payer], &payer, "create buyer ATA")?;
     top_up(rpc, &payer, &mint_pk, &buyer_ata, 1_000_000_000_000)?;
 
-    // init_config (idempotent) with settlement authority = payer.
+    // init_config (idempotent) with settlement authority = payer and the
+    // protocol fee config. The Env is created once; fee_wallet is funded
+    // rent-exempt so the per-iteration SOL transfers don't trip
+    // InsufficientFundsForRent.
     let (config_pda, _) = Pubkey::find_program_address(&[b"vtessera_config"], &program_id);
-    if rpc.get_account(&config_pda).is_err() {
-        let cfg_disc = anchor_disc("init_config");
-        let mut cfg_data = cfg_disc.to_vec();
-        cfg_data.extend_from_slice(&payer.pubkey().to_bytes());
-        let cfg_ix = Instruction {
-            program_id,
-            accounts: vec![
-                AccountMeta::new(payer.pubkey(), true),
-                AccountMeta::new(config_pda, false),
-                AccountMeta::new_readonly(system_program::id(), false),
-            ],
-            data: cfg_data,
-        };
-        send_tx(rpc, &[cfg_ix], &[&payer], &payer, "init_config")?;
+    const CONFIG_LEN: usize = 8 + 32 + 32 + 8 + 1; // disc + Config::LEN
+    match rpc.get_account(&config_pda) {
+        Ok(acct) if acct.data.len() == CONFIG_LEN => {}
+        Ok(acct) => {
+            return Err(format!(
+                "config PDA {config_pda} exists with {} bytes (expected {CONFIG_LEN}) — stale \
+                 layout from the pre-stablecoin program; clear it (or redeploy the program)",
+                acct.data.len()
+            )
+            .into());
+        }
+        Err(_) => {
+            let cfg_disc = anchor_disc("init_config");
+            let mut cfg_data = cfg_disc.to_vec();
+            cfg_data.extend_from_slice(&payer.pubkey().to_bytes());
+            cfg_data.extend_from_slice(&fee_wallet.to_bytes());
+            cfg_data.extend_from_slice(&FEE_LAMPORTS.to_le_bytes());
+            let cfg_ix = Instruction {
+                program_id,
+                accounts: vec![
+                    AccountMeta::new(payer.pubkey(), true),
+                    AccountMeta::new(config_pda, false),
+                    AccountMeta::new_readonly(system_program::id(), false),
+                ],
+                data: cfg_data,
+            };
+            send_tx(rpc, &[cfg_ix], &[&payer], &payer, "init_config")?;
+        }
+    }
+    match rpc.get_account(&fee_wallet) {
+        Ok(acct) if acct.lamports >= rpc.get_minimum_balance_for_rent_exemption(acct.data.len())? => {}
+        _ => {
+            let sig = rpc.request_airdrop(&fee_wallet, 1_000_000_000)?;
+            rpc.confirm_transaction(&sig)?;
+        }
     }
 
     Ok(Env {
@@ -414,9 +441,9 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(env.fee_wallet, false),
+            AccountMeta::new_readonly(env.config_pda, false),
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
-            AccountMeta::new_readonly(rent::id(), false),
         ],
         data: pay_data,
     };
@@ -440,7 +467,10 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
                 AccountMeta::new(contract_pda, false),
                 AccountMeta::new(escrow_ata, false),
                 AccountMeta::new(env.buyer_ata, false),
+                AccountMeta::new(env.fee_wallet, false),
+                AccountMeta::new_readonly(env.config_pda, false),
                 AccountMeta::new_readonly(spl_token::id(), false),
+                AccountMeta::new_readonly(system_program::id(), false),
             ],
             data: cancel_disc.to_vec(),
         };
@@ -480,9 +510,9 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
             detail: format!("cancel refunded full {price}; escrow drained: {escrow_after}"),
         }
     } else {
-        // ---- finalize_pro_rata_stub ----
+        // ---- finalize_pro_rata ----
         let f_micros = pick_f_micros(rng);
-        let fin_disc = anchor_disc("finalize_pro_rata_stub");
+        let fin_disc = anchor_disc("finalize_pro_rata");
         let fin_args = FinalizeProRataArgs { f_micros };
         let mut fin_data = fin_disc.to_vec();
         if let Err(e) = fin_args
@@ -500,13 +530,15 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
         let fin_ix = Instruction {
             program_id: env.program_id,
             accounts: vec![
-                AccountMeta::new_readonly(env.payer.pubkey(), true),
+                AccountMeta::new(env.payer.pubkey(), true), // settlement authority
                 AccountMeta::new_readonly(env.config_pda, false),
                 AccountMeta::new(contract_pda, false),
                 AccountMeta::new(escrow_ata, false),
                 AccountMeta::new(env.buyer_ata, false),
                 AccountMeta::new(seller_ata, false),
+                AccountMeta::new(env.fee_wallet, false),
                 AccountMeta::new_readonly(spl_token::id(), false),
+                AccountMeta::new_readonly(system_program::id(), false),
             ],
             data: fin_data,
         };
@@ -515,14 +547,14 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
             &[fin_ix],
             &[&env.payer],
             &env.payer,
-            "finalize_pro_rata_stub",
+            "finalize_pro_rata",
         ) {
             return IterOutcome {
                 iter,
                 action: "finalize".into(),
                 price,
                 ok: false,
-                detail: format!("finalize_pro_rata_stub failed: {e}"),
+                detail: format!("finalize_pro_rata failed: {e}"),
             };
         }
 
