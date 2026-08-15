@@ -31,7 +31,7 @@ slice, and pays the seller in HNT. Three problems:
    address `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`. Charged on
    `pay_for_compute` (payer = buyer), `finalize_pro_rata` (payer = settlement
    authority), and `cancel_before_start` (payer = buyer) — even when a contract
-   never completes. The fee funds infrastructure costs and scales per
+   never completes. The fee funds infrastructure costs for the protocol and scales per
    transaction regardless of the job's outcome codes.
 3. **No governance.** This is a single-operator project; there is no
    governance token and no governance instructions. `init_config` is the only
