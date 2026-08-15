@@ -12,8 +12,9 @@
 //!    refuses with 501 while execution is not wired (v0). That's honest:
 //!    the payment is real and sitting in the escrow, so step 5 still
 //!    exercises the money path end to end.
-//! 5. `finalize_pro_rata_stub` (f = 1.0) drains the escrow to the
-//!    seller. On devnet the settlement authority is the payer.
+//! 5. `finalize_pro_rata` (f = 1.0) drains the escrow to the seller's
+//!    stablecoin ATA in the contract's mint. On devnet the settlement
+//!    authority is the payer.
 //!
 //! By default the client mints its own test stablecoin so the whole loop
 //! runs with no faucet dependency (devnet-demo's approach). Pass
@@ -45,7 +46,6 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::{read_keypair_file, Keypair, Signer},
     system_instruction, system_program,
-    sysvar::rent,
     transaction::Transaction,
 };
 use spl_associated_token_account::{
@@ -55,9 +55,13 @@ use spl_token::state::{Account as TokenAccount, Mint};
 
 /// Devnet escrow program ID — see ROADMAP.md §0, programs/Anchor.toml.
 const PROGRAM_ID_STR: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
-/// DRAFT fee wallet from the roadmap. Drives a real lamport transfer on
-/// devnet so the IX exercises every account in the production graph.
-const FEE_WALLET_STR: &str = "9iBQEn9yMbKVhJKEpMpPByS6pjydPmQDGaznMaCvGkzD";
+/// Protocol fee wallet from the design spec. Drives a real lamport
+/// transfer on devnet so the IX exercises every account in the production
+/// graph. The program validates it against the wallet pinned in `Config`.
+const FEE_WALLET_STR: &str = "J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh";
+/// 0.0001 SOL per agent↔node transaction, charged on pay, finalize and
+/// cancel to fund protocol infrastructure.
+const FEE_LAMPORTS: u64 = 100_000;
 /// Circle's devnet USDC mint (verified on-chain, 6 decimals).
 const DEVNET_USDC_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const DEVNET_RPC: &str = "https://api.devnet.solana.com";
@@ -327,15 +331,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "create escrow ATA",
     )?;
 
-    // --- 3b. init_config: settlement authority = payer (devnet) ----------
+    // --- 3b. init_config: settlement authority + fee config (devnet) ----
     // Finalize IXs require the signer to match the config's settlement
-    // authority. On mainnet this is the Squads vault PDA (§3.5); the
-    // devnet flow pins it to the payer. Idempotent across runs.
+    // authority; the fee wallet + amount are pinned here too. On mainnet
+    // this is the Squads vault PDA (§3.5); the devnet flow pins it to the
+    // payer. Idempotent across runs (the PDA may already be initialized).
+    // A config left over from the pre-stablecoin program (41-byte layout)
+    // must be cleared before redeploy, or this account deserialize fails.
     let (config_pda, _config_bump) =
         Pubkey::find_program_address(&[b"vtessera_config"], &program_id);
     let cfg_disc = anchor_disc("init_config");
     let mut cfg_data = cfg_disc.to_vec();
     cfg_data.extend_from_slice(&payer.pubkey().to_bytes());
+    cfg_data.extend_from_slice(&fee_wallet.to_bytes());
+    cfg_data.extend_from_slice(&FEE_LAMPORTS.to_le_bytes());
     let cfg_ix = Instruction {
         program_id,
         accounts: vec![
@@ -345,10 +354,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
         data: cfg_data,
     };
+    const CONFIG_LEN: usize = 8 + 32 + 32 + 8 + 1; // disc + Config::LEN
     match rpc.get_account(&config_pda) {
-        Ok(_) => println!("config PDA {config_pda} already initialized; skipping init_config"),
+        Ok(acct) if acct.data.len() == CONFIG_LEN => {
+            println!("config PDA {config_pda} already initialized; skipping init_config")
+        }
+        Ok(acct) => {
+            return Err(format!(
+                "config PDA {config_pda} exists with {} bytes (expected {CONFIG_LEN}) — stale \
+                 layout from the pre-stablecoin program; clear it (or redeploy the program) \
+                 before running against the new program",
+                acct.data.len()
+            )
+            .into());
+        }
         Err(_) => {
             send_tx(&rpc, &[cfg_ix], &[&payer], &payer, "init_config")?;
+        }
+    }
+
+    // The protocol fee lands in `fee_wallet` on every pay/finalize/cancel.
+    // The runtime refuses a SOL transfer that leaves the receiver below
+    // rent exemption (0-byte account needs 890,880 lamports), so on devnet
+    // top it up if it doesn't exist yet. On mainnet the operator funds it.
+    match rpc.get_account(&fee_wallet) {
+        Ok(acct) if acct.lamports >= rpc.get_minimum_balance_for_rent_exemption(acct.data.len())? => {}
+        _ => {
+            let sig = rpc.request_airdrop(&fee_wallet, 1_000_000_000)?;
+            rpc.confirm_transaction(&sig)?;
+            println!("fee wallet {fee_wallet} funded on devnet (rent-exempt)");
         }
     }
 
@@ -363,8 +397,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Anchor account order in PayForCompute (programs/vtessera-escrow):
     //   buyer (signer, mut), seller_payout, stablecoin_mint,
     //   buyer_stablecoin_ata (mut), escrow_stablecoin_ata (mut),
-    //   contract (init, mut), fee_wallet (mut), token_program,
-    //   system_program, rent
+    //   contract (init, mut), fee_wallet (mut), config,
+    //   token_program, system_program
     let pay_ix = Instruction {
         program_id,
         accounts: vec![
@@ -375,9 +409,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(fee_wallet, false),
+            AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
-            AccountMeta::new_readonly(rent::id(), false),
         ],
         data: pay_data,
     };
@@ -432,36 +466,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // --- 5. finalize_pro_rata_stub (f = 1.0) ----------------------------
-    // Devnet doesn't host the HNT mint or Pyth feeds the production
-    // `finalize_pro_rata` requires, so the demo settles with the stub
-    // variant. The agent ran the job to completion → f = 1.0, seller gets
-    // the whole escrow.
-    println!("\n--- 5. finalize_pro_rata_stub (f = 1.0) ---");
-    let fin_disc = anchor_disc("finalize_pro_rata_stub");
+    // --- 5. finalize_pro_rata (f = 1.0) ---------------------------------
+    // The production finalize: seller is paid the earned slice in the
+    // contract's stablecoin mint, buyer gets the refund. Devnet has no
+    // HNT/Pyth feeds — none are needed now. The agent ran the job to
+    // completion → f = 1.0, seller gets the whole escrow.
+    println!("\n--- 5. finalize_pro_rata (f = 1.0) ---");
+    let fin_disc = anchor_disc("finalize_pro_rata");
     let fin_args = FinalizeProRataArgs { f_micros: 1_000_000 };
     let mut fin_data = fin_disc.to_vec();
     fin_data.extend_from_slice(&fin_args.try_to_vec()?);
 
-    // Anchor account order in FinalizeProStub:
-    //   settlement_authority (signer), config,
+    // Anchor account order in FinalizePro (programs/vtessera-escrow):
+    //   settlement_authority (signer, mut), config,
     //   contract (mut), escrow_stablecoin_ata (mut),
     //   buyer_stablecoin_ata (mut), seller_stablecoin_ata (mut),
-    //   token_program
+    //   fee_wallet (mut), token_program, system_program
     let fin_ix = Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(payer.pubkey(), true),
             AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(buyer_ata, false),
             AccountMeta::new(seller_ata, false),
+            AccountMeta::new(fee_wallet, false),
             AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: fin_data,
     };
-    let fin_sig = send_tx(&rpc, &[fin_ix], &[&payer], &payer, "finalize_pro_rata_stub")?;
+    let fin_sig = send_tx(&rpc, &[fin_ix], &[&payer], &payer, "finalize_pro_rata")?;
 
     // --- 6. Final balances + assertions ---------------------------------
     let escrow_after = token_balance(&rpc, &escrow_ata)?;

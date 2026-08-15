@@ -90,7 +90,7 @@ systemd unit and an AppArmor profile.
 ```
 vtessera/
 ├── README.md                       # what it is + build/run quickstart
-├── ROADMAP.md                      # modules 1–5 (HNT/AI-agent direction)
+├── ROADMAP.md                      # modules 1–5 (Solana stablecoin / AI-agent direction)
 ├── LICENSE                         # Apache-2.0 (recommended) or MIT
 ├── rust-toolchain.toml             # pin stable + musl target
 ├── Cargo.toml                      # workspace root (members = crates/vtesserad, ...)
@@ -383,12 +383,13 @@ Tracked in **`ROADMAP.md`**, not here. Summary:
 - **Module 3 — Settlement + attestation** (`crates/settlement`): verify
   Ed25519 receipts, aggregate per-device usage, compute completion
   fraction `f`. Non-TEE first; SEV-SNP/TDX after.
-- **Module 4 — Escrow + swap** (`programs/vtessera-escrow`): one Solana
+- **Module 4 — Escrow + fee** (`programs/vtessera-escrow`): one Solana
   Anchor program. Buyer pays EURC/USDC into a program-owned PDA, flat
-  SOL fee transferred at payment, on finalize the program splits by `f`:
-  earned slice swapped to HNT (Jupiter, Pyth-guarded) minus a burn, paid
-  to the seller; unearned slice refunded to the buyer in the original
-  stablecoin. **Sellers earn HNT — there is no Vtessera token.**
+  SOL fee (100,000 lamports) transferred on each agent↔node
+  transaction, on finalize the program splits by `f`: earned slice paid
+  to the seller in the same stablecoin mint; unearned slice refunded to
+  the buyer in the original stablecoin. **Sellers earn EURC/USDC — there
+  is no Vtessera token.**
 - **Module 5 — Hardening + ops**: spool rotation, abuse handling,
   re-running `systemd-analyze security` on every new privileged
   component.

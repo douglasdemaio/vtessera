@@ -83,8 +83,9 @@ done
 - `--share=network` is required so `vtessera-node` can serve agents on the
   configured port (the advertised endpoint must be reachable from the
   internet for agents to connect).
-- v0 settlement is off-chain; the Solana escrow (module 4) and HNT swap
-  layers are under development. See the repo `ROADMAP.md`.
+- v0 settlement is off-chain; the Solana escrow (module 4) settles
+  sellers directly in the same stablecoin the buyer paid (EURC/USDC).
+  See the repo `ROADMAP.md`.
 
 ## Before a FlatHub submission
 

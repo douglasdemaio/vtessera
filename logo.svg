@@ -1,28 +1,137 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <rect width="512" height="512" fill="#fff"/>
-  <g fill="none" stroke="#025043" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 512 512"
+   width="512"
+   height="512"
+   version="1.1"
+   id="svg10"
+   sodipodi:docname="logo.svg"
+   inkscape:version="1.4.4 (dcaf3e7d9e, 2026-05-05)"
+   inkscape:export-filename="logo.png"
+   inkscape:export-xdpi="96"
+   inkscape:export-ydpi="96"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs10" />
+  <sodipodi:namedview
+     id="namedview10"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="true"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="0.96703067"
+     inkscape:cx="296.7848"
+     inkscape:cy="210.95505"
+     inkscape:window-width="1536"
+     inkscape:window-height="891"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg10" />
+  <rect
+     width="492.73981"
+     height="492.73981"
+     fill="#ffffff"
+     id="rect1"
+     x="8.8275881"
+     y="10.432611"
+     ry="50.973087"
+     style="fill:#000000;stroke-width:0.962382;opacity:1;fill-rule:evenodd;fill-opacity:1" />
+  <g
+     fill="none"
+     stroke="#025043"
+     stroke-width="16"
+     stroke-linecap="round"
+     stroke-linejoin="round"
+     id="g5">
     <!-- outer square -->
-    <rect x="46" y="46" width="420" height="420" rx="6"/>
+    <rect
+       x="46"
+       y="46"
+       width="420"
+       height="420"
+       rx="6"
+       id="rect2" />
     <!-- left computer -->
-    <path d="M54 190h108v112H54"/>
-    <path d="M54 310h116"/>
+    <path
+       d="M54 190h108v112H54"
+       id="path2" />
+    <path
+       d="M54 310h116"
+       id="path3" />
     <!-- right computer -->
-    <path d="M458 190H350v112h108"/>
-    <path d="M458 310H342"/>
+    <path
+       d="M458 190H350v112h108"
+       id="path4" />
+    <path
+       d="M458 310H342"
+       id="path5" />
   </g>
-
   <!-- data exchange -->
-  <g fill="#025043">
+  <g
+     fill="#025043"
+     id="g10">
     <!-- rightward bit stream -->
-    <rect x="182" y="202" width="14" height="14"/>
-    <rect x="214" y="202" width="14" height="14"/>
-    <rect x="246" y="202" width="14" height="14"/>
-    <path d="M278 202h34v-13l28 20-28 20v-13h-34z"/>
-
+    <rect
+       x="182"
+       y="202"
+       width="14"
+       height="14"
+       id="rect5" />
+    <rect
+       x="214"
+       y="202"
+       width="14"
+       height="14"
+       id="rect6" />
+    <rect
+       x="246"
+       y="202"
+       width="14"
+       height="14"
+       id="rect7" />
+    <path
+       d="M278 202h34v-13l28 20-28 20v-13h-34z"
+       id="path7" />
     <!-- leftward bit stream -->
-    <path d="M234 284h-34v-13l-28 20 28 20v-13h34z"/>
-    <rect x="264" y="284" width="14" height="14"/>
-    <rect x="296" y="284" width="14" height="14"/>
-    <rect x="328" y="284" width="14" height="14"/>
+    <path
+       d="M234 284h-34v-13l-28 20 28 20v-13h34z"
+       id="path8" />
+    <rect
+       x="264"
+       y="284"
+       width="14"
+       height="14"
+       id="rect8" />
+    <rect
+       x="296"
+       y="284"
+       width="14"
+       height="14"
+       id="rect9" />
+    <rect
+       x="328"
+       y="284"
+       width="14"
+       height="14"
+       id="rect10" />
   </g>
+  <text
+     xml:space="preserve"
+     style="font-weight:600;font-size:622.91px;font-family:SUSE;-inkscape-font-specification:'SUSE Semi-Bold';writing-mode:lr-tb;direction:ltr;opacity:0.6;fill:#025043;fill-opacity:1;fill-rule:evenodd;stroke-width:0"
+     x="51.407776"
+     y="474.15848"
+     id="text17"
+     transform="scale(1.0002096,0.99979042)"><tspan
+       sodipodi:role="line"
+       id="tspan17"
+       x="51.407776"
+       y="474.15848"
+       style="font-size:622.91px;fill:#025043;stroke-width:0;fill-opacity:1">V</tspan></text>
 </svg>

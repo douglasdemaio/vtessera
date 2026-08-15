@@ -28,10 +28,10 @@ use sha2::{Digest, Sha256};
 /// [`canonical_bytes`]'s layout.
 pub const OFFER_SCHEMA_VER: u16 = 1;
 
-/// Currencies a paid offer may quote in. Buyers always pay in stablecoin;
-/// the protocol swaps the seller's earned slice to HNT at release time
-/// (ROADMAP.md §4b). EURC is the default — ECB-anchored price stability
-/// matches the European seller base most likely to value it.
+/// Currencies a paid offer may quote in. Buyers pay in stablecoin and the
+/// seller is paid out in that same stablecoin — whichever the node puts on
+/// the offer. EURC is the default — ECB-anchored price stability matches
+/// the European seller base most likely to value it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Currency {
@@ -118,9 +118,9 @@ pub enum PriceQuote {
     Paid {
         currency: Currency,
         per_device_second_micros: u64,
-        /// Seller wallet that ultimately receives HNT (the program swaps from
-        /// the buyer's stablecoin to HNT at release; the wallet need only be
-        /// HNT-compatible).
+        /// Seller wallet whose stablecoin ATA (in the offer's currency)
+        /// receives the earned slice at release. The escrow pays directly;
+        /// no swap, no conversion.
         payout_id: String,
     },
     /// The seller donates the compute. No 402, no escrow, no fee, no swap.

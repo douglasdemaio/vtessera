@@ -5,25 +5,32 @@ stablecoin in a program-owned PDA, transfers a flat SOL fee to the
 protocol fee wallet, then on finalize splits the escrow by the
 completion fraction `f` produced by the settlement crate (Module 3):
 
-- `f × price` → Jupiter swap to HNT → burn slice → seller.
+- `f × price` → paid directly to the seller's ATA in the same
+  stablecoin mint (no swap, no burn).
 - `(1 − f) × price` → refund to buyer in the original stablecoin.
 
 **No human ever holds the funds.** See `ROADMAP.md` §4.
 
-## DRAFT constants
+## Fee and Config
 
-This program ships with planning constants flagged DRAFT in source:
+The fee and settlement config live in a single on-chain `Config` account
+(seed `CONFIG_SEED`), created once by
+`init_config(settlement_authority, fee_wallet, fee_lamports)` right
+after deploy. `Config` is **immutable** after `init_config` — there are
+no update or governance instructions.
 
-| Symbol | Current draft | Final by |
-| ------ | ------------- | -------- |
-| `DRAFT_FEE_LAMPORTS` | `100_000` (0.0001 SOL) | First mainnet deploy |
-| `DRAFT_FEE_WALLET_TODO` | `9iBQEn9yMbKVhJKEpMpPByS6pjydPmQDGaznMaCvGkzD` | First mainnet deploy |
-| `DRAFT_MAX_SLIPPAGE_BPS` | `50` (0.5%) | After devnet swap testing |
-| `DRAFT_BURN_BPS` | `100` (1.00%) | After devnet swap testing |
+| Field | Value |
+| ----- | ----- |
+| `settlement_authority` | The operator's key, pinned at deploy; signs `finalize_pro_rata` (a functional gate so no arbitrary caller can finalize with a fabricated `f`) |
+| `fee_wallet` | `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh` |
+| `fee_lamports` | `100_000` (0.0001 SOL) |
+| `bump` | PDA bump for the `Config` account |
 
-Search the source for `DRAFT ` to find every site that pins a planning
-value. Final values land only once the full flow has been exercised on
-devnet.
+The flat fee is charged on **every agent↔node transaction** — on
+`pay_for_compute` (buyer), `finalize_pro_rata` (settlement authority),
+and `cancel_before_start` (buyer) — even when a contract never
+completes. It is skipped when `fee_lamports == 0`; `init_config` is not
+charged (bootstrap).
 
 ## Why this crate is outside the host workspace
 
@@ -55,16 +62,16 @@ sites get updated together.
 
 [`douglasdemaio/forkit`](https://github.com/douglasdemaio/forkit) — the
 recommended escrow starting point for Vtessera. This skeleton diverges
-on the pro-rata release path and the Jupiter swap CPI; the basic
-"deposit → release" structure stays close to forkit.
+on the pro-rata release path; the basic "deposit → release" structure
+stays close to forkit.
 
 ## Status
 
-**Skeleton.** Compiles under Anchor 0.30; Jupiter swap, Pyth guard, and
-the actual HNT payout to seller are TODO stubs documented inline in
-`src/lib.rs`. Nothing here is deployed. Nothing here is final.
-
-Once the program is deployed and the full agent → 402 → escrow → swap →
-seller flow has run on devnet, the DRAFT constants get replaced with
-their confirmed values and the upgrade authority is set to a public
-multisig / timelock per `ROADMAP.md` §4d.
+The program compiles under Anchor 0.30 and is **live on Solana devnet**
+(a devnet redeploy of the direct-stablecoin build is pending). The
+production path is `finalize_pro_rata`: the seller is paid in the
+contract's stablecoin mint, the buyer is refunded in the same mint, and
+the SOL fee is charged from the settlement authority. The old devnet stub
+is deleted — there is no swap and no burn. `Config` is immutable after
+`init_config`, and the settlement authority is the operator's key pinned
+at deploy — see `ROADMAP.md` §4d.

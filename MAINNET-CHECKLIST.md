@@ -5,9 +5,12 @@
 > entries here are gated by the "Mainnet criteria (DEFERRED)" block in
 > `ROADMAP.md`; this file is the per-step expansion with checkboxes.
 >
-> **Status today:** items 1, 2 done; 3 partially done (program side).
-> Devnet program at
-> `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` is the only deployment.
+> **Status today:** items 1, 2 done (incl. devnet redeploy + `init_config`);
+> 3 partially done (program side + devnet config live; upgrade-authority
+> path for mainnet still open). Devnet program at
+> `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` is the only deployment
+> and now runs the stablecoin build (on-chain code SHA
+> `a73348c18a12ec527ff5d47288ead356ddca89aa808d256fd2ca7f8ccf95b4ce`).
 
 ## How to read this file
 
@@ -18,93 +21,64 @@ project owner who holds the keys and the budget.
 
 ---
 
-## 1. Wire the Jupiter swap + Pyth price guard
+## 1. Direct stablecoin settlement
 
-**What it is.** When a job pays out, the buyer paid in **USDC or
-EURC** (a stablecoin). The roadmap promises the seller earns **HNT**
-(Helium's token). Two on-chain pieces convert one to the other:
+**What it is.** When a job pays out, the escrow program pays the
+seller's earned slice **directly in the stablecoin the buyer paid** —
+EURC or USDC, whichever the node's signed offer puts on it — via the
+seller's ATA in `contract.stablecoin_mint`, and refunds the unearned
+slice to the buyer in the same mint. There is **no swap, no oracle, and
+no burn**: the program never converts the escrowed asset. The
+per-transaction SOL fee (100,000 lamports to
+`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`) is charged on
+`pay_for_compute`, `finalize_pro_rata`, and `cancel_before_start`.
 
-- **Jupiter** is Solana's standard DEX aggregator — given "I have 1
-  USDC, get me HNT", it routes across all liquidity pools and picks
-  the cheapest path. We invoke it as a CPI (cross-program invocation)
-  from inside `finalize_pro_rata`.
-- **Pyth** is an on-chain price oracle — it publishes "HNT is worth
-  $X right now" with a confidence interval. We read Pyth's HNT/USD
-  price, compute what Jupiter's trade *should* return, and abort the
-  transaction if Jupiter's actual output is more than 0.5% off. This
-  kills MEV / sandwich attacks: a bot can't move the price unfavorably
-  against our swap because the program rejects the result.
-
-**What breaks if we skip it.** Sellers earn stablecoin, not HNT
-(current devnet-stub behavior). The README's central claim "every
-paid job is a real on-market HNT buy + burn" becomes false. Without
-Pyth, MEV bots systematically drain a few percent of every transaction.
+**What breaks if we skip it.** The seller is not paid and the escrow
+can't finalize. There is nothing to defer here — the direct-stablecoin
+path **is** the production design. The old devnet stub is deleted and
+the swap/oracle/burn work is gone; the remaining item is redeploying the
+new build to devnet.
 
 ### Design decision
 
-Rather than CPI'ing into Jupiter from inside `finalize_pro_rata`
-(messy: ~15 fixed accounts + N hop accounts in `remaining_accounts`,
-serialised route data, account-graph rotates with Jupiter version),
-the program **trusts the off-chain caller to bundle**
-`[Jupiter swap → finalize_pro_rata]` in a single transaction. The
-program reads Pyth, computes the expected HNT minimum, and reverts if
-the post-swap `escrow_hnt_ata` balance is below that. Same atomicity
-guarantee (one tx = atomic), much simpler audit surface, decouples us
-from Jupiter version churn. The Pyth guard is what enforces fairness,
-regardless of *how* HNT got into the escrow ATA.
+The program's `Config` — `{settlement_authority, fee_wallet,
+fee_lamports, bump}` — is set once by `init_config` and is **immutable**:
+there are no governance instructions. The settlement authority is the
+operator's key, pinned at deploy; it is the only signer that can
+trigger `finalize_pro_rata`, so no arbitrary caller can finalize an
+escrow with a fabricated `f` (which would refund the buyer and pay the
+seller nothing).
 
 ### Steps
 
-- [x] **1.1** **HNT mint** address confirmed on Solana mainnet-beta via
-      RPC introspection:
-      `hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux`. Decimals = 8.
-      Freeze authority = **null** ✓ (neutrality property holds).
-- [x] **1.2** Pyth feed IDs (cross-chain, hex; same ID across mainnet
-      + devnet because Pyth's pull oracle reads from caller-posted
-      `PriceUpdateV2` accounts):
-      - HNT/USD: `649fdd7ec08e8e2a20f425729854e90293dcbe2376abc47197a14da6ff339756`
-      - USDC/USD: `eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a`
-      - EUR/USD: `a995d00bb36a63cef7fd2c287dc105fc8f3d93779f062f09551b0af3e81ec30b`
-- [x] **1.3** `FinalizePro` restructured with `hnt_mint`,
-      `escrow_hnt_ata`, `seller_hnt_ata`, `pyth_hnt_usd`,
-      `pyth_stablecoin_usd`. Larger accounts boxed (`Box<Account<…>>`)
-      to stay under the BPF 4 KB stack-frame budget. Jupiter route
-      accounts not in `remaining_accounts` — see "Design decision"
-      above; the caller handles Jupiter separately.
-- [x] **1.4** Earned-slice path:
-      - Reads Pyth HNT/USD + stablecoin/USD via
-        `pyth_solana_receiver_sdk::PriceUpdateV2::get_price_no_older_than`
-      - Computes `expected_hnt_min` from `earned_stable × stable_usd_price
-        / hnt_usd_price × 10^(net_expo)` with slippage tolerance
-        (`DRAFT_MAX_SLIPPAGE_BPS = 50`)
-      - Reverts with `SwapBelowMinimum` if `escrow_hnt_ata.amount` is
-        below the minimum
-      - SPL-burns `DRAFT_BURN_BPS / 10_000` of the escrow's HNT
-      - Transfers the rest to `seller_hnt_ata`
-      - Refund slice unchanged: `(1 − f) × price` stablecoin → buyer
-- [x] **1.5** Pyth staleness gate via `MAX_PYTH_STALENESS_SECS = 60`.
-      Reverts with `PythStale` if either feed's last publish is older.
-- [ ] **1.6** Mainnet-fork testing of the production path. Devnet has
-      no HNT mint and no HNT/USD Pyth feed, so this can only be
-      exercised against a local validator forking mainnet state.
-      `solana-test-validator --clone <HNT_MINT> --clone <PYTH_RECEIVER>
-      --url mainnet-beta`, then sign and submit
-      `[jupiter_swap → finalize_pro_rata]` from a fork-aware test
-      harness. **Deferred.**
-- [x] **1.7** Stub variant kept as a **separate IX**:
-      `finalize_pro_rata_stub` (rather than a feature flag — Anchor
-      0.30's `#[program]` macro doesn't reliably honour `#[cfg]` on
-      inner functions). On mainnet, the multisig settlement authority
-      (§3) must refuse to sign stub calls. The IDL exposes both IXs
-      so this policy is auditable from off-chain.
+- [x] **1.1** `Config` account with `{settlement_authority, fee_wallet,
+      fee_lamports, bump}`; `init_config` is the only setup call (not
+      charged); no update instructions exist.
+- [x] **1.2** `finalize_pro_rata` (`FinalizePro`) pays the seller via
+      `seller_stablecoin_ata` in `contract.stablecoin_mint` and refunds
+      the buyer unchanged. All swap/oracle account fields and the
+      oracle-receiver SDK dependency are deleted.
+- [x] **1.3** Per-transaction SOL fee (100,000 lamports) charged on
+      `pay_for_compute` (buyer), `finalize_pro_rata` (settlement
+      authority), and `cancel_before_start` (buyer), paid to
+      `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`; skipped when
+      `fee_lamports == 0`.
+- [x] **1.4** The devnet bypass (the stub finalize instruction) deleted
+      — the production path now pays stablecoin.
+- [x] **1.5** Redeploy to devnet with the new build and run
+      `init_config`. **Done** (2026-08-15): in-place upgrade of
+      `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` (on-chain code SHA
+      `a73348c1…`, matches `target/deploy/vtessera_escrow.so`); `init_config`
+      created config PDA `4Lt3r6hVFGg8StJe3GAzdcn46p9LeT3H1yVmr6Xgso4D`
+      (settlement_authority = operator key `5vWdYSmc…`, fee wallet
+      `J59EPyP…`, fee 100,000 lamports, bump 253); full devnet-demo run
+      green (pay 2.0 → finalize f=0.5 → seller 1.0m / buyer refund 9.0m,
+      escrow drained).
 
-**Status.** Program is upgraded on devnet at
-`6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`, upgrade signature
-`45DGeqZ2J3iCRytm4xPH7dPLAKYRBdMtgCztgx3qcXFo1Km6GViC6LZQVRb3yXqGHisXjsq55CStCSzphGg28o6c`.
-Devnet smoke test green via the stub IX. Production IX
-compile-verified, mainnet-fork test pending (1.6). The production path
-(burn + transfer, Pyth guards, authority gating) is now exercised by the
-litesvm adversarial suite (§2) instead of only the stub.
+**Status.** Program change implemented, unit-tested (drift guard pins
+error codes 6000–6007), and covered by the adversarial suite (§2).
+Devnet redeploy + `init_config` live (§1.5). No swap, oracle, or burn
+code remains.
 
 ---
 
@@ -153,20 +127,25 @@ can slip through.
             consistently
       - [x] **2.2k** `finalize_pro_rata` signed by a key other than
             the settlement_authority → fails
-      - Plus §2.4 additions: stale-feed revert (both feeds), wrong
-        feed ID, swap underdelivery, non-positive oracle price,
-        production happy path (burn + transfer verified on-chain),
-        fraction=0 refund-only, EUR/USD feed fallback, §3.5 authority
-        rotation, stub paths, buyer unilateral cancel.
+      - Plus §2.4 additions: fee charged on `pay_for_compute` (buyer
+        SOL down by `fee_lamports`, fee wallet up), fee charged on
+        finalize, fee charged on cancel, `fee_lamports = 0` disables
+        the fee, `init_config` sets the fee fields, Config immutable
+        after init (no update instruction), fraction=0 refund-only,
+        finalize happy path (seller paid in stablecoin, escrow drained,
+        buyer refunded), buyer unilateral cancel.
 - [x] **2.3** Wire into CI — every push runs the harness.
       **Done:** `.github/workflows/ci.yml` installs Agave 3.1.14 + Anchor
       0.30.1, runs `anchor build`, the program's unit tests (which pin
       the numeric `EscrowError` codes as a drift guard), and the
       adversarial suite with `--locked`.
-- [ ] **2.4** Re-run the suite against the post-§1 program (swap +
-      guard add new failure modes worth covering). **Partially done** —
-      the suite already covers the Pyth guard + burn path; remaining
-      delta is §1.6 (mainnet-fork live test), not the harness.
+- [x] **2.4** Re-run the suite against the post-§1 program (the
+      direct-stablecoin rewrite adds the fee-charging and
+      config-immutability coverage listed above). **Done** — the suite
+      is rebuilt for the new account set (config, escrow/buyer/seller
+      stablecoin ATAs, fee wallet, system program) and covers the fee
+      on all three instructions, zero-fee disable, and config
+      immutability.
 
 **Who.** All me.
 
@@ -174,85 +153,55 @@ can slip through.
 
 ---
 
-## 3. Multisig for settlement authority and upgrade authority
+## 3. Settlement authority and upgrade authority
 
-**What it is.** Two separate signer roles that today are both the
-single keypair at `~/.config/solana/id.json` on this laptop.
+**What it is.** Two signer roles:
 
-- **Settlement authority** — signs `finalize_pro_rata`. Today that
-  keypair can declare any `f` for any active escrow and drain funds to
-  itself.
+- **Settlement authority** — the operator's key, pinned in `Config` at
+  deploy. It signs `finalize_pro_rata`; this is a functional gate, not
+  governance: it stops an arbitrary caller from finalizing an escrow
+  with a fabricated `f`. `Config` is immutable after `init_config` and
+  there are no governance instructions, so the authority cannot be
+  rotated on-chain — changing it requires a redeploy (accepted for a
+  single-operator project).
 - **Upgrade authority** — can replace the on-chain program with new
-  code. Today that keypair can deploy a malicious version that routes
-  all escrows to a chosen address.
+  code. Today that keypair could deploy a version that routes escrows to
+  a chosen address.
 
-**Multisig** = an on-chain vault that requires *N of M* signers to
-approve any action. e.g. 2-of-3 means three signers exist, any two
-must co-sign. **Squads** (squads.so) is the standard Solana multisig
-tool — a web UI that creates the vault on-chain.
-
-**What breaks if we skip it.** Laptop theft = total loss of every
-active escrow. Compromised SSH key = total loss. An accidental
-`git add ~/.config` followed by `git push` = total loss. The README's
-"credibly neutral, no one holds the funds" framing only holds if no
-single party can change the program after deploy.
+**What breaks if we skip it.** Laptop theft or a compromised key = total
+loss of every active escrow (settlement key) or the ability to change
+the program (upgrade key). The "credibly neutral, no one holds the
+funds" framing only holds if no single party can change the program
+after deploy.
 
 ### Steps
 
-- [ ] **3.1** Acquire a **hardware wallet** if you don't already have
-      one. Ledger Nano X or Trezor Safe 3 are the standard choices.
-      **Critical:** a multisig made entirely of laptop keys is theatre,
-      not security. At least one signer must be hardware.
-- [ ] **3.2** Pick signers and threshold. Recommended: **2-of-3** with:
-      - Signer A: hardware wallet (acquired in 3.1)
-      - Signer B: laptop wallet (current `~/.config/solana/id.json`)
-      - Signer C: backup — second hardware wallet, or a trusted
-        person's wallet
-- [ ] **3.3** Create the Squads multisig:
-      - Go to https://squads.so
-      - Connect Signer B (laptop) to fund creation
-      - Add Signer A and Signer C as members
-      - Set threshold to 2
-      - Name the vault "vtessera-mainnet"
-      - Cost: ~0.01 SOL
-- [ ] **3.4** Record the Squads vault PDA — this is the address that
-      will receive both the upgrade authority and settlement
-      authority.
-- [ ] **3.5** Update `programs/vtessera-escrow/src/lib.rs`:
-      `FinalizePro`'s `settlement_authority` becomes constrained to
-      equal the Squads vault PDA. Constant in the program OR config
-      account holding the address. Redeploy to devnet.
-      **Code side done:** the program now has a single on-chain
-      `Config` account (`init_config` / `update_settlement_authority`)
-      whose `settlement_authority` both finalize IXs are gated on —
-      a key other than the configured one is rejected with
-      `NotSettlementAuthority`, and the authority can rotate without a
-      redeploy. The litesvm suite covers this (§2.2k + rotation).
-      **Remaining:** the owner deploys this build to devnet, runs
-      `init_config` with the current devnet keypair, then re-points
-      `settlement_authority` to the Squads vault once it exists.
-- [ ] **3.6** Transfer the **upgrade authority** to Squads:
-      ```
-      solana program set-upgrade-authority 6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma \
-        --new-upgrade-authority <SQUADS_VAULT_PDA> --url devnet
-      ```
-      After this, future upgrades require 2 of the 3 signers to
-      approve from inside Squads.
-- [ ] **3.7** Verify on-chain — `solana program show <PROGRAM_ID>`
-      should report Authority = Squads vault PDA.
-- [ ] **3.8** Document signer set, threshold, and Squads vault PDA in
-      the README so users can independently verify on-chain.
+- [x] **3.1** `init_config(settlement_authority, fee_wallet,
+      fee_lamports)` is the only setup call; no rotation instruction
+      exists — the authority is the operator's key locked at deploy.
+      Covered by the adversarial suite: a non-authority signer is
+      rejected (§2.2k) and no update path exists
+      (`config_immutable_after_init`).
+- [x] **3.2** Devnet redeploy + `init_config` with the operator key
+      (**done** 2026-08-15 — see §1.5; config PDA
+      `4Lt3r6hVFGg8StJe3GAzdcn46p9LeT3H1yVmr6Xgso4D` is live and the demo
+      signed `finalize_pro_rata` with it).
+- [ ] **3.3** Handle the **upgrade authority** for mainnet:
+      - Option A — make the program **immutable**:
+        ```
+        solana program set-upgrade-authority 6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma --final
+        ```
+      - Option B — set the upgrade authority to a multisig / timelock
+        that outlives a single key (a laptop key as upgrade authority is
+        an implicit custodian; §1.5's redeploy needs it until then).
+- [ ] **3.4** Verify on-chain — `solana program show <PROGRAM_ID>`
+      reports the expected authority.
 
 **Who.**
-- **You:** acquire hardware wallet (3.1), create Squads multisig
-  (3.2-3.4), run `set-upgrade-authority` (3.6). The current keypair
-  must be present to authorize the handover — only you can run that
-  command.
-- **Me:** update the program code to gate `finalize_pro_rata` on the
-  multisig PDA (3.5). Redeploy to devnet.
+- **You:** the operator — hold the deploy key, run `init_config` on
+  devnet (3.2), decide and execute the upgrade-authority path (3.3).
 
-**Effort.** Half a day plus 1-2 weeks of wall-clock if you need to
-order a hardware wallet.
+**Effort.** Half a day.
 
 ---
 
@@ -280,8 +229,8 @@ community review.** When the project has revenue or real funds at
 risk, get the paid audit.
 
 **What breaks if we skip it.** You ship with unknown unknowns. A bug
-found by a user post-mainnet means: (a) hope the multisig moves fast
-enough to upgrade before exploitation, or (b) accept the loss.
+found by a user post-mainnet means: (a) hope the upgrade authority moves
+fast enough to fix it, or (b) accept the loss.
 
 ### Steps
 
@@ -290,9 +239,8 @@ enough to upgrade before exploitation, or (b) accept the loss.
 - [ ] **4.2** Prepare for review:
       - Write `programs/vtessera-escrow/SECURITY.md` with:
         - Threat model — what we defend against (custodial drain by
-          settlement authority, MEV, double-spend), what we don't
-          (Solana validator censorship, Pyth feed compromise, Jupiter
-          rugpull, Circle freezing edge addresses)
+          settlement authority, double-spend), what we don't
+          (Solana validator censorship, Circle freezing edge addresses)
         - Known limitations
         - Deploy procedure (the immutable / multisig step)
       - Tag the audit-ready commit hash
@@ -393,8 +341,12 @@ ATA-creation collisions; RPC failures mid-transaction.
         `pay`+`finalize`
       - Random seller pubkey
       - Run the flow; log result and any error
-- [ ] **6.2** Cron / systemd-timer it to fire every N minutes. Target
-      ~100 runs / week.
+- [x] **6.2** Cron / systemd-timer it to fire every N minutes. Target
+      ~100 runs / week. **Done:** `.github/workflows/soak-devnet.yml`
+      runs the soak hourly via a GitHub Actions scheduled workflow (fires
+      on `main` once merged; manual `workflow_dispatch` supported; payer
+      top-up via devnet airdrop; soak log uploaded as an artifact). The
+      payer keypair is stored in the `DEVNET_PAYER_KEYPAIR` repo secret.
 - [ ] **6.3** Vary specifically:
       - Concurrent jobs (2-3 in flight at once) to catch any
         non-serializable race
@@ -423,9 +375,9 @@ These steps overlap; calendar time is less than sum of efforts.
 
 | Week | Me | You |
 | --- | --- | --- |
-| 1 | Start #1, start #2 | Order hardware wallet if needed; set up Squads (#3.1-3.4) |
-| 2 | Finish #1, #2; do #5 | Run `set-upgrade-authority` (#3.6) once #3.5 lands |
-| 3 | Update settlement_authority (#3.5), redeploy. Start #6 soak. Prepare #4 audit kit. | Post audit request (#4.3) |
+| 1 | #1, #2 done (direct-stablecoin + adversarial suite) | Redeploy devnet + run `init_config` (#1.5, #3.2); decide upgrade-authority path (#3.3) |
+| 2 | Start #6 soak. Prepare #4 audit kit. | Run `set-upgrade-authority` (#3.3) |
+| 3 | Start #6 soak; prepare #4 audit kit | Post audit request (#4.3) |
 | 4-5 | Process audit findings | — |
 | 6 | Final devnet soak with all changes in. Reproducible build of audited code. | — |
 | 7 | Mainnet deploy. Small amounts only. | Run verify command (#5.5) yourself |
@@ -437,8 +389,9 @@ Community-review-only shaves 1-2 weeks but lowers the trust signal.
 
 - **Audit tier (item #4).** Community / contest / paid firm. Default
   recommendation: community.
-- **Hardware wallet (item #3).** Required. Confirm you have one or
-  order before week 1.
+- **Upgrade-authority path (item #3).** Immutable vs multisig — decide
+  before week 1; the settlement authority itself is the operator's key
+  pinned at deploy.
 
 ## Mainnet deploy gate
 
