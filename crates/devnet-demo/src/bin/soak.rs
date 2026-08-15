@@ -253,7 +253,7 @@ fn setup(rpc: &RpcClient, payer: Keypair) -> Result<Env, Box<dyn std::error::Err
     // protocol fee config. The Env is created once; fee_wallet is funded
     // rent-exempt so the per-iteration SOL transfers don't trip
     // InsufficientFundsForRent.
-    let (config_pda, _) = Pubkey::find_program_address(&[b"vtessera_config"], &program_id);
+    let (config_pda, _) = Pubkey::find_program_address(&[b"vtessera_config_v2"], &program_id);
     const CONFIG_LEN: usize = 8 + 32 + 32 + 8 + 1; // disc + Config::LEN
     match rpc.get_account(&config_pda) {
         Ok(acct) if acct.data.len() == CONFIG_LEN => {}

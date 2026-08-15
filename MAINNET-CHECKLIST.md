@@ -9,8 +9,9 @@
 > 3 partially done (program side + devnet config live; upgrade-authority
 > path for mainnet still open). Devnet program at
 > `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` is the only deployment
-> and now runs the stablecoin build (on-chain code SHA
-> `a73348c18a12ec527ff5d47288ead356ddca89aa808d256fd2ca7f8ccf95b4ce`).
+> and now runs the stablecoin build. The devnet config PDA uses the
+> `vtessera_config_v2` seed with the throwaway CI soak key as settlement
+> authority, so no operator key is used in automation.
 
 ## How to read this file
 
@@ -67,11 +68,12 @@ seller nothing).
       — the production path now pays stablecoin.
 - [x] **1.5** Redeploy to devnet with the new build and run
       `init_config`. **Done** (2026-08-15): in-place upgrade of
-      `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` (on-chain code SHA
-      `a73348c1…`, matches `target/deploy/vtessera_escrow.so`); `init_config`
-      created config PDA `4Lt3r6hVFGg8StJe3GAzdcn46p9LeT3H1yVmr6Xgso4D`
-      (settlement_authority = operator key `5vWdYSmc…`, fee wallet
-      `J59EPyP…`, fee 100,000 lamports, bump 253); full devnet-demo run
+      `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`; `init_config` ran
+      against the `vtessera_config_v2` seed with the **throwaway CI soak
+      key** (`Dtb4KYwzrEUomtWTcBJ1DziTzHbfHDyp9RPmRbjKuGVA`) as
+      settlement authority — no operator key is used in automation.
+      Config PDA `45JFFH3PQKxRAZqu432h3gdkF48ZSLfZAxtSpjKxdz9V`
+      (fee wallet `J59EPyP…`, fee 100,000 lamports). Full devnet-demo run
       green (pay 2.0 → finalize f=0.5 → seller 1.0m / buyer refund 9.0m,
       escrow drained).
 
@@ -182,10 +184,11 @@ after deploy.
       Covered by the adversarial suite: a non-authority signer is
       rejected (§2.2k) and no update path exists
       (`config_immutable_after_init`).
-- [x] **3.2** Devnet redeploy + `init_config` with the operator key
+- [x] **3.2** Devnet redeploy + `init_config` with a non-operator key
       (**done** 2026-08-15 — see §1.5; config PDA
-      `4Lt3r6hVFGg8StJe3GAzdcn46p9LeT3H1yVmr6Xgso4D` is live and the demo
-      signed `finalize_pro_rata` with it).
+      `45JFFH3PQKxRAZqu432h3gdkF48ZSLfZAxtSpjKxdz9V` is live with the
+      throwaway CI soak key as authority, and the soak signed
+      `finalize_pro_rata` with it).
 - [ ] **3.3** Handle the **upgrade authority** for mainnet:
       - Option A — make the program **immutable**:
         ```
@@ -346,7 +349,8 @@ ATA-creation collisions; RPC failures mid-transaction.
       runs the soak hourly via a GitHub Actions scheduled workflow (fires
       on `main` once merged; manual `workflow_dispatch` supported; payer
       top-up via devnet airdrop; soak log uploaded as an artifact). The
-      payer keypair is stored in the `DEVNET_PAYER_KEYPAIR` repo secret.
+      payer keypair is the throwaway CI key in the `DEVNET_PAYER_KEYPAIR`
+      repo secret — deliberately *not* the operator's key.
 - [ ] **6.3** Vary specifically:
       - Concurrent jobs (2-3 in flight at once) to catch any
         non-serializable race

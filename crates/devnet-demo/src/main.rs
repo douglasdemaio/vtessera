@@ -276,7 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // config's settlement authority; pay/finalize/cancel reject a fee
     // wallet that doesn't match config.fee_wallet.
     let (config_pda, _config_bump) =
-        Pubkey::find_program_address(&[b"vtessera_config"], &program_id);
+        Pubkey::find_program_address(&[b"vtessera_config_v2"], &program_id);
     println!("\n--- init_config (settlement_authority = payer) ---");
     println!("config PDA: {config_pda}");
     let cfg_disc = anchor_disc("init_config");
