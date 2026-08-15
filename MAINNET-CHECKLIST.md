@@ -5,9 +5,12 @@
 > entries here are gated by the "Mainnet criteria (DEFERRED)" block in
 > `ROADMAP.md`; this file is the per-step expansion with checkboxes.
 >
-> **Status today:** items 1, 2 done; 3 partially done (program side).
-> Devnet program at
-> `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` is the only deployment.
+> **Status today:** items 1, 2 done (incl. devnet redeploy + `init_config`);
+> 3 partially done (program side + devnet config live; upgrade-authority
+> path for mainnet still open). Devnet program at
+> `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` is the only deployment
+> and now runs the stablecoin build (on-chain code SHA
+> `a73348c18a12ec527ff5d47288ead356ddca89aa808d256fd2ca7f8ccf95b4ce`).
 
 ## How to read this file
 
@@ -62,13 +65,20 @@ seller nothing).
       `fee_lamports == 0`.
 - [x] **1.4** The devnet bypass (the stub finalize instruction) deleted
       — the production path now pays stablecoin.
-- [ ] **1.5** Redeploy to devnet with the new build and run
-      `init_config`. **Pending** — the program change is implemented and
-      unit/adversarial tested; the devnet redeploy is the remaining step.
+- [x] **1.5** Redeploy to devnet with the new build and run
+      `init_config`. **Done** (2026-08-15): in-place upgrade of
+      `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` (on-chain code SHA
+      `a73348c1…`, matches `target/deploy/vtessera_escrow.so`); `init_config`
+      created config PDA `4Lt3r6hVFGg8StJe3GAzdcn46p9LeT3H1yVmr6Xgso4D`
+      (settlement_authority = operator key `5vWdYSmc…`, fee wallet
+      `J59EPyP…`, fee 100,000 lamports, bump 253); full devnet-demo run
+      green (pay 2.0 → finalize f=0.5 → seller 1.0m / buyer refund 9.0m,
+      escrow drained).
 
 **Status.** Program change implemented, unit-tested (drift guard pins
-error codes 6000–6006), and covered by the adversarial suite (§2).
-Devnet redeploy pending (1.5). No swap, oracle, or burn code remains.
+error codes 6000–6007), and covered by the adversarial suite (§2).
+Devnet redeploy + `init_config` live (§1.5). No swap, oracle, or burn
+code remains.
 
 ---
 
@@ -172,8 +182,10 @@ after deploy.
       Covered by the adversarial suite: a non-authority signer is
       rejected (§2.2k) and no update path exists
       (`config_immutable_after_init`).
-- [ ] **3.2** Devnet redeploy + `init_config` with the operator key
-      (**pending**, same as 1.5).
+- [x] **3.2** Devnet redeploy + `init_config` with the operator key
+      (**done** 2026-08-15 — see §1.5; config PDA
+      `4Lt3r6hVFGg8StJe3GAzdcn46p9LeT3H1yVmr6Xgso4D` is live and the demo
+      signed `finalize_pro_rata` with it).
 - [ ] **3.3** Handle the **upgrade authority** for mainnet:
       - Option A — make the program **immutable**:
         ```
