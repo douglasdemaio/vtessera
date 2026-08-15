@@ -33,7 +33,8 @@ const APP_ID: &str = "io.github.douglasdemaio.Vtessera";
 /// Widgets the callbacks need to reach.
 struct Ui {
     settings: Rc<RefCell<Settings>>,
-    mode_switch: gtk4::Switch,
+    free_btn: gtk4::ToggleButton,
+    paid_btn: gtk4::ToggleButton,
     payout_entry: gtk4::Entry,
     price_entry: gtk4::Entry,
     currency_dd: gtk4::DropDown,
@@ -63,7 +64,7 @@ struct NodeState {
 
 impl Ui {
     fn is_free(&self) -> bool {
-        self.mode_switch.is_active()
+        self.free_btn.is_active()
     }
 
     fn sync_mode_sensitivity(&self) {
@@ -123,7 +124,7 @@ impl Ui {
     }
 
     fn apply_settings(&self, s: &Settings) {
-        self.mode_switch.set_active(s.is_free());
+        self.free_btn.set_active(s.is_free());
         self.payout_entry.set_text(&s.payout_id);
         self.price_entry
             .set_text(&format_price(s.price_per_cpu_hour));
@@ -330,7 +331,8 @@ fn build_ui(app: &gtk4::Application) {
     let initial = Settings::load_or_default(&settings::settings_path());
     let ui = Rc::new(Ui {
         settings: Rc::new(RefCell::new(initial.clone())),
-        mode_switch: gtk4::Switch::new(),
+        free_btn: gtk4::ToggleButton::with_label("Donate (free)"),
+        paid_btn: gtk4::ToggleButton::with_label("Sell (paid)"),
         payout_entry: gtk4::Entry::new(),
         price_entry: gtk4::Entry::new(),
         currency_dd: gtk4::DropDown::from_strings(&["EURC", "USDC"]),
@@ -387,7 +389,16 @@ fn build_ui(app: &gtk4::Application) {
     let mode_label = gtk4::Label::new(Some("Mode"));
     mode_label.set_xalign(0.0);
     grid.attach(&mode_label, 0, row, 1, 1);
-    grid.attach(&ui.mode_switch, 1, row, 1, 1);
+
+    ui.free_btn.set_group(None::<&gtk4::ToggleButton>);
+    ui.paid_btn.set_group(Some(&ui.free_btn));
+    ui.free_btn.set_active(true);
+    let mode_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    mode_box.add_css_class("mode-segmented");
+    mode_box.append(&ui.free_btn);
+    mode_box.append(&ui.paid_btn);
+    mode_box.set_halign(gtk4::Align::Start);
+    grid.attach(&mode_box, 1, row, 1, 1);
     row += 1;
 
     let payout_caption = gtk4::Label::new(Some("Solana payout address"));
@@ -543,7 +554,11 @@ fn build_ui(app: &gtk4::Application) {
     window.present();
 
     // ---- Wiring ----------------------------------------------------------
-    ui.mode_switch.connect_active_notify({
+    ui.free_btn.connect_toggled({
+        let ui = ui.clone();
+        move |_| ui.sync_mode_sensitivity()
+    });
+    ui.paid_btn.connect_toggled({
         let ui = ui.clone();
         move |_| ui.sync_mode_sensitivity()
     });
@@ -613,7 +628,12 @@ fn install_css() {
     let provider = gtk4::CssProvider::new();
     provider.load_from_string(
         ".error { color: @error_color; } \
-         .dim-label { opacity: 0.7; }",
+         .dim-label { opacity: 0.7; } \
+         .mode-segmented button { border-radius: 0; } \
+         .mode-segmented button:checked { background: @theme_selected_bg_color; \
+             color: @theme_selected_fg_color; } \
+         .mode-segmented button:first-child { border-radius: 8px 0 0 8px; } \
+         .mode-segmented button:last-child { border-radius: 0 8px 8px 0; }",
     );
     if let Some(display) = gtk4::gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
