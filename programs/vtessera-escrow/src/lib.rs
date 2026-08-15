@@ -1,131 +1,64 @@
 //! Vtessera escrow — Module 4 (ROADMAP.md §4).
 //!
-//! One Anchor program. The buyer's stablecoin (EURC or USDC) enters a
-//! **program-owned escrow PDA** and leaves only by on-chain rules:
+//! One Anchor program. The buyer's stablecoin (EURC or USDC, whichever
+//! the node's signed offer specifies) enters a **program-owned escrow
+//! PDA** and leaves only by on-chain rules:
 //!
 //! - `pay_for_compute` deposits the contract price into the PDA and
-//!   transfers a small flat SOL fee to the protocol fee wallet.
+//!   transfers a small flat SOL fee to the configured protocol fee
+//!   wallet (0.0001 SOL, read from `Config`).
 //! - `finalize_pro_rata` accepts the completion fraction `f` produced
-//!   by the settlement crate (Module 3) and splits the escrow. The
-//!   seller's earned slice is paid in **HNT**: the caller bundles a
-//!   Jupiter swap (stablecoin → HNT into the escrow's HNT ATA) and
-//!   `finalize_pro_rata` in the same transaction; the program reads
-//!   Pyth for HNT/USD and stablecoin/USD, computes an expected HNT
-//!   minimum, and reverts if the escrow's HNT balance is below that.
-//!   Then it burns `DRAFT_BURN_BPS` and transfers the rest to the
-//!   seller's HNT ATA. The buyer's `(1 − f) × price` is refunded in
-//!   the original stablecoin.
-//! - `cancel_before_start` lets a buyer reclaim escrow with `f = 0` if
-//!   the seller never started the job.
-//! - `init_config` / `update_settlement_authority` manage the single
-//!   on-chain `Config` account holding the **settlement authority**.
-//!   Both finalize IXs require the signer to equal
-//!   `Config::settlement_authority`, so a single keypair can no longer
-//!   finalize arbitrary escrows: on mainnet this is set to a Squads
-//!   multisig PDA (MAINNET-CHECKLIST §3.5). On devnet it's set to the
-//!   deployer keypair by `init_config`.
-//!
-//! ### `finalize_pro_rata_stub` — devnet bypass
-//!
-//! The program also exposes `finalize_pro_rata_stub`, which skips the
-//! HNT swap + Pyth guard and pays the seller in stablecoin directly.
-//! This is needed because devnet has no real HNT mint and limited
-//! Jupiter liquidity.
-//!
-//! **Mainnet safety relies on the multisig settlement authority
-//! refusing to sign stub IXs.** Anchor 0.30's `#[program]` macro
-//! doesn't reliably honour `#[cfg]` gating on inner functions
-//! (macro expansion runs before cfg evaluation), so the cleanest
-//! mainnet-safety story is policy-based, not build-flag-based: the
-//! Squads signers from MAINNET-CHECKLIST §3.3 must never co-sign a
-//! `finalize_pro_rata_stub` call. The IDL exposes both functions
-//! transparently so this policy is auditable from off-chain.
+//!   by the settlement crate (Module 3) and splits the escrow **in the
+//!   same stablecoin**: the seller's earned slice `f × price` is paid
+//!   directly to the seller's stablecoin ATA and the buyer's
+//!   `(1 − f) × price` is refunded to the buyer. There is no HNT, no
+//!   token swap, no price oracle, and no burn — the protocol never
+//!   mints or holds any token of its own. The finalize call itself also
+//!   carries the flat SOL protocol fee (payer = settlement authority).
+//! - `cancel_before_start` lets a buyer reclaim the escrow with `f = 0`
+//!   if the seller never started the job. It pays the flat SOL protocol
+//!   fee too (payer = buyer) — the fee is per transaction, even when a
+//!   contract never completes.
+//! - `init_config` is the **only** setup call, run once right after
+//!   deploy. It creates the single on-chain `Config` account holding
+//!   the **settlement authority** (the operator's key, pinned at deploy
+//!   and immutable afterwards) and the protocol fee wallet + amount.
+//!   There are no governance instructions: this is a single-operator
+//!   protocol with no governance token, so nothing can be changed
+//!   on-chain after init. Changing the settlement authority or fee
+//!   configuration requires a redeploy.
 
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount, Transfer};
-use pyth_solana_receiver_sdk::price_update::{get_feed_id_from_hex, PriceUpdateV2};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 // Program ID — devnet deployment, regenerated on first mainnet deploy.
 declare_id!("6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma");
 
-// ---------- Pinned addresses + feed IDs -----------------------------------
-//
-// All of these are mainnet-beta canonical references. Devnet does NOT
-// host the same accounts — the production finalize path is therefore
-// only exercisable on mainnet-beta or a mainnet-fork local validator
-// (see MAINNET-CHECKLIST §1.6). Devnet smoke testing uses the stub IX
-// which doesn't read these.
-
-/// Helium HNT mint on Solana mainnet-beta.
-/// Confirmed on-chain (`solana account ... --output json`): decimals = 8,
-/// freeze authority = null (preserves the credible-neutrality property
-/// described in ROADMAP §4d).
-pub const HNT_MINT: Pubkey = pubkey!("hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux");
-
-/// HNT/USD Pyth feed ID (cross-chain identifier, hex). Source: Pyth
-/// Hermes /v2/price_feeds?query=HNT&asset_type=crypto, June 2026.
-pub const HNT_USD_FEED_ID_HEX: &str =
-    "0x649fdd7ec08e8e2a20f425729854e90293dcbe2376abc47197a14da6ff339756";
-
-/// USDC/USD Pyth feed ID. USDC nominally pegs to USD at 1:1; the feed
-/// gives us a real spot price with confidence interval so we don't
-/// silently overpay sellers during a depeg.
-pub const USDC_USD_FEED_ID_HEX: &str =
-    "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
-
-/// EUR/USD Pyth feed ID — used when the buyer paid in EURC. EURC is
-/// nominally EUR-pegged; combined with this feed it lands at a real
-/// USD value for the swap math.
-pub const EUR_USD_FEED_ID_HEX: &str =
-    "0xa995d00bb36a63cef7fd2c287dc105fc8f3d93779f062f09551b0af3e81ec30b";
-
-/// HNT decimals — fixed by the on-chain mint. Hard-coded so we don't
-/// need to read the mint account just to get this number.
-pub const HNT_DECIMALS: u8 = 8;
-
-/// Maximum staleness for either Pyth feed, in seconds. Pyth's own
-/// best-practices doc suggests sub-minute thresholds; 60s gives some
-/// margin for RPC delays without being so generous that an attacker
-/// can exploit a price gap.
-pub const MAX_PYTH_STALENESS_SECS: u64 = 60;
-
-// ---------- DRAFT constants -----------------------------------------------
-//
-// Planning values. Confirmed values land here when the program is
-// deployed to mainnet-beta and the end-to-end flow has been exercised.
-// Until then, callers should treat these as configuration, not
-// production parameters.
-
 /// Seed prefix for the program's single `Config` account (settlement
-/// authority holder).
+/// authority + protocol fee configuration).
 pub const CONFIG_SEED: &[u8] = b"vtessera_config";
 
-/// **DRAFT.** Flat per-job fee in lamports (0.0001 SOL).
-pub const DRAFT_FEE_LAMPORTS: u64 = 100_000;
+/// Seed prefix for each `Contract` PDA.
+pub const CONTRACT_SEED: &[u8] = b"contract";
 
-/// **DRAFT.** Protocol fee wallet (string form so the binary doesn't
-/// hard-code an unverified address into mainnet via `const`).
-pub const DRAFT_FEE_WALLET_TODO: &str = "9iBQEn9yMbKVhJKEpMpPByS6pjydPmQDGaznMaCvGkzD";
+/// Default protocol fee wallet — the operator's SOL address. The value
+/// actually used on-chain is whatever `init_config` stored in `Config`;
+/// this constant only exists so off-chain tooling and tests have a
+/// canonical reference.
+pub const DEFAULT_FEE_WALLET: Pubkey = pubkey!("J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh");
 
-/// **DRAFT.** Slippage tolerance for the stablecoin→HNT swap, in basis
-/// points. The Pyth guard requires the escrow's post-swap HNT balance
-/// to be at least `expected_hnt × (1 − slippage_bps / 10_000)`. Anything
-/// less and `finalize_pro_rata` reverts.
-pub const DRAFT_MAX_SLIPPAGE_BPS: u16 = 50;
-
-/// **DRAFT.** Burn fraction (bps) applied to the seller's earned HNT
-/// before the rest is transferred. 100 bps = 1.00%.
-pub const DRAFT_BURN_BPS: u16 = 100;
-
-// --------------------------------------------------------------------------
+/// Default protocol fee per transaction, in lamports (0.0001 SOL).
+pub const DEFAULT_FEE_LAMPORTS: u64 = 100_000;
 
 #[program]
 pub mod vtessera_escrow {
     use super::*;
 
-    /// Create the program's `Config` account and set the settlement
-    /// authority. Called once right after deploy (by the deployer on
-    /// devnet, by whoever holds the deployer key on mainnet).
+    /// Create the program's `Config` account and pin the settlement
+    /// authority + protocol fee configuration. Called once right after
+    /// deploy by whoever holds the deployer key; the account is
+    /// immutable afterwards (there are no update instructions), so all
+    /// three values are fixed for the life of this program ID.
     ///
     /// **Race note:** `init` fails if the account already exists, and
     /// anyone may call this first. The config PDA is derivable from the
@@ -135,23 +68,17 @@ pub mod vtessera_escrow {
     /// step of the deploy transaction batch). Cost of a successful
     /// front-run on devnet is a DoS of finalize; on mainnet it costs
     /// the griefer real rent and requires winning the deploy block.
-    pub fn init_config(ctx: Context<InitConfig>, settlement_authority: Pubkey) -> Result<()> {
+    pub fn init_config(
+        ctx: Context<InitConfig>,
+        settlement_authority: Pubkey,
+        fee_wallet: Pubkey,
+        fee_lamports: u64,
+    ) -> Result<()> {
         let config = &mut ctx.accounts.config;
         config.settlement_authority = settlement_authority;
+        config.fee_wallet = fee_wallet;
+        config.fee_lamports = fee_lamports;
         config.bump = ctx.bumps.config;
-        Ok(())
-    }
-
-    /// Change the settlement authority. Only the current settlement
-    /// authority may call this — on mainnet that's the Squads vault PDA
-    /// itself (it can invoke this IX via Squads' execute-transaction CPI
-    /// with its PDA as signer), so the trust anchor can move without a
-    /// redeploy.
-    pub fn update_settlement_authority(
-        ctx: Context<UpdateSettlementAuthority>,
-        new_authority: Pubkey,
-    ) -> Result<()> {
-        ctx.accounts.config.settlement_authority = new_authority;
         Ok(())
     }
 
@@ -172,18 +99,11 @@ pub mod vtessera_escrow {
         let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
         token::transfer(cpi_ctx, price_micros)?;
 
-        let fee_ix = anchor_lang::solana_program::system_instruction::transfer(
-            ctx.accounts.buyer.key,
-            ctx.accounts.fee_wallet.key,
-            DRAFT_FEE_LAMPORTS,
-        );
-        anchor_lang::solana_program::program::invoke(
-            &fee_ix,
-            &[
-                ctx.accounts.buyer.to_account_info(),
-                ctx.accounts.fee_wallet.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
+        charge_fee(
+            &ctx.accounts.buyer,
+            &ctx.accounts.fee_wallet,
+            &ctx.accounts.system_program,
+            ctx.accounts.config.fee_lamports,
         )?;
 
         let contract = &mut ctx.accounts.contract;
@@ -203,14 +123,12 @@ pub mod vtessera_escrow {
     }
 
     /// Finalize a paid job with the completion fraction `f` produced by
-    /// settlement. Pays the seller in **HNT** via the Pyth-guarded swap
-    /// pattern documented at the top of this file.
-    ///
-    /// The caller is expected to bundle this IX in a single transaction
-    /// behind a Jupiter swap that lands the appropriate HNT amount in
-    /// `escrow_hnt_ata`. The program does not invoke Jupiter — it
-    /// verifies the post-condition (HNT balance ≥ Pyth-derived minimum)
-    /// and reverts otherwise.
+    /// settlement. Pays the seller's earned slice `f × price` in the
+    /// contract's stablecoin mint and refunds `(1 − f) × price` to the
+    /// buyer in the same mint. The settlement authority signs this and
+    /// pays the flat SOL protocol fee, so no arbitrary caller can
+    /// finalize an escrow with a fabricated `f` (which would refund the
+    /// buyer and pay the seller nothing).
     ///
     /// `f_micros` is `f` scaled by 1_000_000.
     pub fn finalize_pro_rata(ctx: Context<FinalizePro>, f_micros: u32) -> Result<()> {
@@ -227,112 +145,25 @@ pub mod vtessera_escrow {
 
         let job_id = ctx.accounts.contract.job_id;
         let bump = ctx.accounts.contract.bump;
-        let stable_decimals = ctx.accounts.contract.stablecoin_decimals;
-        let seeds: &[&[u8]] = &[b"contract", &job_id, &[bump]];
+        let seeds: &[&[u8]] = &[CONTRACT_SEED, &job_id, &[bump]];
         let signer_seeds: &[&[&[u8]]] = &[seeds];
 
-        // ---- Earned slice: verify HNT was swapped in, burn slice, pay seller ----
+        // ---- Earned slice: pay the seller in the contract's mint ----
         if earned_stable > 0 {
-            let clock = Clock::get()?;
-            let hnt_usd = ctx
-                .accounts
-                .pyth_hnt_usd
-                .get_price_no_older_than(
-                    &clock,
-                    MAX_PYTH_STALENESS_SECS,
-                    &get_feed_id_from_hex(HNT_USD_FEED_ID_HEX)
-                        .map_err(|_| EscrowError::BadFeedId)?,
-                )
-                .map_err(|_| EscrowError::PythStale)?;
-            let stable_usd = ctx
-                .accounts
-                .pyth_stablecoin_usd
-                .get_price_no_older_than(
-                    &clock,
-                    MAX_PYTH_STALENESS_SECS,
-                    // We don't know which stablecoin a priori — the caller
-                    // passes whichever USDC/USD or EUR/USD feed matches the
-                    // contract's stablecoin mint. The feed_id check happens
-                    // implicitly inside get_price_no_older_than against
-                    // whatever the caller provided; the program separately
-                    // requires the caller to pass the right one (see the
-                    // accounts struct doc).
-                    &get_feed_id_from_hex(USDC_USD_FEED_ID_HEX)
-                        .map_err(|_| EscrowError::BadFeedId)?,
-                )
-                .ok()
-                .or_else(|| {
-                    ctx.accounts
-                        .pyth_stablecoin_usd
-                        .get_price_no_older_than(
-                            &clock,
-                            MAX_PYTH_STALENESS_SECS,
-                            &get_feed_id_from_hex(EUR_USD_FEED_ID_HEX).ok()?,
-                        )
-                        .ok()
-                })
-                .ok_or(EscrowError::PythStale)?;
-
-            require!(hnt_usd.price > 0, EscrowError::BadOraclePrice);
-            require!(stable_usd.price > 0, EscrowError::BadOraclePrice);
-
-            let expected_hnt_min = expected_hnt_atomic(
-                earned_stable,
-                stable_decimals,
-                stable_usd.price as u128,
-                stable_usd.exponent,
-                hnt_usd.price as u128,
-                hnt_usd.exponent,
-                DRAFT_MAX_SLIPPAGE_BPS,
-            )?;
-
-            let escrow_hnt = ctx.accounts.escrow_hnt_ata.amount;
-            require!(
-                escrow_hnt >= expected_hnt_min,
-                EscrowError::SwapBelowMinimum
+            let cpi_accounts = Transfer {
+                from: ctx.accounts.escrow_stablecoin_ata.to_account_info(),
+                to: ctx.accounts.seller_stablecoin_ata.to_account_info(),
+                authority: ctx.accounts.contract.to_account_info(),
+            };
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                cpi_accounts,
+                signer_seeds,
             );
-
-            // Burn DRAFT_BURN_BPS of the HNT *that the seller earned*.
-            // We burn from the full escrow_hnt amount (the caller may have
-            // routed exactly expected_hnt_min, or more — burn from whatever
-            // arrived, leaving the rest for the seller).
-            let burn_amount = escrow_hnt
-                .checked_mul(DRAFT_BURN_BPS as u64)
-                .ok_or(EscrowError::MathOverflow)?
-                / 10_000;
-            if burn_amount > 0 {
-                let cpi_burn = Burn {
-                    mint: ctx.accounts.hnt_mint.to_account_info(),
-                    from: ctx.accounts.escrow_hnt_ata.to_account_info(),
-                    authority: ctx.accounts.contract.to_account_info(),
-                };
-                let burn_ctx = CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    cpi_burn,
-                    signer_seeds,
-                );
-                token::burn(burn_ctx, burn_amount)?;
-            }
-
-            let seller_amount = escrow_hnt
-                .checked_sub(burn_amount)
-                .ok_or(EscrowError::MathOverflow)?;
-            if seller_amount > 0 {
-                let cpi_accounts = Transfer {
-                    from: ctx.accounts.escrow_hnt_ata.to_account_info(),
-                    to: ctx.accounts.seller_hnt_ata.to_account_info(),
-                    authority: ctx.accounts.contract.to_account_info(),
-                };
-                let cpi_ctx = CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    cpi_accounts,
-                    signer_seeds,
-                );
-                token::transfer(cpi_ctx, seller_amount)?;
-            }
+            token::transfer(cpi_ctx, earned_stable)?;
         }
 
-        // ---- Refund slice (always stablecoin) ----
+        // ---- Refund slice ----
         if refund_stable > 0 {
             let cpi_accounts = Transfer {
                 from: ctx.accounts.escrow_stablecoin_ata.to_account_info(),
@@ -347,6 +178,13 @@ pub mod vtessera_escrow {
             token::transfer(cpi_ctx, refund_stable)?;
         }
 
+        charge_fee(
+            &ctx.accounts.settlement_authority,
+            &ctx.accounts.fee_wallet,
+            &ctx.accounts.system_program,
+            ctx.accounts.config.fee_lamports,
+        )?;
+
         ctx.accounts.contract.finalized = true;
 
         emit!(JobFinalized {
@@ -359,72 +197,17 @@ pub mod vtessera_escrow {
         Ok(())
     }
 
-    /// **DEVNET STUB.** Pays the seller's earned slice in stablecoin,
-    /// skipping the Jupiter + Pyth swap. Exists so the devnet smoke flow
-    /// runs without HNT liquidity. On mainnet the multisig settlement
-    /// authority must refuse to sign calls to this IX.
-    pub fn finalize_pro_rata_stub(ctx: Context<FinalizeProStub>, f_micros: u32) -> Result<()> {
-        require!(f_micros <= 1_000_000, EscrowError::FractionOutOfRange);
-        require!(!ctx.accounts.contract.finalized, EscrowError::AlreadyFinal);
-
-        let price = ctx.accounts.contract.price_micros;
-        let earned = (price as u128)
-            .checked_mul(f_micros as u128)
-            .ok_or(EscrowError::MathOverflow)?
-            .checked_div(1_000_000)
-            .ok_or(EscrowError::MathOverflow)? as u64;
-        let refund = price.saturating_sub(earned);
-
-        let job_id = ctx.accounts.contract.job_id;
-        let bump = ctx.accounts.contract.bump;
-        let seeds: &[&[u8]] = &[b"contract", &job_id, &[bump]];
-        let signer_seeds: &[&[&[u8]]] = &[seeds];
-
-        if earned > 0 {
-            let cpi_accounts = Transfer {
-                from: ctx.accounts.escrow_stablecoin_ata.to_account_info(),
-                to: ctx.accounts.seller_stablecoin_ata.to_account_info(),
-                authority: ctx.accounts.contract.to_account_info(),
-            };
-            let cpi_ctx = CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                cpi_accounts,
-                signer_seeds,
-            );
-            token::transfer(cpi_ctx, earned)?;
-        }
-        if refund > 0 {
-            let cpi_accounts = Transfer {
-                from: ctx.accounts.escrow_stablecoin_ata.to_account_info(),
-                to: ctx.accounts.buyer_stablecoin_ata.to_account_info(),
-                authority: ctx.accounts.contract.to_account_info(),
-            };
-            let cpi_ctx = CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                cpi_accounts,
-                signer_seeds,
-            );
-            token::transfer(cpi_ctx, refund)?;
-        }
-        ctx.accounts.contract.finalized = true;
-        emit!(JobFinalized {
-            job_id,
-            f_micros,
-            earned_stable: earned,
-            refund_stable: refund,
-        });
-        Ok(())
-    }
-
     /// Buyer reclaims escrow at `f = 0` if the seller never started the
     /// job. Distinct from `finalize_pro_rata` so the buyer can call it
     /// unilaterally after a timeout — no `f` from settlement needed.
+    /// Pays the flat SOL protocol fee (per transaction, even for
+    /// contracts that never complete).
     pub fn cancel_before_start(ctx: Context<CancelBeforeStart>) -> Result<()> {
         require!(!ctx.accounts.contract.finalized, EscrowError::AlreadyFinal);
         let refund = ctx.accounts.contract.price_micros;
         let job_id = ctx.accounts.contract.job_id;
         let bump = ctx.accounts.contract.bump;
-        let seeds: &[&[u8]] = &[b"contract", &job_id, &[bump]];
+        let seeds: &[&[u8]] = &[CONTRACT_SEED, &job_id, &[bump]];
         let signer_seeds: &[&[&[u8]]] = &[seeds];
         let cpi_accounts = Transfer {
             from: ctx.accounts.escrow_stablecoin_ata.to_account_info(),
@@ -437,101 +220,74 @@ pub mod vtessera_escrow {
             signer_seeds,
         );
         token::transfer(cpi_ctx, refund)?;
+
+        charge_fee(
+            &ctx.accounts.buyer,
+            &ctx.accounts.fee_wallet,
+            &ctx.accounts.system_program,
+            ctx.accounts.config.fee_lamports,
+        )?;
+
         ctx.accounts.contract.finalized = true;
         Ok(())
     }
 }
 
-// ---------- Pricing math (pure, testable) ---------------------------------
+// ---------- Protocol fee --------------------------------------------------
 
-/// Compute the minimum HNT (in atomic units, HNT_DECIMALS) the escrow
-/// must hold for `earned_stable_atomic` stablecoin to be considered a
-/// fair swap given the current Pyth-reported prices and a slippage
-/// tolerance in basis points.
-///
-/// Derivation:
-///
-/// ```text
-/// usd      = earned_stable × stable_usd_price × 10^(stable_usd_expo)  / 10^stable_decimals
-/// hnt      = usd / (hnt_usd_price × 10^hnt_usd_expo)
-/// hnt_atom = hnt × 10^HNT_DECIMALS
-///          = (earned_stable × stable_usd_price / hnt_usd_price)
-///            × 10^(stable_usd_expo - stable_decimals - hnt_usd_expo + HNT_DECIMALS)
-/// expected = hnt_atom × (10_000 - slippage_bps) / 10_000
-/// ```
-///
-/// Pyth expos are negative (e.g. -8 for USDC/USD), so the net exponent
-/// is usually positive (we end up multiplying), but the function handles
-/// either sign.
-fn expected_hnt_atomic(
-    earned_stable_atomic: u64,
-    stable_decimals: u8,
-    stable_usd_price: u128,
-    stable_usd_expo: i32,
-    hnt_usd_price: u128,
-    hnt_usd_expo: i32,
-    slippage_bps: u16,
-) -> Result<u64> {
-    // numerator/denominator before exponent adjustment
-    let numerator = (earned_stable_atomic as u128)
-        .checked_mul(stable_usd_price)
-        .ok_or(EscrowError::MathOverflow)?;
-    let q = numerator
-        .checked_div(hnt_usd_price)
-        .ok_or(EscrowError::MathOverflow)?;
-
-    // net_expo = stable_usd_expo - stable_decimals - hnt_usd_expo + HNT_DECIMALS
-    let net_expo: i32 = stable_usd_expo
-        .checked_sub(stable_decimals as i32)
-        .and_then(|x| x.checked_sub(hnt_usd_expo))
-        .and_then(|x| x.checked_add(HNT_DECIMALS as i32))
-        .ok_or(EscrowError::MathOverflow)?;
-
-    let adjusted: u128 = if net_expo >= 0 {
-        let pow = 10u128
-            .checked_pow(net_expo as u32)
-            .ok_or(EscrowError::MathOverflow)?;
-        q.checked_mul(pow).ok_or(EscrowError::MathOverflow)?
-    } else {
-        let pow = 10u128
-            .checked_pow((-net_expo) as u32)
-            .ok_or(EscrowError::MathOverflow)?;
-        q.checked_div(pow).ok_or(EscrowError::MathOverflow)?
-    };
-
-    // Apply slippage tolerance.
-    let with_slippage = adjusted
-        .checked_mul((10_000 - slippage_bps) as u128)
-        .ok_or(EscrowError::MathOverflow)?
-        / 10_000;
-
-    if with_slippage > u64::MAX as u128 {
-        return Err(EscrowError::MathOverflow.into());
+/// Transfer the flat protocol fee from `payer` to `fee_wallet`.
+/// `fee_lamports == 0` disables the fee. Both accounts must be writable
+/// and `payer` must be a signer of the transaction.
+fn charge_fee<'info>(
+    payer: &AccountInfo<'info>,
+    fee_wallet: &AccountInfo<'info>,
+    system_program: &Program<'info, System>,
+    fee_lamports: u64,
+) -> Result<()> {
+    if fee_lamports == 0 {
+        return Ok(());
     }
-    Ok(with_slippage as u64)
+    let fee_ix = anchor_lang::solana_program::system_instruction::transfer(
+        payer.key,
+        fee_wallet.key,
+        fee_lamports,
+    );
+    anchor_lang::solana_program::program::invoke(
+        &fee_ix,
+        &[
+            payer.to_account_info(),
+            fee_wallet.to_account_info(),
+            system_program.to_account_info(),
+        ],
+    )?;
+    Ok(())
 }
 
 // ---------- Accounts ------------------------------------------------------
 
-/// Program configuration: the single address allowed to finalize
-/// (settle) jobs. This is what makes the "no single keypair can drain an
-/// escrow" property hold — the value is the Squads vault PDA on mainnet.
+/// Program configuration: the settlement authority (the single key that
+/// may finalize jobs — the operator's key on devnet and mainnet) and the
+/// protocol fee wallet + per-transaction fee amount. Written once by
+/// `init_config`; there are no update instructions, so it is immutable
+/// for the life of the program ID.
 #[account]
 pub struct Config {
     pub settlement_authority: Pubkey,
+    pub fee_wallet: Pubkey,
+    pub fee_lamports: u64,
     pub bump: u8,
 }
 
 impl Config {
-    pub const LEN: usize = 32 + 1;
+    pub const LEN: usize = 32 + 32 + 8 + 1;
 }
 
 #[account]
 pub struct Contract {
     pub job_id: [u8; 32],
     pub buyer: Pubkey,
-    /// Address whose HNT ATA receives the earned slice (production
-    /// finalize) or whose stablecoin ATA receives it (stub finalize).
+    /// Address whose stablecoin ATA (in the contract's mint) receives
+    /// the earned slice at finalize.
     pub seller_payout: Pubkey,
     pub price_micros: u64,
     pub stablecoin_mint: Pubkey,
@@ -564,20 +320,6 @@ pub struct InitConfig<'info> {
 }
 
 #[derive(Accounts)]
-pub struct UpdateSettlementAuthority<'info> {
-    pub settlement_authority: Signer<'info>,
-
-    #[account(
-        mut,
-        seeds = [CONFIG_SEED],
-        bump = config.bump,
-        constraint = config.settlement_authority == settlement_authority.key()
-            @ EscrowError::NotSettlementAuthority,
-    )]
-    pub config: Account<'info, Config>,
-}
-
-#[derive(Accounts)]
 #[instruction(job_id: [u8; 32])]
 pub struct PayForCompute<'info> {
     #[account(mut)]
@@ -607,27 +349,37 @@ pub struct PayForCompute<'info> {
         init,
         payer = buyer,
         space = 8 + Contract::LEN,
-        seeds = [b"contract", job_id.as_ref()],
+        seeds = [CONTRACT_SEED, job_id.as_ref()],
         bump,
     )]
     pub contract: Account<'info, Contract>,
 
-    /// CHECK: Receiver of the flat SOL fee. DRAFT.
-    #[account(mut)]
+    /// CHECK: Receiver of the flat SOL protocol fee. Validated against
+    /// the fee wallet pinned in `Config`.
+    #[account(
+        mut,
+        constraint = fee_wallet.key() == config.fee_wallet @ EscrowError::WrongFeeWallet,
+    )]
     pub fee_wallet: AccountInfo<'info>,
+
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+    )]
+    pub config: Account<'info, Config>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
-/// Production finalize accounts. The HNT side accounts must be passed
-/// in along with two Pyth `PriceUpdateV2` accounts (HNT/USD and the
-/// stablecoin/USD that matches the contract's stablecoin).
+/// Finalize accounts. The seller's earned slice is paid in the contract's
+/// stablecoin mint, so only the stablecoin side is needed.
 #[derive(Accounts)]
 pub struct FinalizePro<'info> {
-    /// Settlement authority. Must equal `Config::settlement_authority` —
-    /// the Squads multisig PDA on mainnet (MAINNET-CHECKLIST §3.5), the
-    /// deployer keypair on devnet.
+    /// Settlement authority. Must equal `Config::settlement_authority`
+    /// (the operator's key, pinned at deploy). Signs the finalize and
+    /// pays the flat SOL protocol fee.
+    #[account(mut)]
     pub settlement_authority: Signer<'info>,
 
     #[account(
@@ -640,12 +392,11 @@ pub struct FinalizePro<'info> {
 
     #[account(
         mut,
-        seeds = [b"contract", contract.job_id.as_ref()],
+        seeds = [CONTRACT_SEED, contract.job_id.as_ref()],
         bump = contract.bump,
     )]
     pub contract: Account<'info, Contract>,
 
-    // Stablecoin side (for the buyer's refund). Also boxed.
     #[account(
         mut,
         constraint = escrow_stablecoin_ata.mint == contract.stablecoin_mint @ EscrowError::WrongMint,
@@ -660,59 +411,35 @@ pub struct FinalizePro<'info> {
     )]
     pub buyer_stablecoin_ata: Box<Account<'info, TokenAccount>>,
 
-    // HNT side (for the seller's earned slice). Boxed because BPF
-    // stack-frame budget is 4096 bytes; PriceUpdateV2 (below) is large
-    // enough that unboxed Account fields push us over.
-    // `mut` is load-bearing: the SPL `burn` CPI (below) requires the mint
-    // to be writable or the transaction fails with
-    // "Cross-program invocation with unauthorized signer or writable
-    // account". The devnet stub path never burned so this only surfaces
-    // via the §2 litesvm suite against the production path.
-    #[account(mut, address = HNT_MINT @ EscrowError::WrongMint)]
-    pub hnt_mint: Box<Account<'info, Mint>>,
-
     #[account(
         mut,
-        constraint = escrow_hnt_ata.mint == HNT_MINT @ EscrowError::WrongMint,
-        constraint = escrow_hnt_ata.owner == contract.key() @ EscrowError::WrongOwner,
+        constraint = seller_stablecoin_ata.mint == contract.stablecoin_mint @ EscrowError::WrongMint,
+        constraint = seller_stablecoin_ata.owner == contract.seller_payout @ EscrowError::WrongOwner,
     )]
-    pub escrow_hnt_ata: Box<Account<'info, TokenAccount>>,
+    pub seller_stablecoin_ata: Box<Account<'info, TokenAccount>>,
 
+    /// Receiver of the flat SOL protocol fee. Validated against the fee
+    /// wallet pinned in `Config`.
     #[account(
         mut,
-        constraint = seller_hnt_ata.mint == HNT_MINT @ EscrowError::WrongMint,
-        constraint = seller_hnt_ata.owner == contract.seller_payout @ EscrowError::WrongOwner,
+        constraint = fee_wallet.key() == config.fee_wallet @ EscrowError::WrongFeeWallet,
     )]
-    pub seller_hnt_ata: Box<Account<'info, TokenAccount>>,
-
-    // Pyth feeds, boxed (see comment above). The caller must post fresh
-    // updates from Hermes before this IX is invoked. The program's
-    // get_price_no_older_than call simultaneously verifies the feed ID
-    // and the staleness threshold.
-    pub pyth_hnt_usd: Box<Account<'info, PriceUpdateV2>>,
-    pub pyth_stablecoin_usd: Box<Account<'info, PriceUpdateV2>>,
+    pub fee_wallet: AccountInfo<'info>,
 
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
-/// Devnet stub finalize accounts. Always present in the binary; the
-/// mainnet multisig must decline to sign instructions that target this.
 #[derive(Accounts)]
-pub struct FinalizeProStub<'info> {
-    pub settlement_authority: Signer<'info>,
-
-    #[account(
-        seeds = [CONFIG_SEED],
-        bump = config.bump,
-        constraint = config.settlement_authority == settlement_authority.key()
-            @ EscrowError::NotSettlementAuthority,
-    )]
-    pub config: Account<'info, Config>,
+pub struct CancelBeforeStart<'info> {
+    #[account(mut)]
+    pub buyer: Signer<'info>,
 
     #[account(
         mut,
-        seeds = [b"contract", contract.job_id.as_ref()],
+        seeds = [CONTRACT_SEED, contract.job_id.as_ref()],
         bump = contract.bump,
+        constraint = contract.buyer == buyer.key() @ EscrowError::WrongOwner,
     )]
     pub contract: Account<'info, Contract>,
 
@@ -730,31 +457,22 @@ pub struct FinalizeProStub<'info> {
     )]
     pub buyer_stablecoin_ata: Account<'info, TokenAccount>,
 
+    /// Receiver of the flat SOL protocol fee. Validated against the fee
+    /// wallet pinned in `Config`.
     #[account(
         mut,
-        constraint = seller_stablecoin_ata.mint == contract.stablecoin_mint @ EscrowError::WrongMint,
-        constraint = seller_stablecoin_ata.owner == contract.seller_payout @ EscrowError::WrongOwner,
+        constraint = fee_wallet.key() == config.fee_wallet @ EscrowError::WrongFeeWallet,
     )]
-    pub seller_stablecoin_ata: Account<'info, TokenAccount>,
+    pub fee_wallet: AccountInfo<'info>,
 
-    pub token_program: Program<'info, Token>,
-}
-
-#[derive(Accounts)]
-pub struct CancelBeforeStart<'info> {
-    pub buyer: Signer<'info>,
     #[account(
-        mut,
-        seeds = [b"contract", contract.job_id.as_ref()],
-        bump = contract.bump,
-        constraint = contract.buyer == buyer.key() @ EscrowError::WrongOwner,
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
     )]
-    pub contract: Account<'info, Contract>,
-    #[account(mut)]
-    pub escrow_stablecoin_ata: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub buyer_stablecoin_ata: Account<'info, TokenAccount>,
+    pub config: Account<'info, Config>,
+
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
 // ---------- Events --------------------------------------------------------
@@ -763,9 +481,10 @@ pub struct CancelBeforeStart<'info> {
 pub struct JobFinalized {
     pub job_id: [u8; 32],
     pub f_micros: u32,
-    /// Earned slice in *stablecoin* units, before any swap. The IDL
-    /// consumer rebuilds the HNT amount from the on-chain Jupiter event.
+    /// Earned slice in stablecoin units, paid to the seller in the
+    /// contract's mint.
     pub earned_stable: u64,
+    /// Refund slice in stablecoin units, returned to the buyer.
     pub refund_stable: u64,
 }
 
@@ -787,79 +506,13 @@ pub enum EscrowError {
     WrongOwner,
     #[msg("arithmetic overflow computing earned/refund split")]
     MathOverflow,
-    #[msg("Pyth feed missing or too stale")]
-    PythStale,
-    #[msg("Pyth feed ID not recognised")]
-    BadFeedId,
-    #[msg("Pyth returned a non-positive price")]
-    BadOraclePrice,
-    #[msg("escrow HNT balance below Pyth-derived minimum (swap underdelivered)")]
-    SwapBelowMinimum,
+    #[msg("fee wallet does not match the configured protocol fee wallet")]
+    WrongFeeWallet,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn expected_hnt_atomic_usdc_at_one_usd_hnt_at_two_fifty() {
-        // 1.000000 USDC (6 decimals) earned.
-        // USDC/USD = 1.0 (Pyth: 100_000_000 with expo=-8)
-        // HNT/USD = 2.5 (Pyth: 250_000_000 with expo=-8)
-        // Expected: 1.0 / 2.5 = 0.4 HNT, then × 99.5% slippage = 0.398 HNT
-        // In atomic units (HNT_DECIMALS = 8): 0.398 × 10^8 = 39_800_000
-        let out = expected_hnt_atomic(
-            1_000_000,
-            6,
-            100_000_000,
-            -8,
-            250_000_000,
-            -8,
-            DRAFT_MAX_SLIPPAGE_BPS,
-        )
-        .unwrap();
-        assert_eq!(out, 39_800_000);
-    }
-
-    #[test]
-    fn expected_hnt_atomic_eurc_at_one_eight_hnt_at_two_fifty() {
-        // 1.000000 EURC, EUR/USD = 1.08, HNT/USD = 2.5.
-        // 1.08 / 2.5 = 0.432 HNT × 99.5% = 0.42984 HNT = 42_984_000 atomic
-        let out = expected_hnt_atomic(
-            1_000_000,
-            6,
-            108_000_000,
-            -8,
-            250_000_000,
-            -8,
-            DRAFT_MAX_SLIPPAGE_BPS,
-        )
-        .unwrap();
-        assert_eq!(out, 42_984_000);
-    }
-
-    #[test]
-    fn expected_hnt_atomic_handles_higher_priced_hnt() {
-        // HNT/USD = 100 (huge), 1 USDC earned, expect tiny HNT
-        // 1 / 100 = 0.01 HNT × 99.5% = 0.00995 HNT = 995_000 atomic
-        let out = expected_hnt_atomic(
-            1_000_000,
-            6,
-            100_000_000,
-            -8,
-            10_000_000_000,
-            -8,
-            DRAFT_MAX_SLIPPAGE_BPS,
-        )
-        .unwrap();
-        assert_eq!(out, 995_000);
-    }
-
-    #[test]
-    fn expected_hnt_atomic_zero_input_zero_output() {
-        let out = expected_hnt_atomic(0, 6, 100_000_000, -8, 250_000_000, -8, 50).unwrap();
-        assert_eq!(out, 0);
-    }
 
     /// Drift guard for tests/adversarial/tests/adversarial.rs: the
     /// adversarial suite mirrors `EscrowError` as local constants because
@@ -876,9 +529,22 @@ mod tests {
         assert_eq!(u32::from(EscrowError::WrongMint), 6004);
         assert_eq!(u32::from(EscrowError::WrongOwner), 6005);
         assert_eq!(u32::from(EscrowError::MathOverflow), 6006);
-        assert_eq!(u32::from(EscrowError::PythStale), 6007);
-        assert_eq!(u32::from(EscrowError::BadFeedId), 6008);
-        assert_eq!(u32::from(EscrowError::BadOraclePrice), 6009);
-        assert_eq!(u32::from(EscrowError::SwapBelowMinimum), 6010);
+        assert_eq!(u32::from(EscrowError::WrongFeeWallet), 6007);
+    }
+
+    #[test]
+    fn config_len_matches_field_sizes() {
+        // 8-discriminator is added by Anchor at account init; the bare
+        // struct is exactly the sum of its fields.
+        assert_eq!(Config::LEN, 32 + 32 + 8 + 1);
+    }
+
+    #[test]
+    fn default_fee_constants_match_the_spec() {
+        assert_eq!(DEFAULT_FEE_LAMPORTS, 100_000);
+        assert_eq!(
+            DEFAULT_FEE_WALLET.to_string(),
+            "J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh"
+        );
     }
 }
