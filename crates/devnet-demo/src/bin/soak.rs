@@ -8,12 +8,17 @@
 //!
 //! Each iteration:
 //!
-//! - picks a random `price_micros` in `[1, 10_000_000]`
+//! - picks a random `price_micros` in `[1, 10_000_000]` (every 10th
+//!   iteration forces `price = 1` to probe rounding edges)
 //! - picks a random `f_micros` from a weighted pool (`0`, `1`,
-//!   `500_000`, `990_000`, `1_000_000`, plus a uniform random draw)
+//!   `500_000`, `990_000`, `1_000_000`, plus a uniform random draw);
+//!   every 10th iteration forces `f_micros = 1_000_000` so the buyer
+//!   refund must be exactly 0
 //! - with probability `CANCEL_P`, fires `cancel_before_start` instead of
 //!   `pay` + `finalize_pro_rata` — the buyer-side full refund
-//! - uses a random seller pubkey
+//! - uses a fresh buyer keypair (decoupled from the settlement
+//!   authority) and a random seller pubkey, so balance checks stay
+//!   sound when iterations run concurrently
 //! - logs the outcome; any unexpected failure bumps the error count
 //!
 //! ## Usage
@@ -25,11 +30,18 @@
 //! # a specific count, and a faster cancel cadence:
 //! cargo run --bin soak -- --iters 500 --cancel-p 0.3
 //!
+//! # §6.3: 3 jobs in flight at once (catches non-serializable races):
+//! cargo run --bin soak -- --iters 300 --parallel 3
+//!
 //! # different payer + RPC (e.g. a local validator for offline soaking):
 //! VTESSERA_PAYER=~/.config/solana/id.json \
 //!   SOAK_RPC=http://127.0.0.1:8899 \
 //!   cargo run --bin soak -- --iters 10
 //! ```
+//!
+//! `--parallel N` runs iterations round-robin across N worker threads,
+//! each with its own RPC client and a deterministic sub-seed, so a run
+//! is replayable for the same `(seed, --parallel, --iters)`.
 //!
 //! ## Exit codes
 //!
@@ -56,13 +68,18 @@
 //! This runner deliberately does **not** use `rand`: it's a long-running
 //! devnet process and the xorshift64\* below is deterministic given a
 //! seed, so a failing seed can be replayed. The default seed is derived
-//! from the payer's pubkey + the iteration count, so two runs of the same
-//! payer diverge. Override with `SOAK_SEED`.
+//! from the payer's pubkey + a per-run nonce, so two runs of the same
+//! payer diverge while a failing run stays replayable via the printed
+//! `SOAK_SEED`. Job IDs are additionally salted with the same per-run
+//! nonce, so re-running (even with `SOAK_SEED`) never re-uses a contract
+//! PDA left over on persistent devnet — the decision stream (prices,
+//! fractions, cancel choices) still replays exactly.
 
 use std::env;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borsh::BorshSerialize;
 use sha2::{Digest, Sha256};
@@ -96,6 +113,16 @@ const DEVNET_RPC: &str = "https://api.devnet.solana.com";
 /// Probability of firing `cancel_before_start` instead of
 /// `pay` + `finalize_pro_rata`, per iteration.
 const CANCEL_P: f64 = 0.2;
+
+/// §6.3 edge cadence: every EDGE_CADENCE iterations forces `price = 1`
+/// (rounding edge) and, half a cadence later, `f_micros = 1_000_000`
+/// (buyer refund must be exactly 0).
+const EDGE_CADENCE: u64 = 10;
+
+/// Fresh per-iteration buyer SOL budget (lamports) covering the per-tx
+/// protocol fee (100,000) with margin. The payer covers all transaction
+/// fees, so the buyer only ever needs this.
+const BUYER_SOL_LAMPORTS: u64 = 10_000_000;
 
 /// Stablecoin decimals for the test mint — matches the demo.
 const MINT_DECIMALS: u8 = 6;
@@ -185,9 +212,24 @@ fn send_tx(
     let bh = rpc.get_latest_blockhash()?;
     let mut tx = Transaction::new_with_payer(ixs, Some(&fee_payer.pubkey()));
     tx.sign(signers, bh);
-    let sig = rpc.send_and_confirm_transaction_with_spinner(&tx)?;
-    std::thread::sleep(Duration::from_millis(300));
-    Ok(sig.to_string())
+    match rpc.send_and_confirm_transaction_with_spinner(&tx) {
+        Ok(sig) => {
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(sig.to_string())
+        }
+        Err(e) => {
+            // Debug aid: dump the preflight simulation logs.
+            if let Ok(sim) = rpc.simulate_transaction(&tx) {
+                if let Some(logs) = &sim.value.logs {
+                    eprintln!("  sim logs:");
+                    for l in logs {
+                        eprintln!("    {l}");
+                    }
+                }
+            }
+            Err(e.into())
+        }
+    }
 }
 
 fn token_balance(rpc: &RpcClient, ata: &Pubkey) -> Result<u64, Box<dyn std::error::Error>> {
@@ -202,7 +244,6 @@ fn token_balance(rpc: &RpcClient, ata: &Pubkey) -> Result<u64, Box<dyn std::erro
 struct Env {
     payer: Keypair,
     mint: Pubkey,
-    buyer_ata: Pubkey,
     program_id: Pubkey,
     config_pda: Pubkey,
     fee_wallet: Pubkey,
@@ -238,16 +279,8 @@ fn setup(rpc: &RpcClient, payer: Keypair) -> Result<Env, Box<dyn std::error::Err
         "create+init mint",
     )?;
 
-    // Buyer = payer; create their ATA and a generous starting balance.
-    let buyer_ata = get_associated_token_address(&payer.pubkey(), &mint_pk);
-    let create_ata = create_associated_token_account(
-        &payer.pubkey(),
-        &payer.pubkey(),
-        &mint_pk,
-        &spl_token::id(),
-    );
-    send_tx(rpc, &[create_ata], &[&payer], &payer, "create buyer ATA")?;
-    top_up(rpc, &payer, &mint_pk, &buyer_ata, 1_000_000_000_000)?;
+    // Each iteration funds its own fresh buyer (see run_iteration); the
+    // payer's mint authority lets us mint_to that buyer's ATA.
 
     // init_config (idempotent) with settlement authority = payer and the
     // protocol fee config. The Env is created once; fee_wallet is funded
@@ -294,7 +327,6 @@ fn setup(rpc: &RpcClient, payer: Keypair) -> Result<Env, Box<dyn std::error::Err
     Ok(Env {
         payer,
         mint: mint_pk,
-        buyer_ata,
         program_id,
         config_pda,
         fee_wallet,
@@ -324,12 +356,67 @@ struct IterOutcome {
     detail: String,
 }
 
-fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOutcome {
-    let price = rng.range(1, 10_000_000);
+fn run_iteration(
+    rpc: &RpcClient,
+    env: &Env,
+    iter: u64,
+    rng: &mut Rng,
+    nonce: u64,
+) -> IterOutcome {
+    // §6.3 edge: force `price = 1` to find rounding edges.
+    let price = if iter.is_multiple_of(EDGE_CADENCE) {
+        1
+    } else {
+        rng.range(1, 10_000_000)
+    };
     let do_cancel = rng.unit() < CANCEL_P;
 
-    // Ensure buyer has enough for this price (top up generously).
-    if let Err(e) = top_up(rpc, &env.payer, &env.mint, &env.buyer_ata, price) {
+    // Fresh buyer per iteration, decoupled from the settlement authority
+    // (payer). Keeps the balance checks sound when iterations run
+    // concurrently (--parallel) and covers the buyer != authority path.
+    let buyer = Keypair::new();
+    let buyer_pk = buyer.pubkey();
+    let buyer_ata = get_associated_token_address(&buyer_pk, &env.mint);
+
+    let fund_sol = system_instruction::transfer(&env.payer.pubkey(), &buyer_pk, BUYER_SOL_LAMPORTS);
+    if let Err(e) = send_tx(
+        rpc,
+        &[fund_sol],
+        &[&env.payer],
+        &env.payer,
+        "fund buyer SOL",
+    ) {
+        return IterOutcome {
+            iter,
+            action: "setup/fund_buyer".into(),
+            price,
+            ok: false,
+            detail: format!("fund buyer SOL failed: {e}"),
+        };
+    }
+    let create_buyer_ata = create_associated_token_account(
+        &env.payer.pubkey(),
+        &buyer_pk,
+        &env.mint,
+        &spl_token::id(),
+    );
+    if let Err(e) = send_tx(
+        rpc,
+        &[create_buyer_ata],
+        &[&env.payer],
+        &env.payer,
+        "create buyer ATA",
+    ) {
+        return IterOutcome {
+            iter,
+            action: "setup/buyer_ata".into(),
+            price,
+            ok: false,
+            detail: format!("create buyer ATA failed: {e}"),
+        };
+    }
+    // Ensure buyer has enough stablecoin for this price.
+    if let Err(e) = top_up(rpc, &env.payer, &env.mint, &buyer_ata, price) {
         return IterOutcome {
             iter,
             action: "setup/top_up".into(),
@@ -338,7 +425,7 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
             detail: format!("top_up failed: {e}"),
         };
     }
-    let buyer_before = match token_balance(rpc, &env.buyer_ata) {
+    let buyer_before = match token_balance(rpc, &buyer_ata) {
         Ok(b) => b,
         Err(e) => {
             return IterOutcome {
@@ -355,9 +442,11 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
     let seller = Keypair::new();
     let seller_ata = get_associated_token_address(&seller.pubkey(), &env.mint);
 
-    // Fresh job id (per iteration, deterministic from seed state).
+    // Fresh job id: deterministic from seed state, salted with the
+    // per-run nonce so a replay on persistent devnet gets a fresh PDA.
     let mut h = Sha256::new();
     h.update(b"vtessera-soak:");
+    h.update(nonce.to_le_bytes());
     h.update(iter.to_le_bytes());
     h.update(rng.next_u64().to_le_bytes());
     let job_id: [u8; 32] = h.finalize().into();
@@ -434,10 +523,10 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
     let pay_ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
-            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(buyer_pk, true),
             AccountMeta::new_readonly(seller.pubkey(), false),
             AccountMeta::new_readonly(env.mint, false),
-            AccountMeta::new(env.buyer_ata, false),
+            AccountMeta::new(buyer_ata, false),
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(env.fee_wallet, false),
@@ -447,7 +536,7 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
         ],
         data: pay_data,
     };
-    if let Err(e) = send_tx(rpc, &[pay_ix], &[&env.payer], &env.payer, "pay_for_compute") {
+    if let Err(e) = send_tx(rpc, &[pay_ix], &[&buyer, &env.payer], &env.payer, "pay_for_compute") {
         return IterOutcome {
             iter,
             action: "pay".into(),
@@ -463,10 +552,10 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
         let cancel_ix = Instruction {
             program_id: env.program_id,
             accounts: vec![
-                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(buyer_pk, true),
                 AccountMeta::new(contract_pda, false),
                 AccountMeta::new(escrow_ata, false),
-                AccountMeta::new(env.buyer_ata, false),
+                AccountMeta::new(buyer_ata, false),
                 AccountMeta::new(env.fee_wallet, false),
                 AccountMeta::new_readonly(env.config_pda, false),
                 AccountMeta::new_readonly(spl_token::id(), false),
@@ -477,7 +566,7 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
         if let Err(e) = send_tx(
             rpc,
             &[cancel_ix],
-            &[&env.payer],
+            &[&buyer, &env.payer],
             &env.payer,
             "cancel_before_start",
         ) {
@@ -511,7 +600,13 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
         }
     } else {
         // ---- finalize_pro_rata ----
-        let f_micros = pick_f_micros(rng);
+        // §6.3 edge: force `f_micros = 1_000_000` (buyer refund exactly 0).
+        let f_edge = iter % EDGE_CADENCE == EDGE_CADENCE / 2;
+        let f_micros = if f_edge {
+            1_000_000
+        } else {
+            pick_f_micros(rng)
+        };
         let fin_disc = anchor_disc("finalize_pro_rata");
         let fin_args = FinalizeProRataArgs { f_micros };
         let mut fin_data = fin_disc.to_vec();
@@ -534,7 +629,7 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
                 AccountMeta::new_readonly(env.config_pda, false),
                 AccountMeta::new(contract_pda, false),
                 AccountMeta::new(escrow_ata, false),
-                AccountMeta::new(env.buyer_ata, false),
+                AccountMeta::new(buyer_ata, false),
                 AccountMeta::new(seller_ata, false),
                 AccountMeta::new(env.fee_wallet, false),
                 AccountMeta::new_readonly(spl_token::id(), false),
@@ -562,7 +657,7 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
         let earned = expected_earned(price, f_micros);
         let refund = price - earned;
         let escrow_after = token_balance(rpc, &escrow_ata).unwrap_or(u64::MAX);
-        let buyer_after = token_balance(rpc, &env.buyer_ata).unwrap_or(0);
+        let buyer_after = token_balance(rpc, &buyer_ata).unwrap_or(0);
         let seller_after = token_balance(rpc, &seller_ata).unwrap_or(0);
 
         let ok = escrow_after == 0
@@ -570,7 +665,10 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng) -> IterOu
             && seller_after == earned;
         IterOutcome {
             iter,
-            action: format!("finalize f_micros={f_micros}"),
+            action: format!(
+                "finalize f_micros={f_micros}{}",
+                if f_edge { " [edge]" } else { "" }
+            ),
             price,
             ok,
             detail: format!(
@@ -588,9 +686,10 @@ fn parse_u64(s: &str) -> Result<u64, String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // CLI: --iters N [--cancel-p P]
+    // CLI: --iters N [--cancel-p P] [--parallel N]
     let mut iters: u64 = 100;
     let mut cancel_p: f64 = CANCEL_P;
+    let mut parallel: usize = 1;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -608,6 +707,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .parse()
                     .map_err(|e| format!("--cancel-p: {e}"))?;
             }
+            "--parallel" => {
+                parallel = args
+                    .next()
+                    .ok_or("--parallel needs a value")?
+                    .parse()
+                    .map_err(|e| format!("--parallel: {e}"))?;
+            }
             other => {
                 return Err(format!("unknown arg `{other}`").into());
             }
@@ -618,6 +724,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if !(0.0..=1.0).contains(&cancel_p) {
         return Err("--cancel-p must be in [0, 1]".into());
+    }
+    if parallel == 0 {
+        return Err("--parallel must be >= 1".into());
+    }
+    if iters < parallel as u64 {
+        return Err("--iters must be >= --parallel".into());
     }
 
     let payer_path: PathBuf = env::var("VTESSERA_PAYER")
@@ -630,40 +742,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("read payer {}: {e}", payer_path.display()))?;
 
     let rpc_url = env::var("SOAK_RPC").unwrap_or_else(|_| DEVNET_RPC.to_string());
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = Arc::new(RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed()));
 
     let payer_pk = payer.pubkey();
-    let env = setup(&rpc, payer)?;
+    let env = Arc::new(setup(&rpc, payer)?);
     println!("payer: {payer_pk}  mint: {}", env.mint);
-    println!("iters: {iters}  cancel_p: {cancel_p}");
+    println!("iters: {iters}  cancel_p: {cancel_p}  parallel: {parallel}");
 
     let seed = match env::var("SOAK_SEED") {
         Ok(s) => parse_u64(&s)?,
         Err(_) => {
-            // Default seed: payer pubkey bytes XOR iteration index — same
-            // payer diverges across runs, but a failing run is reproducible
-            // by re-running with the printed SOAK_SEED.
+            // Default seed: payer pubkey XOR a per-run nonce — same payer
+            // diverges across runs, but a failing run is reproducible by
+            // re-running with the printed SOAK_SEED.
+            let run_nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before 1970")
+                .as_nanos() as u64;
             let mut h = Sha256::new();
             h.update(b"vtessera-soak-seed:");
             h.update(payer_pk.as_ref());
+            h.update(run_nonce.to_le_bytes());
             let d: [u8; 32] = h.finalize().into();
             u64::from_le_bytes(d[..8].try_into().unwrap())
         }
     };
-    let mut rng = Rng::from_seed(seed);
-    println!("seed: {seed}  (SOAK_SEED to replay)");
+    println!("seed: {seed}  (SOAK_SEED to replay; per-worker sub-seeds)");
 
-    let mut failures = 0u64;
-    for iter in 1..=iters {
-        let out = run_iteration(&rpc, &env, iter, &mut rng);
+    // Per-run salt for job IDs, so contract PDAs are never reused across
+    // runs even when the same seed is replayed.
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before 1970")
+        .as_nanos() as u64;
+
+    // Dispatch iterations round-robin across `parallel` workers. Each
+    // worker owns an independent RpcClient + Rng (sub-seeded from the
+    // global seed), so a run is fully reproducible for the same
+    // (seed, --parallel, --iters).
+    let outcomes: Arc<Mutex<Vec<IterOutcome>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::with_capacity(parallel);
+    for w in 0..parallel {
+        let rpc = rpc.clone();
+        let env = env.clone();
+        let out = outcomes.clone();
+        // Deterministic per-worker sub-seed, distinct from Rng's 0 guard.
+        let worker_seed = seed ^ (w as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        handles.push(std::thread::spawn(move || {
+            let mut rng = Rng::from_seed(worker_seed);
+            for iter in (w as u64 + 1..=iters).step_by(parallel) {
+                let o = run_iteration(&rpc, &env, iter, &mut rng, nonce);
+                out.lock().unwrap().push(o);
+            }
+        }));
+    }
+    for h in handles {
+        h.join().map_err(|_| "soak worker panicked")?;
+    }
+
+    let mut results = outcomes.lock().unwrap();
+    results.sort_by_key(|o| o.iter);
+    let failures = results.iter().filter(|o| !o.ok).count();
+    for out in results.iter() {
         let mark = if out.ok { "OK  " } else { "FAIL" };
         println!(
-            "[{mark}] iter {:>4}  {:<12}  price={:<9}  {}",
+            "[{mark}] iter {:>4}  {:<24}  price={:<9}  {}",
             out.iter, out.action, out.price, out.detail
         );
-        if !out.ok {
-            failures += 1;
-        }
     }
 
     println!(
