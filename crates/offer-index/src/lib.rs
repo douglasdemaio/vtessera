@@ -24,6 +24,9 @@ use serde_json::{json, Value};
 use vtessera_mini_http::{Method, Request, Response};
 use vtessera_offer::{verify, AdvertisedDevice, PriceQuote, SignedOffer, VerifyError};
 
+/// Default first-come-first-served claim lifetime, in seconds.
+pub const DEFAULT_CLAIM_TTL_SECS: u64 = 60;
+
 /// One verified, current offer in the index.
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
@@ -33,6 +36,10 @@ pub struct IndexEntry {
     pub source: String,
     /// UNIX epoch second the entry was (re)registered.
     pub fetched_at_unix: u64,
+    /// Agent id that claimed this offer, or `None` when unclaimed.
+    pub claimed_by: Option<String>,
+    /// UNIX epoch second the current claim expires. `0` when unclaimed.
+    pub claim_until_unix: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,10 +60,13 @@ pub enum FilterDevice {
 pub struct OfferFilter {
     pub mode: Option<FilterMode>,
     pub device: Option<FilterDevice>,
+    /// Only entries with no live claim.
+    pub available: bool,
 }
 
 impl OfferFilter {
-    fn matches(&self, offer: &SignedOffer) -> bool {
+    fn matches(&self, entry: &IndexEntry, now_unix: u64) -> bool {
+        let offer = &entry.offer;
         let mode_ok = match self.mode {
             None => true,
             Some(FilterMode::Free) => matches!(offer.body.price, PriceQuote::Free),
@@ -66,7 +76,8 @@ impl OfferFilter {
             None => true,
             Some(d) => device_kind(&offer.body.device) == d,
         };
-        mode_ok && device_ok
+        let available_ok = !self.available || entry.claim_until_unix < now_unix;
+        mode_ok && device_ok && available_ok
     }
 }
 
@@ -98,6 +109,29 @@ impl std::fmt::Display for RegisterError {
 
 impl std::error::Error for RegisterError {}
 
+/// Why a claim operation failed.
+#[derive(Debug)]
+pub enum ClaimError {
+    /// The node_id has no live offer (unknown or expired).
+    NotFound,
+    /// The offer is claimed by a different agent and the claim is live.
+    Taken(String),
+    /// The caller is not the current claimant and the claim is live.
+    NotOwner,
+}
+
+impl std::fmt::Display for ClaimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClaimError::NotFound => write!(f, "no offer for this node_id"),
+            ClaimError::Taken(agent) => write!(f, "claimed by {agent}"),
+            ClaimError::NotOwner => write!(f, "claim held by a different agent"),
+        }
+    }
+}
+
+impl std::error::Error for ClaimError {}
+
 /// The index. Keyed by `node_id` (a signed offer carries exactly one);
 /// re-registering the same node id replaces the prior entry.
 #[derive(Debug, Default)]
@@ -118,11 +152,18 @@ impl IndexState {
         self.entries.get(node_id)
     }
 
-    /// Drop expired entries; returns how many were removed.
+    /// Drop expired entries and clear expired claims; returns how many
+    /// entries were removed (cleared claims are not counted).
     pub fn prune(&mut self, now_unix: u64) -> usize {
         let before = self.entries.len();
         self.entries
             .retain(|_, e| e.offer.body.expires_unix >= now_unix);
+        for e in self.entries.values_mut() {
+            if e.claim_until_unix != 0 && e.claim_until_unix < now_unix {
+                e.claimed_by = None;
+                e.claim_until_unix = 0;
+            }
+        }
         before - self.entries.len()
     }
 
@@ -132,6 +173,9 @@ impl IndexState {
 
     /// Verify a signed offer against `now_unix` (signature + node_id +
     /// expiry) and insert it. Returns the `node_id` it's held under.
+    ///
+    /// Re-registering the same `node_id` (a node's publish refresh)
+    /// **preserves** an active claim, so a refresh never wipes a claim.
     pub fn register(
         &mut self,
         offer: SignedOffer,
@@ -140,12 +184,21 @@ impl IndexState {
     ) -> Result<String, RegisterError> {
         verify(&offer, Some(now_unix)).map_err(RegisterError::Verify)?;
         let node_id = offer.body.node_id.clone();
+        let prior = self.entries.get(&node_id);
+        let (claimed_by, claim_until_unix) = match prior {
+            Some(prev) if prev.claim_until_unix >= now_unix => {
+                (prev.claimed_by.clone(), prev.claim_until_unix)
+            }
+            _ => (None, 0),
+        };
         self.entries.insert(
             node_id.clone(),
             IndexEntry {
                 offer,
                 source,
                 fetched_at_unix: now_unix,
+                claimed_by,
+                claim_until_unix,
             },
         );
         Ok(node_id)
@@ -169,10 +222,61 @@ impl IndexState {
         let mut out: Vec<&IndexEntry> = self
             .entries
             .values()
-            .filter(|e| filter.matches(&e.offer))
+            .filter(|e| filter.matches(e, now_unix))
             .collect();
         out.sort_by_key(|e| std::cmp::Reverse(e.fetched_at_unix));
         out
+    }
+
+    /// First-come-first-served claim. Unknown or expired node → NotFound;
+    /// claimed by a different agent with a live claim → Taken; otherwise
+    /// claim (or renew) for `agent_id` until `now_unix + ttl_secs`.
+    pub fn claim(
+        &mut self,
+        node_id: &str,
+        agent_id: &str,
+        now_unix: u64,
+        ttl_secs: u64,
+    ) -> Result<u64, ClaimError> {
+        self.prune(now_unix);
+        let Some(entry) = self.entries.get_mut(node_id) else {
+            return Err(ClaimError::NotFound);
+        };
+        let live = entry.claim_until_unix >= now_unix;
+        if live {
+            if let Some(owner) = &entry.claimed_by {
+                if owner != agent_id {
+                    return Err(ClaimError::Taken(owner.clone()));
+                }
+            }
+        }
+        let until = now_unix + ttl_secs;
+        entry.claimed_by = Some(agent_id.to_string());
+        entry.claim_until_unix = until;
+        Ok(until)
+    }
+
+    /// Release a claim. Only the current claimant may release while the
+    /// claim is live.
+    pub fn release(
+        &mut self,
+        node_id: &str,
+        agent_id: &str,
+        now_unix: u64,
+    ) -> Result<(), ClaimError> {
+        self.prune(now_unix);
+        let Some(entry) = self.entries.get_mut(node_id) else {
+            return Err(ClaimError::NotFound);
+        };
+        match &entry.claimed_by {
+            None => Err(ClaimError::NotFound),
+            Some(owner) if owner == agent_id => {
+                entry.claimed_by = None;
+                entry.claim_until_unix = 0;
+                Ok(())
+            }
+            Some(_) => Err(ClaimError::NotOwner),
+        }
     }
 }
 
@@ -189,22 +293,32 @@ pub fn dispatch(state: &mut IndexState, req: Request, now_unix: u64) -> Response
         (Method::Get, "/offers") => handle_list(state, query, now_unix),
         (Method::Post, "/offers") => handle_register(state, &req.body, now_unix),
         _ => match path.strip_prefix("/offers/") {
-            Some(node_id) if !node_id.is_empty() => match req.method {
-                Method::Get => {
-                    state.prune(now_unix);
-                    match state.get(node_id) {
-                        Some(entry) => Response::json(200, entry_to_json(entry)),
-                        None => Response::text(404, "no offer for this node_id"),
-                    }
-                }
-                Method::Delete => {
-                    if state.remove(node_id) {
-                        Response::json(200, r#"{"status":"removed"}"#.into())
-                    } else {
-                        Response::text(404, "no offer for this node_id")
-                    }
-                }
-                _ => Response::text(404, "not found"),
+            Some(rest) if !rest.is_empty() => match rest.strip_suffix("/claim") {
+                Some(node_id) if !node_id.is_empty() => match req.method {
+                    Method::Post => handle_claim(state, node_id, &req.body, now_unix),
+                    Method::Delete => handle_release(state, node_id, &req.body, now_unix),
+                    _ => Response::text(404, "not found"),
+                },
+                _ => match rest.split('/').next() {
+                    Some(node_id) if !node_id.is_empty() => match req.method {
+                        Method::Get => {
+                            state.prune(now_unix);
+                            match state.get(node_id) {
+                                Some(entry) => Response::json(200, entry_to_json(entry)),
+                                None => Response::text(404, "no offer for this node_id"),
+                            }
+                        }
+                        Method::Delete => {
+                            if state.remove(node_id) {
+                                Response::json(200, r#"{"status":"removed"}"#.into())
+                            } else {
+                                Response::text(404, "no offer for this node_id")
+                            }
+                        }
+                        _ => Response::text(404, "not found"),
+                    },
+                    _ => Response::text(404, "not found"),
+                },
             },
             _ => Response::text(404, "not found"),
         },
@@ -236,6 +350,60 @@ fn handle_register(state: &mut IndexState, body: &[u8], now_unix: u64) -> Respon
     }
 }
 
+fn agent_id_from_body(body: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("agent_id")
+        .and_then(|a| a.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn handle_claim(state: &mut IndexState, node_id: &str, body: &[u8], now_unix: u64) -> Response {
+    let Some(agent_id) = agent_id_from_body(body) else {
+        return Response::json(
+            400,
+            r#"{"status":"rejected","reason":"agent_id is required"}"#.into(),
+        );
+    };
+    match state.claim(node_id, &agent_id, now_unix, DEFAULT_CLAIM_TTL_SECS) {
+        Ok(until) => Response::json(
+            201,
+            serde_json::to_string(&json!({
+                "status": "claimed",
+                "claimed_by": agent_id,
+                "claimed_until_unix": until,
+            }))
+            .unwrap_or_else(|_| r#"{"status":"claimed"}"#.into()),
+        ),
+        Err(ClaimError::NotFound) => Response::text(404, "no offer for this node_id"),
+        Err(ClaimError::Taken(owner)) => Response::json(
+            409,
+            serde_json::to_string(
+                &json!({ "status": "taken", "reason": format!("claimed by {owner}") }),
+            )
+            .unwrap_or_else(|_| r#"{"status":"taken"}"#.into()),
+        ),
+        Err(ClaimError::NotOwner) => unreachable!("claim() never returns NotOwner"),
+    }
+}
+
+fn handle_release(state: &mut IndexState, node_id: &str, body: &[u8], now_unix: u64) -> Response {
+    let Some(agent_id) = agent_id_from_body(body) else {
+        return Response::json(
+            400,
+            r#"{"status":"rejected","reason":"agent_id is required"}"#.into(),
+        );
+    };
+    match state.release(node_id, &agent_id, now_unix) {
+        Ok(()) => Response::json(200, r#"{"status":"released"}"#.into()),
+        Err(ClaimError::NotFound) => Response::text(404, "no offer or claim for this node_id"),
+        Err(ClaimError::NotOwner) => Response::json(403, r#"{"status":"not-owner"}"#.into()),
+        Err(ClaimError::Taken(_)) => unreachable!("release() never returns Taken"),
+    }
+}
+
 fn parse_filter(query: Option<&str>) -> OfferFilter {
     let mut f = OfferFilter::default();
     if let Some(q) = query {
@@ -257,6 +425,7 @@ fn parse_filter(query: Option<&str>) -> OfferFilter {
                     "amd_gpu" => f.device = Some(FilterDevice::AmdGpu),
                     _ => {}
                 },
+                "available" => f.available = matches!(v, "1" | "true"),
                 _ => {}
             }
         }
@@ -270,6 +439,8 @@ fn entry_to_value(e: &IndexEntry) -> Value {
         "offer": offer,
         "source": e.source,
         "fetched_at": e.fetched_at_unix,
+        "claimed_by": e.claimed_by,
+        "claimed_until_unix": e.claim_until_unix,
     })
 }
 
@@ -405,6 +576,7 @@ mod tests {
         let free = OfferFilter {
             mode: Some(FilterMode::Free),
             device: None,
+            ..OfferFilter::default()
         };
         assert_eq!(state.list(NOW, &free).len(), 1);
         assert_eq!(state.list(NOW, &free)[0].offer.body.node_id, a);
@@ -412,6 +584,7 @@ mod tests {
         let gpu = OfferFilter {
             mode: None,
             device: Some(FilterDevice::NvidiaGpu),
+            ..OfferFilter::default()
         };
         assert_eq!(state.list(NOW, &gpu).len(), 2);
     }
@@ -496,5 +669,244 @@ mod tests {
         );
         assert_eq!(r.status, 400);
         assert_eq!(state.count(), 0);
+    }
+
+    fn register_one(state: &mut IndexState, seed: u8) -> String {
+        let node_id = signed_node_id(seed);
+        state
+            .register(offer(&node_id, paid(), seed), "push".into(), NOW)
+            .unwrap();
+        node_id
+    }
+
+    #[test]
+    fn claim_is_first_come_first_served() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        let until = state.claim(&node, "agent-a", NOW, 60).unwrap();
+        assert_eq!(until, NOW + 60);
+        assert!(matches!(
+            state.claim(&node, "agent-b", NOW + 5, 60),
+            Err(ClaimError::Taken(owner)) if owner == "agent-a"
+        ));
+    }
+
+    #[test]
+    fn same_agent_reclaim_renews() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        state.claim(&node, "agent-a", NOW, 60).unwrap();
+        let until = state.claim(&node, "agent-a", NOW + 30, 60).unwrap();
+        assert_eq!(until, NOW + 90);
+    }
+
+    #[test]
+    fn expired_claim_is_reclaimable_by_another_agent() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        state.claim(&node, "agent-a", NOW, 60).unwrap();
+        let until = state.claim(&node, "agent-b", NOW + 61, 60).unwrap();
+        assert_eq!(until, NOW + 121);
+        let e = state.get(&node).unwrap();
+        assert_eq!(e.claimed_by.as_deref(), Some("agent-b"));
+    }
+
+    #[test]
+    fn release_is_owner_only() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        state.claim(&node, "agent-a", NOW, 60).unwrap();
+        assert!(matches!(
+            state.release(&node, "agent-b", NOW + 5),
+            Err(ClaimError::NotOwner)
+        ));
+        state.release(&node, "agent-a", NOW + 5).unwrap();
+        let e = state.get(&node).unwrap();
+        assert_eq!(e.claimed_by, None);
+        assert_eq!(e.claim_until_unix, 0);
+    }
+
+    #[test]
+    fn release_on_unclaimed_or_unknown_is_not_found() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        assert!(matches!(
+            state.release(&node, "agent-a", NOW),
+            Err(ClaimError::NotFound)
+        ));
+        assert!(matches!(
+            state.release("nope", "agent-a", NOW),
+            Err(ClaimError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn prune_clears_expired_claim_but_keeps_entry() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        state.claim(&node, "agent-a", NOW, 60).unwrap();
+        state.prune(NOW + 61);
+        let e = state.get(&node).unwrap();
+        assert_eq!(e.claimed_by, None);
+        assert_eq!(e.claim_until_unix, 0);
+        assert_eq!(state.count(), 1);
+    }
+
+    #[test]
+    fn available_filter_hides_claimed_offers() {
+        let mut state = IndexState::new();
+        let a = register_one(&mut state, 1);
+        let b = register_one(&mut state, 2);
+        state.claim(&a, "agent-a", NOW, 60).unwrap();
+
+        let available = OfferFilter {
+            available: true,
+            ..OfferFilter::default()
+        };
+        let listed: Vec<&str> = state
+            .list(NOW + 1, &available)
+            .iter()
+            .map(|e| e.offer.body.node_id.as_str())
+            .collect();
+        assert_eq!(listed, vec![b.as_str()]);
+
+        let all = OfferFilter::default();
+        assert_eq!(state.list(NOW + 1, &all).len(), 2);
+    }
+
+    #[test]
+    fn register_preserves_a_live_claim_and_drops_an_expired_one() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        state.claim(&node, "agent-a", NOW, 60).unwrap();
+
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW + 10)
+            .unwrap();
+        let e = state.get(&node).unwrap();
+        assert_eq!(e.claimed_by.as_deref(), Some("agent-a"));
+        assert_eq!(e.claim_until_unix, NOW + 60);
+
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW + 61)
+            .unwrap();
+        let e = state.get(&node).unwrap();
+        assert_eq!(e.claimed_by, None);
+        assert_eq!(e.claim_until_unix, 0);
+    }
+
+    #[test]
+    fn dispatch_claim_release_cycle() {
+        let node = signed_node_id(1);
+        let mut state = IndexState::new();
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW)
+            .unwrap();
+
+        let claim = |state: &mut IndexState, agent: &str| {
+            dispatch(
+                state,
+                Request {
+                    method: Method::Post,
+                    path: format!("/offers/{node}/claim"),
+                    headers: vec![],
+                    body: format!(r#"{{"agent_id":"{agent}"}}"#).into_bytes(),
+                },
+                NOW,
+            )
+        };
+
+        let r = claim(&mut state, "agent-a");
+        assert_eq!(r.status, 201);
+        let text = String::from_utf8(r.body).unwrap();
+        assert!(text.contains("\"status\":\"claimed\""));
+
+        let r = claim(&mut state, "agent-b");
+        assert_eq!(r.status, 409);
+        assert!(String::from_utf8(r.body).unwrap().contains("agent-a"));
+
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Delete,
+                path: format!("/offers/{node}/claim"),
+                headers: vec![],
+                body: br#"{"agent_id":"agent-b"}"#.to_vec(),
+            },
+            NOW,
+        );
+        assert_eq!(r.status, 403);
+
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Delete,
+                path: format!("/offers/{node}/claim"),
+                headers: vec![],
+                body: br#"{"agent_id":"agent-a"}"#.to_vec(),
+            },
+            NOW,
+        );
+        assert_eq!(r.status, 200);
+        assert!(String::from_utf8(r.body).unwrap().contains("released"));
+    }
+
+    #[test]
+    fn dispatch_claim_missing_agent_id_is_400() {
+        let node = signed_node_id(1);
+        let mut state = IndexState::new();
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW)
+            .unwrap();
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Post,
+                path: format!("/offers/{node}/claim"),
+                headers: vec![],
+                body: br#"{}"#.to_vec(),
+            },
+            NOW,
+        );
+        assert_eq!(r.status, 400);
+    }
+
+    #[test]
+    fn dispatch_list_includes_claim_state_and_available_filter() {
+        let node = signed_node_id(1);
+        let mut state = IndexState::new();
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW)
+            .unwrap();
+        state.claim(&node, "agent-a", NOW, 60).unwrap();
+
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Get,
+                path: "/offers?available=1".into(),
+                headers: vec![],
+                body: vec![],
+            },
+            NOW,
+        );
+        assert_eq!(r.status, 200);
+        let v: Value = serde_json::from_str(&String::from_utf8(r.body).unwrap()).unwrap();
+        assert_eq!(v["count"], 0);
+
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Get,
+                path: "/offers".into(),
+                headers: vec![],
+                body: vec![],
+            },
+            NOW,
+        );
+        let v: Value = serde_json::from_str(&String::from_utf8(r.body).unwrap()).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["offers"][0]["claimed_by"], "agent-a");
+        assert!(v["offers"][0]["claimed_until_unix"].as_u64().unwrap() > NOW);
     }
 }

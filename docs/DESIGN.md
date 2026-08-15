@@ -54,7 +54,22 @@ credits GPU-seconds, never CPU-seconds), and writes
 The escrow program (§4) consumes `f` to split the held stablecoin.
 TEE/attestation deployment is a follow-up, per the roadmap.
 
-## Why EURC/USDC, no Vtessera token
+**Offer-index flow (Module 2a):** a node configured with
+`--publish <index-url>` registers its signed offer with the index at
+startup and refreshes it every `--publish-interval` (default 60s); the
+index verifies each signature, so a node can't impersonate another.
+Agents claim nodes first-come-first-served via
+`POST /offers/{node_id}/claim` — claims are lease-style (60s TTL,
+renewable by the owner, released by the owner via
+`DELETE /offers/{node_id}/claim`; `GET /offers?available=1` filters out
+claimed nodes). Claims are index-authoritative but **node-enforced**:
+once a node publishes, every job must carry an agent identity (HTTP
+`X-Agent-Id` or MCP `submit_job`'s `agent_id`), a node claimed by
+someone else refuses jobs with 409, and an unreachable index makes the
+node fail closed (503). The MCP `discover` tool on a publishing node
+returns the index's current offers with claim state.
+
+## Why HNT, not a Vtessera token
 
 An earlier draft proposed a fixed-supply VTESS token with a voted
 multi-asset reserve. That direction is **superseded**: Vtessera ships

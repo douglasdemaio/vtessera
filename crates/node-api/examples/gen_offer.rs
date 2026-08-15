@@ -4,6 +4,8 @@
 //!
 //!   cargo run -p vtessera-node-api --example gen_offer -- <free|paid>
 //!   cargo run -p vtessera-node-api --example gen_offer -- free --key-out key.bin
+//!   cargo run -p vtessera-node-api --example gen_offer -- free \
+//!     --seed 1 --endpoint http://127.0.0.1:8402 --key-out key.bin
 
 use ed25519_dalek::SigningKey;
 use vtessera_offer::{
@@ -14,12 +16,24 @@ use vtessera_offer::{
 fn main() {
     let mut mode = None;
     let mut key_out: Option<std::path::PathBuf> = None;
+    let mut seed: u8 = 42;
+    let mut endpoint = "http://127.0.0.1:8402".to_string();
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--key-out" => {
                 if let Some(p) = it.next() {
                     key_out = Some(p.into());
+                }
+            }
+            "--seed" => {
+                if let Some(s) = it.next() {
+                    seed = s.parse().unwrap_or(42);
+                }
+            }
+            "--endpoint" => {
+                if let Some(e) = it.next() {
+                    endpoint = e;
                 }
             }
             other if !other.starts_with("--") && mode.is_none() => mode = Some(other.to_string()),
@@ -30,8 +44,9 @@ fn main() {
         }
     }
     let mode = mode.unwrap_or_else(|| "free".into());
-    // Deterministic key for reproducible examples — never use in production.
-    let key = SigningKey::from_bytes(&[42u8; 32]);
+    // Deterministic key for reproducible examples (--seed derives distinct
+    // node identities for multi-node demos) — never use in production.
+    let key = SigningKey::from_bytes(&[seed; 32]);
     let node_id = derive_node_id(&key.verifying_key().to_bytes());
 
     if let Some(path) = key_out {
@@ -70,7 +85,7 @@ fn main() {
     let body = OfferBody {
         schema_ver: OFFER_SCHEMA_VER,
         node_id,
-        endpoint: "http://127.0.0.1:8402".into(),
+        endpoint,
         device: AdvertisedDevice::Cpu {
             vcpus: 4,
             mem_mb: 16 * 1024,

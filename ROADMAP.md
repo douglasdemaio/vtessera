@@ -179,6 +179,18 @@ still open is the **paid** path: a submitted payment proof is not yet
 verified on-chain, so paid jobs return an honest 501 until the verifier
 lands (§3/§4).
 
+**Offer-index live-demo wiring (shipped):** nodes can register their
+signed offer with an index via `--publish <index-url>`
+(`--publish-interval`, default 60s) and agents claim nodes
+first-come-first-served (`POST /offers/<node_id>/claim`, 60s lease TTL,
+renew by owner, release by owner, `GET /offers?available=1` filters out
+claimed nodes). Claims are index-authoritative and **node-enforced**:
+once a node publishes, it requires an agent identity on every job — HTTP
+`X-Agent-Id` header or MCP `submit_job`'s `agent_id` — refuses a node
+claimed by someone else (409), and fails closed (503) if its index is
+unreachable. The MCP `discover` tool lists current offers with claim
+state. `scripts/offer-index-demo.sh` exercises the whole flow end to end.
+
 ### 2b. Paying (or not) — x402
 
 For **paid** compute, use **x402**, the open HTTP-native standard for
@@ -509,9 +521,11 @@ intervention) is asymmetric versus the benefit of an earlier demo.
    settlement computing the completion fraction `f`. No on-chain money
    yet. **Partial:** the free path runs today — a node with `--backend`
    executes free-offer jobs through `crates/executor` (noop-cpu or
-   local-cpu) and returns metering over HTTP and MCP. What M3 still
-   wants is the Kata/Cloud Hypervisor CPU isolation from §1 and the
-   offer-index wiring in the live demo flow.
+   local-cpu) and returns metering over HTTP and MCP, and the offer-index
+   live-demo wiring (node `--publish`, FCFS claims with node
+   enforcement, MCP `discover`; `scripts/offer-index-demo.sh`) is
+   shipped. What M3 still wants is the Kata/Cloud Hypervisor CPU
+   isolation from §1.
 4. **M4 — Paid go-live:** Module 0 cleared; x402 payment + escrow
    program live — agent pays EURC/USDC (escrow for committed jobs,
    pay-as-you-go for short ones) + flat SOL fee, pro-rata release

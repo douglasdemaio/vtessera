@@ -33,6 +33,7 @@ serve = [
     "dep:vtessera-mini-http",
     "dep:vtessera-executor",
     "dep:vtessera-settlement",
+    "dep:ureq",
 ]
 
 [dependencies]
@@ -47,6 +48,9 @@ vtessera-executor = { path = "../executor", optional = true }
 # Module 3 (ROADMAP.md §3): job-receipt signing for the node binary.
 vtessera-settlement = { path = "../settlement", optional = true }
 vtessera-mini-http = { path = "../mini-http", optional = true }
+# Outbound HTTP for the offer-index publish loop + claim gate + MCP discover
+# (serve only — the default library build stays socket-free).
+ureq = { workspace = true, optional = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
 

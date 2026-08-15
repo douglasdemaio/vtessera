@@ -245,6 +245,40 @@ without running the job, proving the escrow money path end to end.
 `crates/devnet-demo` is the lower-level variant that exercises
 `pay_for_compute` → `finalize_pro_rata` directly.
 
+## Offer index + claims (Module 2a)
+
+A `vtessera-node` can register its signed offer with a central index and
+enforce first-come-first-served claims from agents:
+
+```bash
+cargo build -p vtessera-offer-index --locked --bin vtessera-offer-index --features serve
+./target/debug/vtessera-offer-index --bind 127.0.0.1:8403
+
+# node side: advertise, and re-register every interval (default 60s)
+./target/debug/vtessera-node --bind 127.0.0.1:8402 --offer offer.json --key key.bin \
+    --state-dir /var/lib/vtessera --publish http://127.0.0.1:8403
+```
+
+- `GET /offers` lists current offers (`?available=1` filters out claimed
+  ones); the index verifies each signature on register, so a node cannot
+  impersonate another.
+- An agent claims a node with `POST /offers/<node_id>/claim
+  {"agent_id":"..."}` (HTTP 201, FCFS; 409 if taken). Claims are lease-style
+  (TTL 60s, renewable by the owner) and release via
+  `DELETE /offers/<node_id>/claim` with the same body.
+- The **node enforces** its claim: once it publishes to an index, it
+  requires an agent identity on every job. HTTP clients send `X-Agent-Id:
+  <id>`; MCP `submit_job` carries an `agent_id` argument. If the node is
+  claimed by someone else the job is refused (409), and if the index is
+  unreachable the node fails closed (503). The MCP `discover` tool lists
+  current offers with their claim state.
+- One command end-to-end — two nodes (one free, one paid) publishing to an
+  index, FCFS claims, node enforcement, MCP discover, release:
+
+```bash
+scripts/offer-index-demo.sh
+```
+
 ## Settlement service (Module 3)
 
 After every job, `vtessera-node` signs a per-job metering receipt with
