@@ -454,7 +454,7 @@ impl Harness {
         send(&mut svm, &payer, &[&payer], &[fund]);
 
         // 4. init_config
-        let (config, _) = Pubkey::find_program_address(&[b"vtessera_config"], &prog());
+        let (config, _) = Pubkey::find_program_address(&[b"vtessera_config_v2"], &prog());
         let mut data = disc("init_config").to_vec();
         data.extend_from_slice(&payer.pubkey().to_bytes());
         data.extend_from_slice(&fee_wallet().to_bytes());

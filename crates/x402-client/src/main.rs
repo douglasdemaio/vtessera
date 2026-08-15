@@ -339,7 +339,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A config left over from the pre-stablecoin program (41-byte layout)
     // must be cleared before redeploy, or this account deserialize fails.
     let (config_pda, _config_bump) =
-        Pubkey::find_program_address(&[b"vtessera_config"], &program_id);
+        Pubkey::find_program_address(&[b"vtessera_config_v2"], &program_id);
     let cfg_disc = anchor_disc("init_config");
     let mut cfg_data = cfg_disc.to_vec();
     cfg_data.extend_from_slice(&payer.pubkey().to_bytes());

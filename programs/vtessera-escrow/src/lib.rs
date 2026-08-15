@@ -36,7 +36,7 @@ declare_id!("6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma");
 
 /// Seed prefix for the program's single `Config` account (settlement
 /// authority + protocol fee configuration).
-pub const CONFIG_SEED: &[u8] = b"vtessera_config";
+pub const CONFIG_SEED: &[u8] = b"vtessera_config_v2";
 
 /// Seed prefix for each `Contract` PDA.
 pub const CONTRACT_SEED: &[u8] = b"contract";
