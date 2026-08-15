@@ -21,7 +21,7 @@
 //! (`CtOption::into_option` in `solana-curve25519`). This crate therefore
 //! has its own `[workspace]`/lockfile and mirrors everything it needs from
 //! the program as local constants (program ID, seeds, discriminators,
-//! feed IDs, `EscrowError` codes). `spl-token` / ATA instructions are
+//! fee config, `EscrowError` codes). `spl-token` / ATA instructions are
 //! hand-encoded against their fixed program ABI (instruction discriminants
 //! and account layouts are stable public protocol) so no spl crate is
 //! pulled in either. The program crate pins its own unit test asserting
@@ -33,25 +33,22 @@
 //! |---|---|
 //! | 2.2a zero price | `pay_zero_price_reverts` |
 //! | 2.2b same job_id twice | `pay_same_job_id_twice_fails` |
-//! | 2.2c fraction out of range | `finalize_rejects_fraction_out_of_range` (+ stub twin) |
+//! | 2.2c fraction out of range | `finalize_rejects_fraction_out_of_range` |
 //! | 2.2d double finalize | `finalize_rejects_second_finalize` |
 //! | 2.2e buyer ATA wrong mint | `pay_rejects_buyer_ata_with_wrong_mint` |
-//! | 2.2f wrong owner | `pay_rejects_buyer_ata_with_wrong_owner`, `finalize_rejects_seller_hnt_ata_wrong_owner` |
+//! | 2.2f wrong owner | `pay_rejects_buyer_ata_with_wrong_owner`, `finalize_rejects_seller_ata_wrong_owner` |
 //! | 2.2g cancel by non-buyer | `cancel_before_start_rejects_non_buyer` |
 //! | 2.2h cancel after finalize | `cancel_after_finalize_fails` |
-//! | 2.2i overflow math | `finalize_overflow_math_reverts` |
 //! | 2.2j tiny-fraction rounding | `finalize_rounds_tiny_fraction_consistently` |
 //! | 2.2k finalize by non-authority | `finalize_rejects_non_settlement_authority` |
-//! | — stale HNT feed | `finalize_stale_hnt_feed_reverts` |
-//! | — stale stablecoin feed | `finalize_stale_stable_feed_reverts` |
-//! | — wrong feed id | `finalize_mismatched_feed_id_reverts` |
-//! | — swap underdelivers | `finalize_swap_underdelivery_reverts` |
-//! | — non-positive oracle price | `finalize_nonpositive_price_reverts` |
-//! | §2.4 production happy path | `production_finalize_happy_path` |
+//! | §2.4 happy path (seller paid) | `finalize_happy_path` |
 //! | §2.4 fraction = 0 (refund only) | `finalize_fraction_zero_refunds_buyer` |
-//! | §2.4 EUR feed fallback | `finalize_eur_feed_fallback_succeeds` |
-//! | §3.5 authority rotation | `settlement_authority_can_rotate` |
-//! | devnet stub happy path | `stub_finalize_happy_path` |
+//! | fee on pay | `pay_for_compute_charges_sol_fee` |
+//! | fee on finalize | `finalize_charges_sol_fee` |
+//! | fee on cancel | `cancel_charges_sol_fee` |
+//! | zero fee disables | `zero_fee_disables_fee` |
+//! | wrong fee wallet | `pay_rejects_wrong_fee_wallet` |
+//! | config init + immutability | `init_config_sets_fee_fields`, `config_immutable_after_init` |
 //! | buyer unilateral cancel | `cancel_before_start_refunds_buyer` |
 
 use litesvm::types::TransactionResult;
@@ -79,15 +76,12 @@ enum EscrowError {
     AlreadyFinal,
     WrongMint,
     WrongOwner,
-    MathOverflow,
-    PythStale,
-    // Not exercised directly (the feed-ID guard reports PythStale), but
-    // kept so the variant ORDER mirrors the program's EscrowError exactly
-    // — ordinal position is load-bearing for the numeric-code drift guard.
+    /// Kept to mirror the program's variant order for the error-code
+    /// drift guard; the new finalize math (u128 intermediates) can no
+    /// longer overflow, so it is never exercised by a test.
     #[allow(dead_code)]
-    BadFeedId,
-    BadOraclePrice,
-    SwapBelowMinimum,
+    MathOverflow,
+    WrongFeeWallet,
 }
 
 const ERROR_CODE_OFFSET: u32 = 6000;
@@ -101,37 +95,19 @@ impl From<EscrowError> for u32 {
 // ---------- Pinned addresses (mainnet-beta canonical) ---------------------
 
 const PROGRAM_ID_STR: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
-const HNT_MINT_STR: &str = "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux";
 const TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const ATA_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
-const RECEIVER_PROGRAM_STR: &str = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
-/// DRAFT fee wallet from lib.rs — drives a real lamport transfer.
-const FEE_WALLET_STR: &str = "9iBQEn9yMbKVhJKEpMpPByS6pjydPmQDGaznMaCvGkzD";
-
-// ---------- Pyth feed IDs (lib.rs constants) ------------------------------
-
-const HNT_USD_FEED_HEX: &str = "0x649fdd7ec08e8e2a20f425729854e90293dcbe2376abc47197a14da6ff339756";
-const USDC_USD_FEED_HEX: &str =
-    "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
-const EUR_USD_FEED_HEX: &str = "0xa995d00bb36a63cef7fd2c287dc105fc8f3d93779f062f09551b0af3e81ec30b";
+/// Protocol fee wallet from the spec — drives the real lamport transfer.
+const FEE_WALLET_STR: &str = "J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh";
 
 // ---------- Test fixture numbers ------------------------------------------
 
-/// Realistic Pyth values: HNT = $2.50, USDC = $1.00 (both expo -8).
-const HNT_USD_PRICE: i64 = 250_000_000;
-const STABLE_USD_PRICE: i64 = 100_000_000;
-const PYTH_EXPO: i32 = -8;
+/// 0.0001 SOL = 100_000 lamports, the per-transaction protocol fee.
+const FEE_LAMPORTS: u64 = 100_000;
 
 const STABLE_DECIMALS: u8 = 6;
 const PAY_PRICE: u64 = 2_000_000; // 2.000000 stablecoin
 const BUYER_MINT_AMOUNT: u64 = 10_000_000;
-
-/// `expected_hnt_atomic(earned=2_000_000, 6, 100_000_000, -8, 250_000_000, -8, 50)`:
-/// 2.0 / 2.5 = 0.8 HNT, × 99.5% slippage = 0.796 HNT = 79_600_000 atomic.
-const DEFAULT_HNT_ESCROW: u64 = 79_600_000;
-/// 79_600_000 × 100 bps / 10_000 = 796_000 burned; rest to seller.
-const HNT_BURN: u64 = 796_000;
-const SELLER_HNT_EARNED: u64 = DEFAULT_HNT_ESCROW - HNT_BURN;
 
 // --------------------------------------------------------------------------
 
@@ -143,10 +119,6 @@ fn prog() -> Pubkey {
     pk(PROGRAM_ID_STR)
 }
 
-fn hnt_mint() -> Pubkey {
-    pk(HNT_MINT_STR)
-}
-
 fn token_prog() -> Pubkey {
     pk(TOKEN_PROGRAM_STR)
 }
@@ -155,32 +127,8 @@ fn ata_prog() -> Pubkey {
     pk(ATA_PROGRAM_STR)
 }
 
-fn receiver_prog() -> Pubkey {
-    pk(RECEIVER_PROGRAM_STR)
-}
-
 fn fee_wallet() -> Pubkey {
     pk(FEE_WALLET_STR)
-}
-
-fn pyth_hnt_usd() -> Pubkey {
-    let (p, _) = Pubkey::find_program_address(&[b"pyth-hnt-usd"], &prog());
-    p
-}
-
-fn pyth_stable_usd() -> Pubkey {
-    let (p, _) = Pubkey::find_program_address(&[b"pyth-stable-usd"], &prog());
-    p
-}
-
-fn feed_id(hex: &str) -> [u8; 32] {
-    let hex = hex.strip_prefix("0x").unwrap_or(hex);
-    assert_eq!(hex.len(), 64, "feed id must be 32 bytes");
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
-    }
-    out
 }
 
 /// Anchor 8-byte instruction discriminator = first 8 bytes of
@@ -295,18 +243,6 @@ fn ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
     p
 }
 
-/// Raw `Mint` (spl-token Pack, 82 bytes): no authorities, uninitialized
-/// supply, given decimals, initialized.
-fn mint_bytes(decimals: u8) -> Vec<u8> {
-    let mut d = Vec::with_capacity(82);
-    d.extend_from_slice(&[0u8; 36]); // mint_authority: COption None
-    d.extend_from_slice(&0u64.to_le_bytes()); // supply
-    d.push(decimals);
-    d.push(1); // is_initialized
-    d.extend_from_slice(&[0u8; 36]); // freeze_authority: COption None
-    d
-}
-
 /// Raw `TokenAccount` (spl-token Pack, 165 bytes).
 fn token_account_bytes(mint: &Pubkey, owner: &Pubkey, amount: u64) -> Vec<u8> {
     let mut d = Vec::with_capacity(165);
@@ -321,68 +257,19 @@ fn token_account_bytes(mint: &Pubkey, owner: &Pubkey, amount: u64) -> Vec<u8> {
     d
 }
 
-/// Serialized `PriceUpdateV2` (Full verification, anchor discriminator).
-fn price_update_bytes(feed_id: [u8; 32], price: i64, exponent: i32, publish_time: i64) -> Vec<u8> {
-    let mut d = Vec::with_capacity(133);
-    let dg: [u8; 32] = Sha256::digest(b"account:PriceUpdateV2").into();
-    d.extend_from_slice(&dg[..8]); // anchor discriminator
-    d.extend_from_slice(&[0u8; 32]); // write_authority
-    d.push(1u8); // VerificationLevel::Full
-    d.extend_from_slice(&feed_id);
-    d.extend_from_slice(&price.to_le_bytes());
-    d.extend_from_slice(&0u64.to_le_bytes()); // conf
-    d.extend_from_slice(&exponent.to_le_bytes());
-    d.extend_from_slice(&publish_time.to_le_bytes());
-    d.extend_from_slice(&(publish_time - 1).to_le_bytes()); // prev_publish_time
-    d.extend_from_slice(&price.to_le_bytes()); // ema_price
-    d.extend_from_slice(&0u64.to_le_bytes()); // ema_conf
-    d.extend_from_slice(&0u64.to_le_bytes()); // posted_slot
-    d
-}
-
-fn inject_pyth_account(
-    svm: &mut LiteSVM,
-    key: &Pubkey,
-    feed: [u8; 32],
-    price: i64,
-    publish_time: i64,
-) {
-    inject_account(
-        svm,
-        key,
-        &receiver_prog(),
-        price_update_bytes(feed, price, PYTH_EXPO, publish_time),
-    );
-}
-
 // ---------- Escrow instruction builders -----------------------------------
 
 fn init_config_ix(authority: &Pubkey, config: &Pubkey) -> Instruction {
     let mut data = disc("init_config").to_vec();
     data.extend_from_slice(&authority.to_bytes());
+    data.extend_from_slice(&fee_wallet().to_bytes());
+    data.extend_from_slice(&FEE_LAMPORTS.to_le_bytes());
     Instruction {
         program_id: prog(),
         accounts: vec![
             AccountMeta::new(*authority, true),
             AccountMeta::new(*config, false),
             AccountMeta::new_readonly(solana_system_interface::program::id(), false),
-        ],
-        data,
-    }
-}
-
-fn update_settlement_authority_ix(
-    authority: &Pubkey,
-    config: &Pubkey,
-    new: &Pubkey,
-) -> Instruction {
-    let mut data = disc("update_settlement_authority").to_vec();
-    data.extend_from_slice(&new.to_bytes());
-    Instruction {
-        program_id: prog(),
-        accounts: vec![
-            AccountMeta::new_readonly(*authority, true),
-            AccountMeta::new(*config, false),
         ],
         data,
     }
@@ -396,6 +283,7 @@ fn pay_ix(
     buyer_ata: &Pubkey,
     escrow_ata: &Pubkey,
     contract: &Pubkey,
+    config: &Pubkey,
     job_id: [u8; 32],
     price: u64,
 ) -> Instruction {
@@ -412,10 +300,9 @@ fn pay_ix(
             AccountMeta::new(*escrow_ata, false),
             AccountMeta::new(*contract, false),
             AccountMeta::new(fee_wallet(), false),
+            AccountMeta::new_readonly(*config, false),
             AccountMeta::new_readonly(token_prog(), false),
             AccountMeta::new_readonly(solana_system_interface::program::id(), false),
-            // Defensive rent sysvar (same as the devnet demo).
-            AccountMeta::new_readonly(solana_sdk_ids::sysvar::rent::id(), false),
         ],
         data,
     }
@@ -428,8 +315,7 @@ fn finalize_ix(
     contract: &Pubkey,
     escrow_stable: &Pubkey,
     buyer_stable: &Pubkey,
-    escrow_hnt: &Pubkey,
-    seller_hnt: &Pubkey,
+    seller_stable: &Pubkey,
     f_micros: u32,
 ) -> Instruction {
     let mut data = disc("finalize_pro_rata").to_vec();
@@ -437,45 +323,15 @@ fn finalize_ix(
     Instruction {
         program_id: prog(),
         accounts: vec![
-            AccountMeta::new_readonly(*sa, true),
-            AccountMeta::new_readonly(*config, false),
-            AccountMeta::new(*contract, false),
-            AccountMeta::new(*escrow_stable, false),
-            AccountMeta::new(*buyer_stable, false),
-            // HNT mint is `mut` in the program (the SPL burn CPI requires
-            // it writable), so it must be passed writable here.
-            AccountMeta::new(hnt_mint(), false),
-            AccountMeta::new(*escrow_hnt, false),
-            AccountMeta::new(*seller_hnt, false),
-            AccountMeta::new_readonly(pyth_hnt_usd(), false),
-            AccountMeta::new_readonly(pyth_stable_usd(), false),
-            AccountMeta::new_readonly(token_prog(), false),
-        ],
-        data,
-    }
-}
-
-fn finalize_stub_ix(
-    sa: &Pubkey,
-    config: &Pubkey,
-    contract: &Pubkey,
-    escrow_stable: &Pubkey,
-    buyer_stable: &Pubkey,
-    seller_stable: &Pubkey,
-    f_micros: u32,
-) -> Instruction {
-    let mut data = disc("finalize_pro_rata_stub").to_vec();
-    data.extend_from_slice(&f_micros.to_le_bytes());
-    Instruction {
-        program_id: prog(),
-        accounts: vec![
-            AccountMeta::new_readonly(*sa, true),
+            AccountMeta::new(*sa, true),
             AccountMeta::new_readonly(*config, false),
             AccountMeta::new(*contract, false),
             AccountMeta::new(*escrow_stable, false),
             AccountMeta::new(*buyer_stable, false),
             AccountMeta::new(*seller_stable, false),
+            AccountMeta::new(fee_wallet(), false),
             AccountMeta::new_readonly(token_prog(), false),
+            AccountMeta::new_readonly(solana_system_interface::program::id(), false),
         ],
         data,
     }
@@ -486,6 +342,7 @@ fn cancel_ix(
     contract: &Pubkey,
     escrow_stable: &Pubkey,
     buyer_stable: &Pubkey,
+    config: &Pubkey,
 ) -> Instruction {
     Instruction {
         program_id: prog(),
@@ -494,7 +351,10 @@ fn cancel_ix(
             AccountMeta::new(*contract, false),
             AccountMeta::new(*escrow_stable, false),
             AccountMeta::new(*buyer_stable, false),
+            AccountMeta::new(fee_wallet(), false),
+            AccountMeta::new_readonly(*config, false),
             AccountMeta::new_readonly(token_prog(), false),
+            AccountMeta::new_readonly(solana_system_interface::program::id(), false),
         ],
         data: disc("cancel_before_start").to_vec(),
     }
@@ -502,17 +362,15 @@ fn cancel_ix(
 
 // ---------- Harness -------------------------------------------------------
 
-/// A funded, paid, fully-injected ledger ready to run `finalize_*`.
+/// A funded, paid ledger ready to run `finalize_pro_rata`.
 ///
 /// State built:
 /// 1. stablecoin mint (6 decimals, mint authority = payer/buyer)
 /// 2. buyer/seller/escrow ATAs for the stablecoin mint
 /// 3. `BUYER_MINT_AMOUNT` minted to the buyer
-/// 4. `init_config` with settlement authority = payer
+/// 4. `init_config` with settlement authority = payer, the protocol fee
+///    wallet + `FEE_LAMPORTS`
 /// 5. `pay_for_compute(price)` into the contract PDA
-/// 6. HNT mint + escrow/seller HNT ATAs injected (escrow holds
-///    `DEFAULT_HNT_ESCROW`)
-/// 7. fresh Pyth `PriceUpdateV2` accounts injected at both feed addresses
 struct Harness {
     svm: LiteSVM,
     payer: Keypair,
@@ -525,8 +383,6 @@ struct Harness {
     buyer_stable: Pubkey,
     escrow_stable: Pubkey,
     seller_stable: Pubkey,
-    escrow_hnt: Pubkey,
-    seller_hnt: Pubkey,
 }
 
 fn job_id() -> [u8; 32] {
@@ -539,6 +395,12 @@ impl Harness {
     }
 
     fn setup_only(buyer_balance: u64) -> Self {
+        Self::setup_only_with_fee(buyer_balance, FEE_LAMPORTS)
+    }
+
+    /// Same as `setup_only` but pins the given protocol fee in `Config`
+    /// (0 disables the fee, which is itself a tested configuration).
+    fn setup_only_with_fee(buyer_balance: u64, fee_lamports: u64) -> Self {
         let mut svm = LiteSVM::new();
         svm.add_program_from_file(prog(), program_so_path())
             .unwrap();
@@ -548,10 +410,10 @@ impl Harness {
         svm.airdrop(&payer.pubkey(), 5_000_000_000).unwrap();
         svm.airdrop(&seller.pubkey(), 5_000_000_000).unwrap();
         // The program pays a fixed lamport fee to `fee_wallet` on every
-        // deposit. On mainnet that wallet pre-exists (deployer-funded);
-        // create it here rent-exempt, or the pay tx would fail with
-        // InsufficientFundsForRent (0-byte account needs
-        // (128 + 0) * 6960 = 890,880 lamports; DRAFT_FEE_LAMPORTS is only
+        // deposit/finalize/cancel. On mainnet that wallet pre-exists
+        // (operator-funded); create it here rent-exempt, or the pay tx
+        // would fail with InsufficientFundsForRent (0-byte account needs
+        // (128 + 0) * 6960 = 890,880 lamports; FEE_LAMPORTS is only
         // 100,000).
         svm.airdrop(&fee_wallet(), 1_000_000_000).unwrap();
 
@@ -593,10 +455,21 @@ impl Harness {
 
         // 4. init_config
         let (config, _) = Pubkey::find_program_address(&[b"vtessera_config"], &prog());
-        let cfg = init_config_ix(&payer.pubkey(), &config);
+        let mut data = disc("init_config").to_vec();
+        data.extend_from_slice(&payer.pubkey().to_bytes());
+        data.extend_from_slice(&fee_wallet().to_bytes());
+        data.extend_from_slice(&fee_lamports.to_le_bytes());
+        let cfg = Instruction {
+            program_id: prog(),
+            accounts: vec![
+                AccountMeta::new(payer.pubkey(), true),
+                AccountMeta::new(config, false),
+                AccountMeta::new_readonly(solana_system_interface::program::id(), false),
+            ],
+            data,
+        };
         send(&mut svm, &payer, &[&payer], &[cfg]);
 
-        let seller_hnt = ata(&seller.pubkey(), &hnt_mint());
         Harness {
             svm,
             payer,
@@ -609,20 +482,13 @@ impl Harness {
             buyer_stable,
             escrow_stable,
             seller_stable,
-            escrow_hnt: ata(&contract, &hnt_mint()),
-            seller_hnt,
         }
     }
 
     fn new_with(price: u64, buyer_balance: u64) -> Self {
         let mut h = Self::setup_only(buyer_balance);
         h.price = price;
-        // 5. pay_for_compute
         h.pay(price);
-        // 6. HNT side (mint + ATAs), escrow funded
-        h.inject_hnt_side(DEFAULT_HNT_ESCROW);
-        // 7. fresh Pyth feeds
-        h.inject_pyth_defaults();
         h
     }
 
@@ -636,26 +502,11 @@ impl Harness {
             &self.buyer_stable,
             &self.escrow_stable,
             &self.contract,
+            &self.config,
             self.job_id,
             price,
         );
         send(&mut self.svm, &self.payer, &[&self.payer], &[pay]);
-    }
-
-    fn inject_hnt_side(&mut self, escrow_amount: u64) {
-        inject_account(&mut self.svm, &hnt_mint(), &token_prog(), mint_bytes(8));
-        inject_account(
-            &mut self.svm,
-            &self.escrow_hnt,
-            &token_prog(),
-            token_account_bytes(&hnt_mint(), &self.contract, escrow_amount),
-        );
-        inject_account(
-            &mut self.svm,
-            &self.seller_hnt,
-            &token_prog(),
-            token_account_bytes(&hnt_mint(), &self.seller.pubkey(), 0),
-        );
     }
 
     /// Create a second stablecoin mint plus a funded buyer ATA for it.
@@ -691,55 +542,6 @@ impl Harness {
         (alt_mint, alt_buyer_ata)
     }
 
-    fn inject_pyth_defaults(&mut self) {
-        inject_pyth_account(
-            &mut self.svm,
-            &pyth_hnt_usd(),
-            feed_id(HNT_USD_FEED_HEX),
-            HNT_USD_PRICE,
-            0,
-        );
-        inject_pyth_account(
-            &mut self.svm,
-            &pyth_stable_usd(),
-            feed_id(USDC_USD_FEED_HEX),
-            STABLE_USD_PRICE,
-            0,
-        );
-    }
-
-    fn set_hnt_balance(&mut self, amount: u64) {
-        inject_account(
-            &mut self.svm,
-            &self.escrow_hnt,
-            &token_prog(),
-            token_account_bytes(&hnt_mint(), &self.contract, amount),
-        );
-    }
-
-    /// Model the bundled Jupiter leg that the real flow assumes: before
-    /// `finalize_pro_rata`, the swap consumed `earned_stable` from the
-    /// escrow's stablecoin ATA (delivering HNT into `escrow_hnt_ata`).
-    /// Re-inject the stable ATA at its post-swap balance (the refund).
-    fn simulate_swap_consumes_earned(&mut self, f_micros: u32) {
-        let earned = (self.price as u128 * f_micros as u128 / 1_000_000) as u64;
-        let refund = self.price - earned;
-        inject_account(
-            &mut self.svm,
-            &self.escrow_stable,
-            &token_prog(),
-            token_account_bytes(&self.mint, &self.contract, refund),
-        );
-    }
-
-    fn inject_pyth_hnt(&mut self, feed: [u8; 32], price: i64, publish_time: i64) {
-        inject_pyth_account(&mut self.svm, &pyth_hnt_usd(), feed, price, publish_time);
-    }
-
-    fn inject_pyth_stable(&mut self, feed: [u8; 32], price: i64, publish_time: i64) {
-        inject_pyth_account(&mut self.svm, &pyth_stable_usd(), feed, price, publish_time);
-    }
-
     fn token_balance(&self, key: &Pubkey) -> u64 {
         let acct = self
             .svm
@@ -748,32 +550,27 @@ impl Harness {
         u64::from_le_bytes(acct.data[64..72].try_into().unwrap())
     }
 
+    fn sol_balance(&self, key: &Pubkey) -> u64 {
+        self.svm.get_balance(key).unwrap_or(0)
+    }
+
     fn config_authority(&self) -> Pubkey {
         let acct = self.svm.get_account(&self.config).unwrap();
         Pubkey::new_from_array(acct.data[8..40].try_into().unwrap())
     }
 
-    fn finalize_tx(&self, sa: &Keypair, f_micros: u32) -> Transaction {
-        let ix = finalize_ix(
-            &sa.pubkey(),
-            &self.config,
-            &self.contract,
-            &self.escrow_stable,
-            &self.buyer_stable,
-            &self.escrow_hnt,
-            &self.seller_hnt,
-            f_micros,
-        );
-        Transaction::new_signed_with_payer(
-            &[ix],
-            Some(&sa.pubkey()),
-            &[sa],
-            self.svm.latest_blockhash(),
-        )
+    fn config_fee_wallet(&self) -> Pubkey {
+        let acct = self.svm.get_account(&self.config).unwrap();
+        Pubkey::new_from_array(acct.data[40..72].try_into().unwrap())
     }
 
-    fn finalize_stub_tx(&self, sa: &Keypair, f_micros: u32) -> Transaction {
-        let ix = finalize_stub_ix(
+    fn config_fee_lamports(&self) -> u64 {
+        let acct = self.svm.get_account(&self.config).unwrap();
+        u64::from_le_bytes(acct.data[72..80].try_into().unwrap())
+    }
+
+    fn finalize_tx(&self, sa: &Keypair, f_micros: u32) -> Transaction {
+        let ix = finalize_ix(
             &sa.pubkey(),
             &self.config,
             &self.contract,
@@ -796,6 +593,7 @@ impl Harness {
             &self.contract,
             &self.escrow_stable,
             &self.buyer_stable,
+            &self.config,
         );
         Transaction::new_signed_with_payer(
             &[ix],
@@ -862,89 +660,124 @@ fn expect_tx_error(result: TransactionResult) {
     }
 }
 
-// ---------- Production finalize: adversarial -----------------------------
+// ---------- Config: init + immutability -----------------------------------
 
 #[test]
-fn finalize_rejects_non_settlement_authority() {
-    let mut h = Harness::new();
-    let attacker = Keypair::new();
-    h.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
-    let res = h.svm.send_transaction(h.finalize_tx(&attacker, 1_000_000));
-    expect_custom(res, EscrowError::NotSettlementAuthority);
+fn init_config_sets_fee_fields() {
+    let h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    assert_eq!(h.config_authority(), h.payer.pubkey());
+    assert_eq!(h.config_fee_wallet(), fee_wallet());
+    assert_eq!(h.config_fee_lamports(), FEE_LAMPORTS);
 }
 
 #[test]
-fn finalize_rejects_fraction_out_of_range() {
-    let mut h = Harness::new();
-    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_001));
-    expect_custom(res, EscrowError::FractionOutOfRange);
+fn config_immutable_after_init() {
+    // No governance instructions exist; the only setup path is init_config,
+    // which fails once the PDA already exists (there is nothing to rotate).
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    let cfg = init_config_ix(&h.payer.pubkey(), &h.config);
+    let tx = Transaction::new_signed_with_payer(
+        &[cfg],
+        Some(&h.payer.pubkey()),
+        &[&h.payer],
+        h.svm.latest_blockhash(),
+    );
+    expect_tx_error(h.svm.send_transaction(tx));
+    // Config untouched by the failed re-init.
+    assert_eq!(h.config_fee_lamports(), FEE_LAMPORTS);
+}
+
+// ---------- Protocol fee --------------------------------------------------
+
+#[test]
+fn pay_for_compute_charges_sol_fee() {
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    let buyer_before = h.sol_balance(&h.payer.pubkey());
+    let wallet_before = h.sol_balance(&fee_wallet());
+    h.pay(PAY_PRICE);
+    assert_eq!(h.sol_balance(&fee_wallet()), wallet_before + FEE_LAMPORTS);
+    // The buyer also pays SOL tx fees; the protocol fee is on top.
+    assert!(
+        h.sol_balance(&h.payer.pubkey()) <= buyer_before - FEE_LAMPORTS,
+        "buyer SOL must drop by at least the fee"
+    );
 }
 
 #[test]
-fn finalize_rejects_second_finalize() {
+fn finalize_charges_sol_fee() {
     let mut h = Harness::new();
+    let sa_before = h.sol_balance(&h.payer.pubkey());
+    let wallet_before = h.sol_balance(&fee_wallet());
     h.svm
         .send_transaction(h.finalize_tx(&h.payer, 1_000_000))
         .unwrap();
-    // Fresh blockhash so the second tx isn't an exact replay (which would
-    // return AlreadyProcessed, masking the program's real answer).
-    h.svm.expire_blockhash();
-    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
-    expect_custom(res, EscrowError::AlreadyFinal);
+    assert_eq!(h.sol_balance(&fee_wallet()), wallet_before + FEE_LAMPORTS);
+    assert!(
+        h.sol_balance(&h.payer.pubkey()) <= sa_before - FEE_LAMPORTS,
+        "settlement authority SOL must drop by at least the fee"
+    );
 }
 
 #[test]
-fn finalize_stale_hnt_feed_reverts() {
+fn cancel_charges_sol_fee() {
     let mut h = Harness::new();
-    // publish_time far in the past relative to the genesis clock (t=0).
-    h.inject_pyth_hnt(feed_id(HNT_USD_FEED_HEX), HNT_USD_PRICE, -1_000);
-    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
-    expect_custom(res, EscrowError::PythStale);
+    let buyer_before = h.sol_balance(&h.payer.pubkey());
+    let wallet_before = h.sol_balance(&fee_wallet());
+    h.svm.send_transaction(h.cancel_tx()).unwrap();
+    assert_eq!(h.sol_balance(&fee_wallet()), wallet_before + FEE_LAMPORTS);
+    assert!(
+        h.sol_balance(&h.payer.pubkey()) <= buyer_before - FEE_LAMPORTS,
+        "buyer SOL must drop by at least the fee even on cancel"
+    );
 }
 
 #[test]
-fn finalize_stale_stable_feed_reverts() {
-    let mut h = Harness::new();
-    h.inject_pyth_stable(feed_id(USDC_USD_FEED_HEX), STABLE_USD_PRICE, -1_000);
-    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
-    expect_custom(res, EscrowError::PythStale);
+fn zero_fee_disables_fee() {
+    // A config pinned with fee_lamports = 0 means the fee is skipped.
+    let mut h = Harness::setup_only_with_fee(BUYER_MINT_AMOUNT, 0);
+    let wallet_before = h.sol_balance(&fee_wallet());
+    h.pay(PAY_PRICE);
+    assert_eq!(h.sol_balance(&fee_wallet()), wallet_before);
+    assert_eq!(h.config_fee_lamports(), 0);
 }
 
 #[test]
-fn finalize_mismatched_feed_id_reverts() {
-    let mut h = Harness::new();
-    // HNT/USD account actually holds the USDC feed id.
-    h.inject_pyth_hnt(feed_id(USDC_USD_FEED_HEX), HNT_USD_PRICE, 0);
-    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
-    expect_custom(res, EscrowError::PythStale);
+fn pay_rejects_wrong_fee_wallet() {
+    // The passed fee-wallet account must match the wallet pinned in Config.
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    let impostor = Keypair::new();
+    h.svm.airdrop(&impostor.pubkey(), 1_000_000_000).unwrap();
+    let pay = {
+        let mut data = disc("pay_for_compute").to_vec();
+        data.extend_from_slice(&h.job_id);
+        data.extend_from_slice(&PAY_PRICE.to_le_bytes());
+        Instruction {
+            program_id: prog(),
+            accounts: vec![
+                AccountMeta::new(h.payer.pubkey(), true),
+                AccountMeta::new_readonly(h.seller.pubkey(), false),
+                AccountMeta::new_readonly(h.mint, false),
+                AccountMeta::new(h.buyer_stable, false),
+                AccountMeta::new(h.escrow_stable, false),
+                AccountMeta::new(h.contract, false),
+                AccountMeta::new(impostor.pubkey(), false),
+                AccountMeta::new_readonly(h.config, false),
+                AccountMeta::new_readonly(token_prog(), false),
+                AccountMeta::new_readonly(solana_system_interface::program::id(), false),
+            ],
+            data,
+        }
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[pay],
+        Some(&h.payer.pubkey()),
+        &[&h.payer],
+        h.svm.latest_blockhash(),
+    );
+    expect_custom(h.svm.send_transaction(tx), EscrowError::WrongFeeWallet);
 }
 
-#[test]
-fn finalize_swap_underdelivery_reverts() {
-    let mut h = Harness::new();
-    // One atomic unit short of the Pyth-derived minimum.
-    h.set_hnt_balance(DEFAULT_HNT_ESCROW - 1);
-    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
-    expect_custom(res, EscrowError::SwapBelowMinimum);
-}
-
-#[test]
-fn finalize_nonpositive_price_reverts() {
-    let mut h = Harness::new();
-    h.inject_pyth_hnt(feed_id(HNT_USD_FEED_HEX), 0, 0);
-    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
-    expect_custom(res, EscrowError::BadOraclePrice);
-}
-
-#[test]
-fn finalize_overflow_math_reverts() {
-    // price = u64::MAX with a full completion and normal oracle prices.
-    // expected_hnt_atomic must exceed u64::MAX → MathOverflow fires before
-    // any balance check or transfer.
-    let mut h = Harness::new_with(u64::MAX, u64::MAX);
-    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
-    expect_custom(res, EscrowError::MathOverflow);
-}
+// ---------- Pay: adversarial ----------------------------------------------
 
 #[test]
 fn pay_zero_price_reverts() {
@@ -956,6 +789,7 @@ fn pay_zero_price_reverts() {
         &h.buyer_stable,
         &h.escrow_stable,
         &h.contract,
+        &h.config,
         h.job_id,
         0,
     );
@@ -981,6 +815,7 @@ fn pay_same_job_id_twice_fails() {
         &h.buyer_stable,
         &h.escrow_stable,
         &h.contract,
+        &h.config,
         h.job_id,
         PAY_PRICE,
     );
@@ -1006,6 +841,7 @@ fn pay_rejects_buyer_ata_with_wrong_mint() {
         &alt_buyer_ata, // …but buyer ATA denominated in the alt mint
         &h.escrow_stable,
         &h.contract,
+        &h.config,
         h.job_id,
         PAY_PRICE,
     );
@@ -1038,6 +874,7 @@ fn pay_rejects_buyer_ata_with_wrong_owner() {
         &attacker_ata, // ATA owned by attacker, not the buyer signer
         &h.escrow_stable,
         &h.contract,
+        &h.config,
         h.job_id,
         PAY_PRICE,
     );
@@ -1050,19 +887,62 @@ fn pay_rejects_buyer_ata_with_wrong_owner() {
     expect_custom(h.svm.send_transaction(tx), EscrowError::WrongOwner);
 }
 
+// ---------- Finalize: adversarial -----------------------------------------
+
 #[test]
-fn finalize_rejects_seller_hnt_ata_wrong_owner() {
-    // §2.2f: seller HNT ATA must be owned by the contract's seller_payout.
+fn finalize_rejects_non_settlement_authority() {
+    let mut h = Harness::new();
+    let attacker = Keypair::new();
+    h.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+    let res = h.svm.send_transaction(h.finalize_tx(&attacker, 1_000_000));
+    expect_custom(res, EscrowError::NotSettlementAuthority);
+}
+
+#[test]
+fn finalize_rejects_fraction_out_of_range() {
+    let mut h = Harness::new();
+    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_001));
+    expect_custom(res, EscrowError::FractionOutOfRange);
+}
+
+#[test]
+fn finalize_rejects_second_finalize() {
+    let mut h = Harness::new();
+    h.svm
+        .send_transaction(h.finalize_tx(&h.payer, 1_000_000))
+        .unwrap();
+    // Fresh blockhash so the second tx isn't an exact replay (which would
+    // return AlreadyProcessed, masking the program's real answer).
+    h.svm.expire_blockhash();
+    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
+    expect_custom(res, EscrowError::AlreadyFinal);
+}
+
+#[test]
+fn finalize_rejects_seller_ata_wrong_owner() {
+    // §2.2f: seller stablecoin ATA must be owned by the contract's
+    // seller_payout.
     let mut h = Harness::new();
     let attacker = Keypair::new();
     inject_account(
         &mut h.svm,
-        &h.seller_hnt,
+        &h.seller_stable,
         &token_prog(),
-        token_account_bytes(&hnt_mint(), &attacker.pubkey(), 0),
+        token_account_bytes(&h.mint, &attacker.pubkey(), 0),
     );
     let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
     expect_custom(res, EscrowError::WrongOwner);
+}
+
+#[test]
+fn finalize_rounds_tiny_fraction_consistently() {
+    // §2.2j: price = 1, f_micros = 1 → earned truncates to 0, refund = 1;
+    // no overflow, buyer gets everything back.
+    let mut h = Harness::new_with(1, BUYER_MINT_AMOUNT);
+    h.svm.send_transaction(h.finalize_tx(&h.payer, 1)).unwrap();
+    assert_eq!(h.token_balance(&h.escrow_stable), 0);
+    assert_eq!(h.token_balance(&h.buyer_stable), BUYER_MINT_AMOUNT);
+    assert_eq!(h.token_balance(&h.seller_stable), 0);
 }
 
 #[test]
@@ -1076,27 +956,13 @@ fn cancel_after_finalize_fails() {
     expect_custom(res, EscrowError::AlreadyFinal);
 }
 
-#[test]
-fn finalize_rounds_tiny_fraction_consistently() {
-    // §2.2j: price = 1, f_micros = 1 → earned truncates to 0, refund = 1;
-    // no overflow, buyer gets everything back.
-    let mut h = Harness::new_with(1, BUYER_MINT_AMOUNT);
-    h.svm.send_transaction(h.finalize_tx(&h.payer, 1)).unwrap();
-    assert_eq!(h.token_balance(&h.escrow_stable), 0);
-    assert_eq!(h.token_balance(&h.buyer_stable), BUYER_MINT_AMOUNT);
-    assert_eq!(h.token_balance(&h.seller_hnt), 0);
-    assert_eq!(h.token_balance(&h.escrow_hnt), DEFAULT_HNT_ESCROW);
-}
-
-// ---------- Production finalize: valid flows -----------------------------
+// ---------- Finalize: valid flows -----------------------------------------
 
 #[test]
-fn production_finalize_happy_path() {
+fn finalize_happy_path() {
+    // Seller paid the whole escrow in the contract's stablecoin mint;
+    // buyer gets nothing back at f = 1.0.
     let mut h = Harness::new();
-    // The real bundle is `[jupiter swap → finalize_pro_rata]`: the swap
-    // drains the earned slice from the escrow stable ATA before finalize
-    // runs. Model that leg, then verify finalize distributes what's left.
-    h.simulate_swap_consumes_earned(1_000_000);
     let meta = h
         .svm
         .send_transaction(h.finalize_tx(&h.payer, 1_000_000))
@@ -1113,9 +979,8 @@ fn production_finalize_happy_path() {
         "expected JobFinalized event in logs: {:#?}",
         meta.logs
     );
-    assert_eq!(h.token_balance(&h.escrow_hnt), 0);
-    assert_eq!(h.token_balance(&h.seller_hnt), SELLER_HNT_EARNED);
     assert_eq!(h.token_balance(&h.escrow_stable), 0);
+    assert_eq!(h.token_balance(&h.seller_stable), PAY_PRICE);
     assert_eq!(
         h.token_balance(&h.buyer_stable),
         BUYER_MINT_AMOUNT - PAY_PRICE
@@ -1128,101 +993,22 @@ fn finalize_fraction_zero_refunds_buyer() {
     h.svm.send_transaction(h.finalize_tx(&h.payer, 0)).unwrap();
     assert_eq!(h.token_balance(&h.escrow_stable), 0);
     assert_eq!(h.token_balance(&h.buyer_stable), BUYER_MINT_AMOUNT);
-    assert_eq!(h.token_balance(&h.seller_hnt), 0);
-    assert_eq!(h.token_balance(&h.escrow_hnt), DEFAULT_HNT_ESCROW);
+    assert_eq!(h.token_balance(&h.seller_stable), 0);
 }
 
 #[test]
-fn finalize_eur_feed_fallback_succeeds() {
-    let mut h = Harness::new();
-    // The stablecoin/USD account holds the EUR feed; the USDC attempt
-    // fails (mismatched id), the EUR fallback must succeed.
-    h.inject_pyth_stable(feed_id(EUR_USD_FEED_HEX), STABLE_USD_PRICE, 0);
+fn finalize_half_pays_half_refunds() {
+    // f = 0.5 with an even price: half to the seller, half refunded.
+    let mut h = Harness::new_with(2_000_000, BUYER_MINT_AMOUNT);
     h.svm
-        .send_transaction(h.finalize_tx(&h.payer, 1_000_000))
-        .unwrap();
-    assert_eq!(h.token_balance(&h.seller_hnt), SELLER_HNT_EARNED);
-    assert_eq!(h.token_balance(&h.escrow_hnt), 0);
-}
-
-// ---------- Settlement authority (MAINNET-CHECKLIST §3.5) -----------------
-
-#[test]
-fn settlement_authority_can_rotate() {
-    let mut h = Harness::new();
-    assert_eq!(h.config_authority(), h.payer.pubkey());
-
-    // Non-authority can't rotate.
-    let attacker = Keypair::new();
-    h.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
-    let bad = update_settlement_authority_ix(&attacker.pubkey(), &h.config, &h.seller.pubkey());
-    let tx = Transaction::new_signed_with_payer(
-        &[bad],
-        Some(&attacker.pubkey()),
-        &[&attacker],
-        h.svm.latest_blockhash(),
-    );
-    expect_custom(
-        h.svm.send_transaction(tx),
-        EscrowError::NotSettlementAuthority,
-    );
-
-    // Current authority rotates to the seller.
-    let good = update_settlement_authority_ix(&h.payer.pubkey(), &h.config, &h.seller.pubkey());
-    let tx = Transaction::new_signed_with_payer(
-        &[good],
-        Some(&h.payer.pubkey()),
-        &[&h.payer],
-        h.svm.latest_blockhash(),
-    );
-    h.svm.send_transaction(tx).unwrap();
-    assert_eq!(h.config_authority(), h.seller.pubkey());
-
-    // Old authority can no longer finalize…
-    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
-    expect_custom(res, EscrowError::NotSettlementAuthority);
-
-    // …and the new one can.
-    h.svm
-        .send_transaction(h.finalize_tx(&h.seller, 1_000_000))
-        .unwrap();
-    assert_eq!(h.token_balance(&h.seller_hnt), SELLER_HNT_EARNED);
-}
-
-// ---------- Stub finalize (devnet smoke path) -----------------------------
-
-#[test]
-fn stub_finalize_rejects_non_settlement_authority() {
-    let mut h = Harness::new();
-    let attacker = Keypair::new();
-    h.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
-    let res = h
-        .svm
-        .send_transaction(h.finalize_stub_tx(&attacker, 1_000_000));
-    expect_custom(res, EscrowError::NotSettlementAuthority);
-}
-
-#[test]
-fn stub_finalize_happy_path() {
-    let mut h = Harness::new();
-    h.svm
-        .send_transaction(h.finalize_stub_tx(&h.payer, 1_000_000))
+        .send_transaction(h.finalize_tx(&h.payer, 500_000))
         .unwrap();
     assert_eq!(h.token_balance(&h.escrow_stable), 0);
-    assert_eq!(h.token_balance(&h.seller_stable), PAY_PRICE);
+    assert_eq!(h.token_balance(&h.seller_stable), 1_000_000);
     assert_eq!(
         h.token_balance(&h.buyer_stable),
-        BUYER_MINT_AMOUNT - PAY_PRICE
+        BUYER_MINT_AMOUNT - 1_000_000
     );
-}
-
-#[test]
-fn stub_finalize_rejects_fraction_out_of_range() {
-    let mut h = Harness::new();
-    let res = h
-        .svm
-        .send_transaction(h.finalize_stub_tx(&h.payer, 1_000_001));
-    expect_custom(res, EscrowError::FractionOutOfRange);
 }
 
 // ---------- Buyer unilateral cancel ---------------------------------------
@@ -1249,6 +1035,7 @@ fn cancel_before_start_rejects_non_buyer() {
         &h.contract,
         &h.escrow_stable,
         &h.buyer_stable,
+        &h.config,
     );
     let tx = Transaction::new_signed_with_payer(
         &[ix],
