@@ -234,6 +234,22 @@ completed**.
 (signed-receipt verification + a database) to prove the model, then move
 into SEV-SNP/TDX before handling real value at scale.
 
+**Shipped (non-TEE first):** per-job metering receipts. `vtessera-node`
+signs a `JobReceipt` (`schema_ver 2`, wrapping the executor's
+`JobMetering`) after every job run — Completed, Failed, and TimedOut
+alike — and writes it to `<state-dir>/job-receipts/<job_id>.json`. The
+`vtessera-settle` service watches a shared state dir (contracts/
++ job-receipts/ → settlements/), verifies each signed receipt
+(schema, pubkey, self-attesting `node_id`, signature — any failure is a
+permanent reject, no partial credit), guards against device downgrades
+(a GPU contract is credited in GPU-seconds, never CPU-seconds), and
+writes `settlements/<job_id>.json` with the completion fraction `f`.
+`crates/settlement` holds the schema, sign/verify, key loading
+(`--key` / `--state-dir` on the node), the sweep logic, and the
+`vtessera-settle` binary. *The escrow split itself (§4b) is still the
+escrow program's job; settlement produces the `f` it needs.* The TEE
+verification layer remains follow-up.
+
 ---
 
 ## 4. Payment + non-custodial escrow  *(paid jobs only)*

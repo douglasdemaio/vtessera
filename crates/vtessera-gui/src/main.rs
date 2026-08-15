@@ -267,6 +267,8 @@ fn start_node(ui: &Ui, state: &NodeState) {
         escrow: &settings.escrow_account,
         network: &settings.network,
         backend: &settings.backend,
+        key_path: settings::key_path(),
+        state_dir: settings::state_dir(),
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,

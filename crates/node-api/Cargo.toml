@@ -27,8 +27,13 @@ required-features = ["serve"]
 default = []
 # `serve` wires the agent-facing binaries. It pulls the executor in so the
 # node/MCP binaries can run jobs — the library itself stays socket-free and
-# executor-free by default (v0's no-inbound-network rule survives).
-serve = ["dep:vtessera-mini-http", "dep:vtessera-executor"]
+# executor-free by default (v0's no-inbound-network rule survives). It also
+# pulls settlement so the node signs per-job metering receipts (Module 3).
+serve = [
+    "dep:vtessera-mini-http",
+    "dep:vtessera-executor",
+    "dep:vtessera-settlement",
+]
 
 [dependencies]
 # Pure dispatch only. No socket layer here — that lives in a thin binary
@@ -39,6 +44,8 @@ vtessera-offer = { path = "../offer" }
 # never links the privileged executor surface; only the `serve` binaries
 # (the composition roots) construct a backend.
 vtessera-executor = { path = "../executor", optional = true }
+# Module 3 (ROADMAP.md §3): job-receipt signing for the node binary.
+vtessera-settlement = { path = "../settlement", optional = true }
 vtessera-mini-http = { path = "../mini-http", optional = true }
 hex = { workspace = true }
 serde_json = { workspace = true }

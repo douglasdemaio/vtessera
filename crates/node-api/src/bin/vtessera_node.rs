@@ -43,6 +43,7 @@
 use std::env;
 use std::fs;
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 
@@ -51,11 +52,17 @@ use vtessera_mini_http::{serve, Method as MiniMethod, Request as MiniRequest, Re
 use vtessera_node_api::{
     dispatch, parse_signed_offer, HttpMethod, HttpRequest, JobRunError, JobRunner, NodeState,
 };
+use vtessera_settlement::SigningKey;
+use vtessera_settlement::{
+    derive_node_id, load_node_key, sign_job_receipt, JobReceipt, JOB_RECEIPT_SCHEMA_VER,
+};
 
 fn usage_and_exit() -> ! {
     eprintln!(
         "usage: vtessera-node --bind <host:port> --offer <path.json> \
-        --escrow <pda> --network <id> [--backend noop-cpu|local-cpu]"
+        --escrow <pda> --network <id> \
+        --key <identity.key> --state-dir <dir> \
+        [--backend noop-cpu|local-cpu]"
     );
     process::exit(2);
 }
@@ -65,6 +72,8 @@ struct Args {
     offer_path: String,
     escrow_account: String,
     network: String,
+    key_path: String,
+    state_dir: String,
     backend: BackendChoice,
 }
 
@@ -83,11 +92,14 @@ impl BackendChoice {
         }
     }
 
-    fn build(self, node_id: &str) -> Arc<dyn JobRunner> {
+    fn build(self, id: &NodeIdentity) -> Arc<dyn JobRunner> {
         match self {
             BackendChoice::NoopCpu => Arc::new(ExecutorRunner {
                 executor: Box::new(vtessera_executor::NoopCpuExecutor),
-                node_id: node_id.to_string(),
+                node_id: id.node_id.clone(),
+                payout_id: id.payout_id.clone(),
+                signing_key: id.signing_key.clone(),
+                receipts_dir: id.receipts_dir.clone(),
             }),
             BackendChoice::LocalCpu => {
                 eprintln!(
@@ -97,7 +109,10 @@ impl BackendChoice {
                 );
                 Arc::new(ExecutorRunner {
                     executor: Box::new(vtessera_executor::LocalCpuExecutor),
-                    node_id: node_id.to_string(),
+                    node_id: id.node_id.clone(),
+                    payout_id: id.payout_id.clone(),
+                    signing_key: id.signing_key.clone(),
+                    receipts_dir: id.receipts_dir.clone(),
                 })
             }
         }
@@ -109,6 +124,8 @@ fn parse_args() -> Args {
     let mut offer_path: Option<String> = None;
     let mut escrow: Option<String> = None;
     let mut network: Option<String> = None;
+    let mut key_path: Option<String> = None;
+    let mut state_dir: Option<String> = None;
     let mut backend = BackendChoice::NoopCpu;
     let mut it = env::args().skip(1);
     while let Some(a) = it.next() {
@@ -117,6 +134,8 @@ fn parse_args() -> Args {
             "--offer" => offer_path = it.next(),
             "--escrow" => escrow = it.next(),
             "--network" => network = it.next(),
+            "--key" => key_path = it.next(),
+            "--state-dir" => state_dir = it.next(),
             "--backend" => {
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 backend = BackendChoice::parse(&raw).unwrap_or_else(|| usage_and_exit());
@@ -128,23 +147,55 @@ fn parse_args() -> Args {
             }
         }
     }
-    match (bind, offer_path, escrow, network) {
-        (Some(b), Some(o), Some(e), Some(n)) => Args {
+    match (bind, offer_path, escrow, network, key_path, state_dir) {
+        (Some(b), Some(o), Some(e), Some(n), Some(k), Some(s)) => Args {
             bind: b,
             offer_path: o,
             escrow_account: e,
             network: n,
+            key_path: k,
+            state_dir: s,
             backend,
         },
         _ => usage_and_exit(),
     }
 }
 
+/// The node's identity and receipt-persistence context, assembled once at
+/// startup. The signing key must match the advertised offer's `node_id`.
+struct NodeIdentity {
+    signing_key: SigningKey,
+    node_id: String,
+    payout_id: String,
+    receipts_dir: PathBuf,
+}
+
 /// Binary-side glue: parses the request body as an executor [`JobSpec`],
-/// runs it on the chosen backend, and renders the 200 response body.
+/// runs it on the chosen backend, signs a per-job metering receipt, and
+/// renders the 200 response body.
 struct ExecutorRunner {
     executor: Box<dyn Executor + Send + Sync>,
     node_id: String,
+    payout_id: String,
+    signing_key: SigningKey,
+    receipts_dir: PathBuf,
+}
+
+impl ExecutorRunner {
+    /// Persist a signed job receipt. A failure here is a server error: the
+    /// job ran but left no signed proof of work, so it can never settle.
+    fn persist_receipt(&self, job_id: &str, metering: &JobMetering) -> Result<(), String> {
+        let receipt = JobReceipt {
+            schema_ver: JOB_RECEIPT_SCHEMA_VER,
+            node_id: self.node_id.clone(),
+            payout_id: self.payout_id.clone(),
+            metering: metering.clone(),
+        };
+        let signed = sign_job_receipt(&receipt, &self.signing_key);
+        let json = serde_json::to_string(&signed).map_err(|e| format!("serialize receipt: {e}"))?;
+        let path = self.receipts_dir.join(format!("{job_id}.json"));
+        fs::write(&path, json).map_err(|e| format!("write {path:?}: {e}"))
+    }
 }
 
 impl JobRunner for ExecutorRunner {
@@ -155,12 +206,15 @@ impl JobRunner for ExecutorRunner {
             ExecutorError::Admission(why) => JobRunError::bad_request(why),
             other => JobRunError::server(other.to_string()),
         })?;
+        self.persist_receipt(&spec.job_id, &metering)
+            .map_err(JobRunError::server)?;
         serde_json::to_string(&serde_json::json!({
             "status": "accepted",
             "job_id": spec.job_id,
             "node_id": self.node_id,
             "backend": backend_tag(&metering),
             "metering": metering,
+            "receipt": "signed",
         }))
         .map_err(|e| JobRunError::server(format!("serialize result: {e}")))
     }
@@ -189,7 +243,43 @@ fn main() {
         process::exit(1);
     });
 
-    let runner = args.backend.build(&offer.body.node_id);
+    // The signing identity must match the advertised offer: receipts are
+    // only meaningful if the node that signed them is the node the buyer
+    // contracted with.
+    let signing_key = load_node_key(Path::new(&args.key_path)).unwrap_or_else(|e| {
+        eprintln!("failed to load identity key {}: {e}", args.key_path);
+        process::exit(1);
+    });
+    let node_id = derive_node_id(&signing_key.verifying_key().to_bytes());
+    if node_id != offer.body.node_id {
+        eprintln!(
+            "identity key node_id {node_id} does not match the offer's node_id {}; \
+             refusing to start",
+            offer.body.node_id
+        );
+        process::exit(1);
+    }
+
+    let receipts_dir = PathBuf::from(&args.state_dir).join("job-receipts");
+    fs::create_dir_all(&receipts_dir).unwrap_or_else(|e| {
+        eprintln!("failed to create {}: {e}", receipts_dir.display());
+        process::exit(1);
+    });
+
+    // Free offers have no seller payout — the receipt carries an empty
+    // payout_id (free jobs never settle, so nothing is credited against it).
+    let payout_id = match &offer.body.price {
+        vtessera_offer::PriceQuote::Free => String::new(),
+        vtessera_offer::PriceQuote::Paid { payout_id, .. } => payout_id.clone(),
+    };
+
+    let identity = NodeIdentity {
+        signing_key,
+        node_id: node_id.clone(),
+        payout_id,
+        receipts_dir,
+    };
+    let runner = args.backend.build(&identity);
 
     let state = NodeState {
         offer,
