@@ -1,10 +1,10 @@
 # Vtessera
 
-**AI-agent compute for the HNT ecosystem.** An opt-in layer for GNU/Linux
+**AI-agent compute settled in EURC/USDC.** An opt-in layer for GNU/Linux
 machine owners to rent out CPU and GPU capacity to AI workloads, with
-sellers settling in **HNT** and buyers (AI agents) paying in **EURC or
-USDC**. There is **no Vtessera token** — the protocol is technology that
-plugs into the existing Helium / HNT economy.
+sellers settling in the **same stablecoin the buyer pays** — **EURC or
+USDC** — plus a flat SOL protocol fee. There is **no Vtessera token** —
+the protocol is technology, not a token.
 
 > **Status.** v0 (`vtesserad`) is a read-only metering daemon: it samples
 > `/proc`, writes signed Ed25519 receipts to a state directory, opens no
@@ -18,7 +18,8 @@ plugs into the existing Helium / HNT economy.
 ## What Vtessera is
 
 - **Technology, not a token.** No mint, no reserve, no DAO, no treasury,
-  no custodian. Sellers earn HNT directly through on-chain settlement.
+  no custodian. Sellers earn the stablecoin the buyer paid, directly
+  through on-chain settlement.
 - **Agent-native.** The buyer is software. Discovery, contracting, and
   payment happen machine-to-machine — no signups, no API keys, no
   dashboards. Sellers advertise their machine to other AIs through
@@ -30,9 +31,9 @@ plugs into the existing Helium / HNT economy.
   config.
 - **Non-custodial settlement.** When a job is paid, buyer funds enter a
   program-owned escrow PDA on Solana. They leave only by on-chain rules:
-  the seller's earned slice is swapped to HNT (Jupiter, Pyth-guarded) and
-  paid out; the unearned slice is refunded to the buyer in the original
-  stablecoin. **No human ever holds the funds.**
+  the seller's earned slice is paid out in the same stablecoin mint; the
+  unearned slice is refunded to the buyer in the original stablecoin.
+  **No human ever holds the funds.**
 
 ## How a job flows
 
@@ -45,11 +46,11 @@ agent contracts node  ──▶  job contract; price OR free
 
 paid path on confirmation:
    buyer EURC/USDC  ─▶  escrow PDA (program-owned, no human withdraw)
-   flat fee         ─▶  protocol fee address (DRAFT, see below)
+   flat fee         ─▶  protocol fee wallet (100,000 lamports SOL)
    job runs         ─▶  per-job signed receipts (Ed25519, vtesserad)
    settlement       ─▶  completion fraction f ∈ [0, 1]
    on finalize:
-      f × price     ─▶  swap to HNT (Jupiter / Pyth guard) → burn slice → SELLER (HNT)
+      f × price     ─▶  SELLER (same stablecoin mint — no swap)
       (1−f) × price ─▶  refund BUYER in original stablecoin
 ```
 
@@ -89,23 +90,26 @@ pin the Solana SDK 1.18.x toolchain, whose crypto dep tree conflicts with
 the host crates' newer ed25519-dalek 2. Each builds standalone with its own
 `Cargo.lock` (see the file headers).
 
-## Where Vtessera fits in the HNT ecosystem
+## Where Vtessera fits on Solana
 
-Helium's HNT is the protocol's settlement asset. Every **paid** Vtessera job
-results in an on-market HNT buy (Jupiter swap from the seller's earned
-stablecoin) and a small burn, then HNT to the seller. Free jobs don't touch
-HNT, an oracle, or any chain. The protocol consumes the existing HNT mint,
-on-chain Pyth feeds, and Jupiter routing — it adds an escrow program and a
-discovery layer; nothing else.
+Vtessera is **technology, not a token**: it settles directly in the
+stablecoins buyers already hold. Every **paid** Vtessera job escrows the
+buyer's EURC/USDC and pays the seller the earned slice in the **same
+stablecoin mint** — no swap, no oracle, no conversion. A flat SOL
+protocol fee (100,000 lamports to
+`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`) funds protocol
+infrastructure. Free jobs don't touch a chain. The protocol adds an
+escrow program and a discovery layer; nothing else.
 
 ## Currencies
 
 - **Buyer pays:** EURC (default — ECB-anchored price stability) or USDC.
-- **Seller earns:** HNT.
-- **Protocol fee:** flat SOL fee. **DRAFT** — the wallet address and the
-  amount are still subject to change before mainnet (the devnet escrow
-  currently settles with a pro-rata stub, no fee, and no HNT swap yet).
-  See `ROADMAP.md` §0 for the current draft values.
+- **Seller earns:** the same EURC/USDC the buyer paid, in the same mint.
+- **Protocol fee:** flat SOL fee of 100,000 lamports (0.0001 SOL) to
+  `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`, charged on
+  `pay_for_compute`, `finalize_pro_rata`, and `cancel_before_start`,
+  stored in `Config` at `init_config` (immutable after). See `ROADMAP.md`
+  §0.
 
 ## Prerequisites (v0 daemon)
 
@@ -239,7 +243,7 @@ the node's wired executor (`--backend noop-cpu` by default, or
 payment verifier lands (Module 4) — so the demo finalizes the split
 without running the job, proving the escrow money path end to end.
 `crates/devnet-demo` is the lower-level variant that exercises
-`pay_for_compute` → `finalize_pro_rata_stub` directly.
+`pay_for_compute` → `finalize_pro_rata` directly.
 
 ## Settlement service (Module 3)
 
@@ -352,14 +356,15 @@ See `packaging/vtessera.toml.example` for all options. Required fields:
 `sample_interval_secs`, `state_dir`, `key_path`, `payout_id`.
 
 `payout_id` is the seller's Solana base58 Ed25519 address — the wallet
-that will receive HNT once the settlement and escrow modules are live.
-The daemon refuses to start with an empty or malformed value.
+that will receive the stablecoin payout once the settlement and escrow
+modules are live. The daemon refuses to start with an empty or malformed
+value.
 
 ## Design
 
 - **`ROADMAP.md`** — Modules 0–5, build order, and milestones for the
-  full HNT/AI-agent stack. **Start here** if you're trying to understand
-  where Vtessera is going.
+  full Solana stablecoin / AI-agent stack. **Start here** if you're
+  trying to understand where Vtessera is going.
 - **`MAINNET-CHECKLIST.md`** — Per-step checklist of what must hold
   before the escrow program can be deployed to Solana mainnet. The
   devnet program is live; mainnet is intentionally deferred behind

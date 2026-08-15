@@ -90,7 +90,7 @@ Price conversion: `price_per_cpu_hour` (human) →
 - Execution backends upstream are stubs (`/jobs` returns 202 "accepted");
   this ships metering + offer/discovery/x402 negotiation. Running third-party
   workloads inside the sandbox is a later module.
-- Escrow program deployment, Jupiter swap, HNT payout wiring are unchanged
+- Escrow program deployment and stablecoin payout wiring are unchanged
   from upstream.
 
 ## Out of scope (unchanged upstream behavior)

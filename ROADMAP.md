@@ -1,8 +1,8 @@
-# Vtessera → AI Compute for the HNT Ecosystem — Roadmap
+# Vtessera → AI Compute for the Solana Stablecoin Ecosystem — Roadmap
 
 Vtessera is **technology, not a token**: an opt-in layer that lets machine
-owners rent out CPU and GPU capacity to AI workloads. It plugs into the
-existing Helium / HNT ecosystem rather than launching a token of its own.
+owners rent out CPU and GPU capacity to AI workloads. It settles on Solana
+in stablecoins rather than launching a token of its own.
 
 **Who the buyer is.** Primarily **AI agents** — software spinning up
 agents that need compute and transact for it autonomously,
@@ -20,12 +20,12 @@ it expands the v0 daemon's attack surface.
 access) is the immediate priority. The money layer (Module 4) is smaller
 and comes after compute works.
 
-> **Fee constants in this document are DRAFT** — both the wallet address
-> and the per-transaction amount. Nothing is finalised until the escrow
-> program is deployed and the full flow has been exercised end-to-end on
-> devnet. Where the prior planning prose names a specific address or
-> lamport count, treat it as a placeholder that must be confirmed before
-> any mainnet activity.
+> **Fee.** The canonical fee is a flat **0.0001 SOL** (100,000 lamports)
+> per agent↔node transaction to wallet
+> **`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`**, stored in `Config`
+> at `init_config` and immutable after deploy. It is charged on
+> `pay_for_compute`, `finalize_pro_rata`, and `cancel_before_start` — even
+> when a contract never completes.
 
 ---
 
@@ -36,8 +36,8 @@ and comes after compute works.
 | 1 | **Compute execution + accelerators (CPU first, then GPU)** | Makes the box usable for AI | **Now — the focus** |
 | 2 | Coordination / dispatch (MCP offer + x402 endpoint) | How jobs find a box, agree a contract, get scheduled | After 1 |
 | 3 | Settlement + work attestation | Signed receipts → trustworthy "fraction of work done" | After 1 |
-| 0 | Stablecoin ↔ HNT swap + flat protocol fee | Settlement plumbing | Resolves before 4 |
-| 4 | Payment + non-custodial escrow (Anchor program) | Quote EURC/USDC → escrow → pro-rata release in HNT / refund | After 1–3 |
+| 0 | Flat protocol fee (per-transaction SOL) | Settlement plumbing | Resolves before 4 |
+| 4 | Payment + non-custodial escrow (Anchor program) | Quote EURC/USDC → escrow → pro-rata release in EURC/USDC / refund | After 1–3 |
 | 5 | Hardening, ops, spool rotation | Safe to run unattended at scale | Before launch |
 
 Dependency chain: **1 → 3 → 4**. There is **no minted token, no reserve,
@@ -47,24 +47,24 @@ payment/escrow program.
 
 ---
 
-## 0. Stablecoin → HNT swap and the flat protocol fee
+## 0. The flat protocol fee
 
 Runs in parallel with Module 1; resolves before Module 4.
 
-- **The swap.** The escrow program converts the seller's earned
-  stablecoin slice to HNT atomically on release via a Jupiter CPI,
-  guarded by Pyth (HNT/USD plus EUR/USD when the buyer paid in EURC).
-  Revert on stale feed or excessive deviation, blocking sandwich/MEV.
 - **The flat per-transaction fee.** Charged once per *job/session*
-  (never per micro-payment — see Module 4e). Refunds do not add a second
-  fee.
+  (never per micro-payment — see Module 4e), and on every agent↔node
+  transaction even when a contract never completes — it funds protocol
+  infrastructure. It is charged on `pay_for_compute` (buyer),
+  `finalize_pro_rata` (settlement authority), and `cancel_before_start`
+  (buyer), and is skipped when `fee_lamports == 0`. Refunds do not add a
+  second fee.
+- **No swap, no oracle.** The escrow pays the seller directly in the
+  same stablecoin the buyer deposited; the fee is the only thing this
+  module adds on top of the escrow program.
 
-> **DRAFT.** The current planning values are a flat **0.0001 SOL** sent
-> to wallet address **`9iBQEn9yMbKVhJKEpMpPByS6pjydPmQDGaznMaCvGkzD`**.
-> These are not final. Both will be confirmed when the escrow program is
-> deployed and the full flow is verified on devnet. Any code that
-> references these values must surface them as configuration and tag
-> them as draft, never as production constants.
+The canonical fee is a flat **0.0001 SOL** (100,000 lamports) sent to
+wallet address **`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`**,
+stored in `Config` at `init_config` and immutable after deploy.
 
 The **forkit** escrow contract at
 <https://github.com/douglasdemaio/forkit> is the recommended starting
@@ -195,10 +195,10 @@ endpoint simply **serves the job directly (HTTP 200), never returning
 free/paid choice is one flag in the seller's config; nothing else
 changes.
 
-> x402 typically settles buyer→server in **stablecoin**. That's the
-> *buyer* leg only — the protocol still swaps the seller's earned
-> stablecoin to **HNT** (Module 4). x402 handles "agent pays
-> stablecoin," and Module 4 handles "seller earns HNT."
+> x402 typically settles buyer→server in **stablecoin**. That's the whole
+> money path: the seller is paid in the **same stablecoin the buyer
+> paid** (Module 4). x402 handles "agent pays stablecoin," and Module 4
+> handles "seller earns that stablecoin."
 
 ### 2c. The job contract + lifecycle
 
@@ -255,8 +255,8 @@ verification layer remains follow-up.
 ## 4. Payment + non-custodial escrow  *(paid jobs only)*
 
 This module applies **only when the seller charges.** If the seller's
-offer is `free` (Module 2b), none of this runs — no escrow, no swap, no
-burn, no fee; the job just executes.
+offer is `free` (Module 2b), none of this runs — no escrow, no fee; the
+job just executes.
 
 **Workspace home:** `programs/vtessera-escrow` (one Anchor program;
 excluded from the host workspace so the BPF toolchain isn't required
@@ -264,9 +264,9 @@ for a plain `cargo build`).
 
 For paid jobs, the buyer's stablecoin enters a **program-owned escrow
 PDA** and leaves only by on-chain rules. **No person — not the seller,
-not the operator, not you — can withdraw it.** Conversion to HNT
-happens at release, only on the portion the seller earns; the rest is
-refunded to the buyer.
+not the operator, not you — can withdraw it.** The seller's earned slice
+is paid directly in the same stablecoin mint the buyer deposited; the
+rest is refunded to the buyer.
 
 Two payment shapes, pick per job:
 
@@ -287,12 +287,12 @@ A single `pay_for_compute` instruction, atomically:
 
 1. Buyer deposits the contract price in **EURC (default) or USDC** into
    the **escrow PDA**.
-2. **Flat fee:** transfer `fee_lamports` to the protocol fee address via
-   `SystemProgram`. The payer already holds SOL for gas, so no new
+2. **Flat fee:** transfer `config.fee_lamports` to `config.fee_wallet`
+   via `SystemProgram`. The payer already holds SOL for gas, so no new
    asset to source.
 
-Both the fee wallet and the fee amount are **DRAFT** (see §0). They
-land in code as configuration values, not hard-coded constants.
+The fee wallet and amount are stored in `Config` at `init_config` (see
+§0) — immutable on-chain configuration, not hard-coded constants.
 
 That's it at payment time — the principal is now in escrow, held by
 program logic alone.
@@ -303,123 +303,113 @@ When the job finalizes, settlement (Module 3) supplies the completion
 fraction **f**. The program splits the escrowed stablecoin **strictly
 by f**:
 
-- **Seller's share = f × price.** Swapped to HNT (Jupiter,
-  Pyth-guarded). `burn_bps` is **burned** (the homage to HNT), and the
-  remainder is paid to the **seller in HNT**.
+- **Seller's share = f × price**, paid directly to the seller's ATA in
+  the contract's stablecoin mint — no swap, no oracle, no conversion.
 - **Buyer's refund = (1 − f) × price**, returned to the buyer **in the
-  original stablecoin** (no swap, so the buyer bears no HNT price risk
+  original stablecoin** (the same mint, so the buyer bears no price risk
   on unused funds).
 
 Worked examples on a job priced at 100 EURC:
 
-- **f = 1.0 (complete):** 100 EURC → swapped to HNT, burn slice
-  removed, rest to seller. No refund.
-- **f = 0.5 (half done):** 50 EURC → HNT (burn + seller); **50 EURC
-  refunded to the buyer**.
+- **f = 1.0 (complete):** 100 EURC → seller, in EURC. No refund.
+- **f = 0.5 (half done):** 50 EURC → seller; **50 EURC refunded to the
+  buyer**.
 - **f = 0.0 (nothing delivered):** full 100 EURC refunded to the buyer;
   seller paid nothing.
 
-Only the **earned** stablecoin is ever converted, and conversion
-happens **at release**, never held-then-converted by a human. For long
-jobs, the contract (Module 2) can define milestones so escrow streams
-partial releases as each fraction completes, rather than one final
-split.
+The escrow never converts assets: the seller earns exactly what the
+buyer paid, in the same mint, and the release happens **at finalize**,
+never held-then-converted by a human. For long jobs, the contract
+(Module 2) can define milestones so escrow streams partial releases as
+each fraction completes, rather than one final split.
 
-### 4c. Currencies, swap, and price safety
+### 4c. Currencies and price safety
 
-- **Sellers are paid in HNT** — their machine should earn the ecosystem
-  token, and every job is a real on-market **HNT buy + burn**, so
-  compute demand becomes recurring demand for HNT.
-- **Buyers deal only in stablecoin** (EURC default for ECB-anchored
-  price stability; USDC optional). They never need to understand or
-  hold HNT.
-- **Swap:** the seller's earned slice goes stablecoin→HNT via a
-  **Jupiter** CPI. The **DEX is the price**, **Pyth is the guard**
-  (HNT/USD, plus EUR/USD for EURC): **revert if the executed price
-  deviates beyond tolerance or a feed is stale**, blocking sandwich/MEV.
-- **Liquidity:** large/bursty volume moves the HNT pool; consider
-  batching/TWAP or an OTC market-maker, and always cap slippage with a
-  revert. The **seller bears HNT price/slippage risk** on their share
-  (consistent with wanting HNT exposure) — state this in the contract.
+- **Sellers are paid in the same stablecoin the buyer paid** — EURC
+  (default for ECB-anchored price stability) or USDC, whichever the
+  node's signed offer puts on it. No Vtessera token, no swap.
+- **Buyers deal only in stablecoin.** They never need to understand or
+  hold anything else.
+- **No oracle, no slippage.** Because the escrow pays out in the same
+  mint it holds, there is no conversion step and no price risk for
+  either side — nothing to guard against sandwich/MEV.
+- **Liquidity:** none needed. The seller's payout is the buyer's
+  deposit, mint-for-mint.
 
 ### 4d. Design principle — neutral settlement
 
-The protocol settles in **HNT**, and the conversion to HNT is the
-neutral balance point of the system. The reasoning:
+The protocol settles in the **same stablecoin the buyer paid**
+(EURC/USDC). The reasoning:
 
+- **No mintable protocol token.** There is no Vtessera token to price,
+  buy, or burn, and no external-market dependency — the payout model
+  isn't hostage to any third-party asset.
 - Stablecoins at the edges (EURC/USDC) carry their **issuer's freeze**
   capability — Circle can freeze a USDC/EURC address. That risk sits
   with the individual buyer or seller and is **their** responsibility,
   not the protocol's. The protocol takes no view on it.
-- The protocol's own reward rail is HNT, a decentralized asset that —
-  **with its mint freeze authority revoked** — no single issuer can
-  freeze at will. (Verify this on-chain; if HNT's freeze authority is
-  not null, this property doesn't hold.)
-- The principle is **credible neutrality**: accountability for misuse
+- The protocol is **single-operator and neutral**: it adds an escrow
+  program and a flat SOL fee, nothing else. Accountability for misuse
   should attach to the **actors** who misuse a service, not to neutral
   settlement code.
 
 **Condition for this to hold:** the protection tracks **immutability**.
 Autonomous code no one controls sits on the neutral side; a live
 upgrade key or an operator exercising discretion makes that operator
-the reachable actor. Make the settlement program **immutable** (or its
-upgrade authority a public multisig/timelock) — the same step that
-makes "no one holds the funds" true also keeps the code on the
-neutral-infrastructure side of the line.
+the reachable actor. Make the settlement program **immutable** before
+mainnet, and keep the settlement authority — the operator's key, pinned
+in `Config` at deploy — the only signer that can trigger
+`finalize_pro_rata`.
 
 Honesty about limits: censorship resistance is never absolute.
 Network-level (validator/relayer) and front-end/RPC vectors remain, and
 the stablecoin edges keep their issuers' freeze powers. The claim is
-narrow and accurate — **the settlement asset isn't subject to a single
-issuer's freeze** — not that the system is unfreezable end to end.
+narrow and accurate — **the protocol holds no funds and never converts
+assets** — not that the system is unfreezable end to end.
 
-### 4e. The fee (DRAFT)
+### 4e. The fee
 
-A **flat per-transaction** protocol fee. See §0 for the draft values.
-Properties the fee model should preserve:
+A **flat per-transaction** protocol fee, set once in `Config` at
+`init_config` (see §0): **100,000 lamports (0.0001 SOL)** to wallet
+**`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`**. Properties of the
+fee model:
 
 - Flat ⇒ scales with transaction **count** (egalitarian across job
-  sizes, reads like network gas). Charged once at payment; refunds
-  don't add a second fee.
-- **Denomination choice:** SOL is simplest but its fiat value floats.
-  For a *fixed* sub-cent value, set the fee in stablecoin. To scale
-  with job *value* instead of count, use a small `fee_bps`. The trade-
-  off lands when the escrow program is finalised.
-- Voluntary **donations** can go to the same address on top of the fee;
-  keep any UI tip clearly optional so it stays distinct from the
-  mandatory fee.
+  sizes, reads like network gas).
+- Charged on `pay_for_compute` (buyer), `finalize_pro_rata`
+  (settlement authority), and `cancel_before_start` (buyer) — every
+  agent↔node transaction funds protocol infrastructure, even when a
+  contract never completes. Refunds don't add a second fee.
+- `fee_lamports == 0` disables the fee (no-op transfer skipped).
 - **Micropayment caveat:** a flat SOL fee is fine per job, but for
   **x402 pay-as-you-go** where each increment may be sub-cent, a flat
-  per-payment fee can exceed the payment itself. For that path, charge
-  the fee **once per job/session** (not per micro-payment) or switch to
-  a small `fee_bps`. Free jobs incur **no fee** (no transaction).
+  per-payment fee can exceed the payment itself. For that path, keep
+  the fee per job/session (not per micro-payment). Free jobs incur
+  **no fee** (no transaction).
 
 ### 4f. How it wires together
 
 ```
 buyer ──EURC/USDC──▶ escrow PDA  (program-owned; no human can withdraw)
-      ──flat fee ───▶ protocol fee wallet (DRAFT)
+      ──flat fee ───▶ protocol fee wallet (100,000 lamports SOL)
 
            job runs ─▶ signed receipts ─▶ settlement (Module 3) ─▶ completion fraction f
 
 on finalize, escrow splits by f:
-   f × price       ─▶ swap (Jupiter, Pyth-guarded) ─▶ burn_bps ─▶ SPL burn
-                                                  └─ remainder ─▶ SELLER (HNT)
+   f × price       ─▶ SELLER (same stablecoin mint — no swap, no burn)
    (1 − f) × price ─▶ refund ─▶ BUYER (original stablecoin)
 ```
 
 Net: **buyer pays stablecoin into escrow → work is attested → earned
-part is swapped to HNT (minus burn) for the seller, unearned part
+part is paid to the seller in the same stablecoin, unearned part
 refunded to the buyer — all by program logic, no custodian.**
 
-**One program** (escrow + swap CPI + fee transfer). Everything else —
-HNT mint, Pyth feeds, Jupiter, SPL burn — already exists on-chain. No
-governance, no registry, no token mint.
+**One program** (escrow + fee transfer). No swap, no oracle, no token
+mint, no governance, no registry.
 
 > **Trust caveat:** "no one holds the funds" only holds if the program
 > rules can't be quietly changed. For real trustlessness, make the
-> program **immutable** (or its upgrade authority a public
-> multisig/timelock) before mainnet — otherwise the upgrade key is an
+> program **immutable** before mainnet — otherwise the upgrade key is an
 > implicit custodian.
 
 ---
@@ -461,12 +451,10 @@ demonstration. Sample transactions on devnet:
 
 ### What's stubbed vs production
 
-The devnet program ships with the **STUB** payout path (ROADMAP §0):
-the earned slice is paid to the seller in the same stablecoin the buyer
-deposited. The production design swaps to HNT via Jupiter (Pyth-guarded)
-and burns `DRAFT_BURN_BPS`. The IX signature, the buyer-side semantics,
-the pro-rata math, and the refund path are identical between stub and
-production; only the seller's leg changes when the swap goes in.
+Nothing — the devnet program ships the **production** path. The earned
+slice is paid to the seller in the same stablecoin the buyer deposited;
+there is no swap. The old devnet stub is deleted, and the devnet
+redeploy of this build is pending.
 
 ## Mainnet criteria (DEFERRED — do not deploy until met)
 
@@ -475,31 +463,28 @@ below is expanded into concrete numbered steps in
 [`MAINNET-CHECKLIST.md`](MAINNET-CHECKLIST.md) — that file is the
 authoritative tracker (this section is the summary).
 
-Before any of the DRAFT fee values harden and the program is deployed
-to mainnet-beta, **all** of the following must hold:
+Before the program is deployed to mainnet-beta, **all** of the
+following must hold:
 
-- [ ] **Jupiter swap + Pyth guard wired and tested.** The current stub
-  pays the seller in stablecoin; production pays in HNT. Going to
-  mainnet with the stub silently breaks the "seller earns HNT" promise.
-- [ ] **Pyth feed addresses pinned** for HNT/USD and EUR/USD. Stale-
-  feed and deviation guards exercised in adversarial tests.
-- [ ] **Burn slice exercised** end-to-end on devnet with a real HNT
-  mint (or its devnet stand-in) so the SPL burn CPI is known to
-  succeed against the same account graph.
-- [ ] **Settlement authority is not a single keypair.** The
-  `settlement_authority` signer in `finalize_pro_rata` must be a
-  Squads / Realms multisig or a timelocked PDA before mainnet.
-- [ ] **Upgrade authority moved to a public multisig/timelock.** A
-  single dev keypair as upgrade authority is an implicit custodian
-  (ROADMAP §4d). Either set the upgrade authority to a multisig or
-  make the program immutable (`solana program set-upgrade-authority
-  --final`).
-- [ ] **Fee constants confirmed.** `DRAFT_FEE_LAMPORTS`,
-  `DRAFT_FEE_WALLET_TODO`, `DRAFT_MAX_SLIPPAGE_BPS`, `DRAFT_BURN_BPS`
-  replaced with finalised values that have been reviewed publicly.
+- [ ] **Direct stablecoin settlement implemented and tested.** The
+  program pays the seller in the same stablecoin mint the buyer
+  deposited — no swap, no oracle, no burn. The production path is
+  exercised in unit and adversarial tests.
+- [ ] **Settlement authority pinned at deploy.** The operator's key, set
+  in `Config` by `init_config`, signs `finalize_pro_rata` so no
+  arbitrary caller can finalize an escrow with a fabricated `f`.
+  `Config` is immutable after `init_config` — no governance
+  instructions.
+- [ ] **Fee config confirmed.** `fee_wallet` =
+  `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh` and `fee_lamports` =
+  100,000, set at `init_config` and reviewed publicly.
+- [ ] **Upgrade authority handled.** A single dev keypair as upgrade
+  authority is an implicit custodian (ROADMAP §4d). Either set the
+  upgrade authority to a multisig or make the program immutable
+  (`solana program set-upgrade-authority --final`).
 - [ ] **Third-party audit** of the escrow program. The program is
-  small (~300 LoC) but touches custody and an external swap CPI —
-  reviewable in an afternoon, but ship the review.
+  small (~300 LoC) but touches custody — reviewable in an afternoon,
+  but ship the review.
 - [ ] **Reproducible BPF build** with documented `cargo build-sbf`
   inputs and `sha256` of the .so committed.
 
@@ -529,7 +514,7 @@ intervention) is asymmetric versus the benefit of an earlier demo.
    offer-index wiring in the live demo flow.
 4. **M4 — Paid go-live:** Module 0 cleared; x402 payment + escrow
    program live — agent pays EURC/USDC (escrow for committed jobs,
-   pay-as-you-go for short ones) + fee, pro-rata release (earned → HNT
-   via Jupiter, minus burn) and refund (unearned → buyer in stablecoin),
-   program immutable or multisig-upgrade. Real, non-custodial,
+   pay-as-you-go for short ones) + flat SOL fee, pro-rata release
+   (earned → seller in the same stablecoin) and refund (unearned →
+   buyer in stablecoin), program immutable. Real, non-custodial,
    agent-native marketplace.
