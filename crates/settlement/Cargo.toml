@@ -10,6 +10,10 @@ repository.workspace = true
 name = "vtessera_settlement"
 path = "src/lib.rs"
 
+[[bin]]
+name = "vtessera-settle"
+path = "src/bin/vtessera_settle.rs"
+
 [dependencies]
 # Settlement implements the receipt spec (BUILD.md §4) independently of
 # the vtesserad binary so the verifier can be deployed without dragging
@@ -17,3 +21,10 @@ path = "src/lib.rs"
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+# Module 1 (ROADMAP.md §1): the per-job metering types a signed job
+# receipt wraps. Settlement consumes executor output, so this is a
+# one-way dependency (the executor never looks back here).
+vtessera-executor = { path = "../executor" }
+# Receipts and settlements are the spool wire format (JSON).
+serde = { workspace = true }
+serde_json = { workspace = true }

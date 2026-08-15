@@ -37,14 +37,20 @@ else
     echo "no node at $NODE_URL — starting a local one on 127.0.0.1:$PORT ..."
     cd "$ROOT"
     OFFER_FILE="$(mktemp)"
-    cargo run -q -p vtessera-node-api --locked --example gen_offer -- "$OFFER_MODE" > "$OFFER_FILE"
+    KEY_FILE="$(mktemp)"
+    STATE_DIR="$(mktemp -d)"
+    cargo run -q -p vtessera-node-api --locked --example gen_offer \
+        -- "$OFFER_MODE" --key-out "$KEY_FILE" > "$OFFER_FILE"
+    chmod 600 "$KEY_FILE"
     cargo build -q -p vtessera-node-api --locked --bin vtessera-node --features serve
     "$ROOT/target/debug/vtessera-node" \
         --bind "127.0.0.1:$PORT" \
         --offer "$OFFER_FILE" \
         --escrow "$ESCROW" \
         --network solana-devnet \
-        --backend "$BACKEND" >/dev/null 2>&1 &
+        --backend "$BACKEND" \
+        --key "$KEY_FILE" \
+        --state-dir "$STATE_DIR" >/dev/null 2>&1 &
     NODE_PID=$!
     started_node=1
     for _ in $(seq 1 30); do

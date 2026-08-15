@@ -41,10 +41,16 @@ In:
 Out (follow-ups, not this iteration):
 
 - Window-receipt ↔ job-window cross-check.
-- GUI spawn args for `vtessera-node --key/--state-dir`.
 - Database persistence (JSON spool is the non-TEE first step).
 - `devnet-demo` re-linking to the host crates (blocked by the ed25519-dalek 2 /
   solana-sdk 1.18 curve25519 conflict; stays mirrored).
+
+> **Amendment (adopted in the plan):** "GUI spawn args" moved from Out to a
+> minimal in-scope pass-through, because `--key`/`--state-dir` are *required*
+> node args and would otherwise break the GUI's spawn. The GUI already exposes
+> `settings::key_path()`/`settings::state_dir()`; the fix is two `StartOptions`
+> fields + two `--arg`s + two call-site values. Richer GUI handling (settle
+> status UI, offer-index wiring) remains follow-up.
 - TEE attestation (SEV-SNP / TDX).
 
 ## Architecture

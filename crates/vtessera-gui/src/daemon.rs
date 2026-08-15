@@ -41,6 +41,12 @@ pub struct StartOptions<'a> {
     /// `vtessera-node --backend`: `"noop-cpu"` (synthetic metering) or
     /// `"local-cpu"` (runs job commands on the host, not isolated).
     pub backend: &'a str,
+    /// Node identity key (`vtessera-node --key`); the node signs per-job
+    /// metering receipts with it (Module 3).
+    pub key_path: PathBuf,
+    /// Where the node writes signed job receipts (`vtessera-node
+    /// --state-dir`, under `job-receipts/`).
+    pub state_dir: PathBuf,
 }
 
 /// Directory holding the built binaries, when set (local runs). In the
@@ -121,7 +127,9 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
             .args(["--offer", opts.offer.to_str().unwrap_or_default()])
             .args(["--escrow", opts.escrow])
             .args(["--network", opts.network])
-            .args(["--backend", opts.backend]);
+            .args(["--backend", opts.backend])
+            .args(["--key", opts.key_path.to_str().unwrap_or_default()])
+            .args(["--state-dir", opts.state_dir.to_str().unwrap_or_default()]);
         Some(
             node_cmd
                 .spawn()

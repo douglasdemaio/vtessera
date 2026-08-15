@@ -27,7 +27,7 @@ This document is an index. The authoritative design lives in:
 | `crates/node-api` | Module 2 — x402 / MCP HTTP surface (feature-gated) | shipped |
 | `crates/mini-http` | Module 2 — shared HTTP/1.1 server primitives | shipped |
 | `crates/offer-index` | Module 2a — central offer index (verify + serve) | shipped |
-| `crates/settlement` | Module 3 — receipt verification + `f` | skeleton |
+| `crates/settlement` | Module 3 — job receipts + `vtessera-settle` | shipped (non-TEE) |
 | `programs/vtessera-escrow` | Module 4 — Anchor escrow program | shipped (devnet) |
 
 Skeleton crates land with the types, traits, and tests that pin the
@@ -39,6 +39,20 @@ through the `JobRunner` hook in `crates/node-api`: the `serve`-gated
 `crates/executor` via `--backend` (`noop-cpu` default, `local-cpu` for
 unisolated host execution). On-chain payment verification is still
 unwired, so paid jobs return honest 501s until it lands.
+
+**Settlement flow (Module 3, non-TEE first):** after every job run,
+`vtessera-node` signs a per-job metering receipt with its Ed25519
+identity key (loaded via `--key`, its `node_id` must match the offer it
+advertises) and writes it to `<state-dir>/job-receipts/<job_id>.json`.
+The `vtessera-settle` service (watch loop, or `--once` for CI) sweeps a
+shared state dir: for each `contracts/<job_id>.json` it verifies the
+job's signed receipt (schema / pubkey / self-attesting node_id /
+signature — any failure is a permanent reject, never a partial credit),
+aggregates device-seconds via the agreed device class (a GPU contract
+credits GPU-seconds, never CPU-seconds), and writes
+`settlements/<job_id>.json` containing the completion fraction `f`.
+The escrow program (§4) consumes `f` to split the held stablecoin.
+TEE/attestation deployment is a follow-up, per the roadmap.
 
 ## Why HNT, not a Vtessera token
 

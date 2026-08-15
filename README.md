@@ -241,6 +241,37 @@ without running the job, proving the escrow money path end to end.
 `crates/devnet-demo` is the lower-level variant that exercises
 `pay_for_compute` → `finalize_pro_rata_stub` directly.
 
+## Settlement service (Module 3)
+
+After every job, `vtessera-node` signs a per-job metering receipt with
+its identity key and writes it to `<state-dir>/job-receipts/<job_id>.json`.
+The node takes `--key <path>` (the same raw 32-byte Ed25519 seed format
+`vtesserad` uses; mode 0600) and `--state-dir <dir>`; it refuses to start
+if the key's `node_id` doesn't match the offer it's advertising.
+
+`vtessera-settle` turns those signed receipts into completion fractions:
+
+```bash
+cargo build -p vtessera-settlement --locked --release
+
+# single sweep (exit 0; exit 1 if any job was permanently rejected)
+./target/release/vtessera-settle --state-dir /var/lib/vtessera/node --once
+
+# or leave it watching (default 60s interval)
+./target/release/vtessera-settle --state-dir /var/lib/vtessera/node
+```
+
+It scans `contracts/<job_id>.json`, verifies each job's signed receipt
+(any signature/schema/node_id failure is a permanent hard reject — no
+partial credit), aggregates device-seconds by the agreed device class, and
+writes `settlements/<job_id>.json` with the completion fraction `f`. A
+missing receipt is transient and retried next sweep. The escrow program
+(Module 4) uses `f` to split the buyer's stablecoin pro-rata.
+
+```bash
+scripts/settlement-demo.sh   # end-to-end: node → signed receipt → settle
+```
+
 ## Install as a systemd service
 
 The shipped unit is hardened (DynamicUser, ProtectSystem=strict, no

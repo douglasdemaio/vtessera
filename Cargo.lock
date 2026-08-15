@@ -1158,6 +1158,7 @@ dependencies = [
  "vtessera-executor",
  "vtessera-mini-http",
  "vtessera-offer",
+ "vtessera-settlement",
 ]
 
 [[package]]
@@ -1188,7 +1189,10 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "serde",
+ "serde_json",
  "sha2",
+ "vtessera-executor",
 ]
 
 [[package]]

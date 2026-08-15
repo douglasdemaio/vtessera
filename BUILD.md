@@ -214,6 +214,46 @@ crates carry their own dependency budgets — v0's tight surface
   loop: sample → on window boundary, build + sign + spool a receipt → sleep.
   Handle SIGTERM cleanly.
 
+### Job receipts (Module 3, `vtessera-node`)
+
+Per-job metering receipts are the Module 3 settlement input. They are
+**signed by `vtessera-node`** (not the v0 daemon) using the node's Ed25519
+identity key, and verified by `vtessera-settle` — the schema lives in
+`crates/settlement` (`JOB_RECEIPT_SCHEMA_VER = 2`).
+
+**Canonical bytes** for signing (all little-endian; the tag tables below
+must not be reordered without bumping the schema — they are pinned by
+`backend_tag_table_is_stable` / `device_tag_table_is_stable` /
+`exit_tag_table_is_stable`):
+
+```
+schema_ver                u16   (= 2)
+node_id_len               u16 + node_id bytes
+payout_id_len             u16 + payout_id bytes
+metering.job_id_len       u16 + job_id bytes
+metering.backend          u8    (tag table)
+metering.device           u8 kind + payload (tag table)
+metering.cpu_seconds      f64
+metering.peak_mem_kb      u64
+metering.gpu_seconds      f64
+metering.vram_gb_hours    f64
+metering.exit_status      u8 kind + optional i32 code (tag table)
+metering.elapsed_secs     u64
+```
+
+Backend tags: `0` NoopCpu, `1` LocalCpu, `2` KataCloudHypervisor,
+`3` CloudHypervisor, `4` QemuVfio.
+Device tags: `0` Cpu; `1` NvidiaGpu + `u16 len + model`; `2` NvidiaMig +
+`u16 len + parent_model` + `u16 len + profile`; `3` AmdGpu + `u16 len + model`.
+Exit tags: `0` Completed; `1` Failed + `i32 code`; `2` TimedOut; `3` Cancelled.
+
+On disk the receipt is JSON (`SignedJobReceipt` with hex `pubkey`/`sig`),
+written by the node to `<state-dir>/job-receipts/<job_id>.json`. `node_id`
+is self-attesting exactly as the v0 receipt (§4): hex of
+`SHA-256(pubkey)[..16]`. Settlement (`vtessera-settle`) verifies every
+receipt end-to-end before crediting any metering; a signature failure is a
+permanent hard reject, never a partial credit.
+
 ---
 
 ## 5. systemd unit (`vtesserad.service`) — required hardening
