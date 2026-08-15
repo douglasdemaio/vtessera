@@ -341,8 +341,12 @@ ATA-creation collisions; RPC failures mid-transaction.
         `pay`+`finalize`
       - Random seller pubkey
       - Run the flow; log result and any error
-- [ ] **6.2** Cron / systemd-timer it to fire every N minutes. Target
-      ~100 runs / week.
+- [x] **6.2** Cron / systemd-timer it to fire every N minutes. Target
+      ~100 runs / week. **Done:** `.github/workflows/soak-devnet.yml`
+      runs the soak hourly via a GitHub Actions scheduled workflow (fires
+      on `main` once merged; manual `workflow_dispatch` supported; payer
+      top-up via devnet airdrop; soak log uploaded as an artifact). The
+      payer keypair is stored in the `DEVNET_PAYER_KEYPAIR` repo secret.
 - [ ] **6.3** Vary specifically:
       - Concurrent jobs (2-3 in flight at once) to catch any
         non-serializable race

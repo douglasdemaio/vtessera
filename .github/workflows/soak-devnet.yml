@@ -1,0 +1,100 @@
+# Weekly-long devnet soak (MAINNET-CHECKLIST §6).
+#
+# Runs the soak runner (`crates/devnet-demo/src/bin/soak.rs`) hourly
+# against Solana devnet and fails the run on any unexpected error. The
+# goal: one week of continuous green before mainnet.
+#
+# Notes:
+# - Scheduled workflows only run on the default branch (`main`), so this
+#   takes effect once merged. Use `workflow_dispatch` to run it manually.
+# - The payer keypair MUST be the config's settlement authority (the
+#   deploy key `5vWdYSmc...`, which `init_config` pinned on devnet). It
+#   is a devnet-only key: devnet SOL is faucet money, so exposure is low
+#   stakes. Do NOT reuse a mainnet key here.
+# - The payer is topped up with a devnet airdrop when its balance drops
+#   below 2 SOL (airdrops are rate-limited; the run proceeds regardless).
+
+name: devnet-soak
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # hourly
+  workflow_dispatch:
+    inputs:
+      iters:
+        description: 'Iterations per run'
+        required: false
+        default: '100'
+      cancel_p:
+        description: 'Cancel probability [0-1]'
+        required: false
+        default: '0.2'
+
+concurrency:
+  group: devnet-soak
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.solana.com/v3.1.14/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Write payer keypair from secret
+        env:
+          DEVNET_PAYER_KEYPAIR: ${{ secrets.DEVNET_PAYER_KEYPAIR }}
+        run: |
+          test -n "$DEVNET_PAYER_KEYPAIR" || {
+            echo "::error::set the DEVNET_PAYER_KEYPAIR repository secret (devnet deploy key id.json)"
+            exit 1
+          }
+          mkdir -p "$HOME/.config/solana"
+          printf '%s' "$DEVNET_PAYER_KEYPAIR" > "$HOME/.config/solana/id.json"
+          chmod 600 "$HOME/.config/solana/id.json"
+
+      - name: Fund payer if low
+        run: |
+          solana config set --url devnet --keypair "$HOME/.config/solana/id.json" >/dev/null
+          BAL=$(solana balance | awk '{print $1}')
+          echo "payer balance: $BAL SOL"
+          LOW=$(python3 -c "import sys; print(1 if float('$BAL') < 2.0 else 0)")
+          if [ "$LOW" = "1" ]; then
+            solana airdrop 2 --url devnet || echo "airdrop rate-limited; continuing with existing balance"
+          fi
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            crates/devnet-demo/target
+          key: soak-${{ hashFiles('crates/devnet-demo/Cargo.lock') }}
+
+      - name: Build soak runner
+        working-directory: crates/devnet-demo
+        run: cargo build --release --locked --bin soak
+
+      - name: Run soak
+        working-directory: crates/devnet-demo
+        run: |
+          ITERS="${{ github.event.inputs.iters || '100' }}"
+          CANCEL_P="${{ github.event.inputs.cancel_p || '0.2' }}"
+          ./target/release/soak --iters "$ITERS" --cancel-p "$CANCEL_P" 2>&1 | tee soak.log
+
+      - name: Upload soak log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-log
+          path: crates/devnet-demo/soak.log
+          retention-days: 14
