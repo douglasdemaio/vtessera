@@ -1,0 +1,16 @@
+{
+  "name": "Vtessera Escrow",
+  "logo": "https://raw.githubusercontent.com/douglasdemaio/vtessera/main/logo.png",
+  "description": "On-chain escrow for direct stablecoin settlement of compute payments. Buyers pay sellers directly in the same stablecoin the buyer paid; a fixed SOL fee funds the fee wallet. No swap, burn, or governance.",
+  "project_url": "https://github.com/douglasdemaio/vtessera",
+  "contacts": [
+    "email:douglasdemaio@gmail.com",
+    "link:https://github.com/douglasdemaio/vtessera"
+  ],
+  "policy": "https://github.com/douglasdemaio/vtessera/security",
+  "preferred_languages": ["en"],
+  "source_code": "https://github.com/douglasdemaio/vtessera",
+  "source_revision": "9e67a68",
+  "auditors": [],
+  "version": "0.1.0"
+}

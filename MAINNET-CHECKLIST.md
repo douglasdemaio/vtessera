@@ -6,12 +6,15 @@
 > `ROADMAP.md`; this file is the per-step expansion with checkboxes.
 >
 > **Status today:** items 1, 2 done (incl. devnet redeploy + `init_config`);
-> 3 partially done (program side + devnet config live; upgrade-authority
-> path for mainnet still open). Devnet program at
+> 3 decided — **immutable (Option A)**, execution at mainnet deploy via
+> the §3.3 runbook; the devnet program stays upgradeable while the soak
+> (§6) and audit (§4) are open. Devnet program at
 > `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` is the only deployment
-> and now runs the stablecoin build. The devnet config PDA uses the
-> `vtessera_config_v2` seed with the throwaway CI soak key as settlement
-> authority, so no operator key is used in automation.
+> and now runs the stablecoin build; program security.txt is published on
+> devnet (`security.json`, metadata PDA
+> `42YbtUqT4w2u2rECYvL5daaaZM7ANkqCsqXG6sH8wvCg`). The devnet config PDA
+> uses the `vtessera_config_v2` seed with the throwaway CI soak key as
+> settlement authority, so no operator key is used in automation.
 
 ## How to read this file
 
@@ -189,16 +192,34 @@ after deploy.
       `45JFFH3PQKxRAZqu432h3gdkF48ZSLfZAxtSpjKxdz9V` is live with the
       throwaway CI soak key as authority, and the soak signed
       `finalize_pro_rata` with it).
-- [ ] **3.3** Handle the **upgrade authority** for mainnet:
-      - Option A — make the program **immutable**:
-        ```
-        solana program set-upgrade-authority 6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma --final
-        ```
-      - Option B — set the upgrade authority to a multisig / timelock
-        that outlives a single key (a laptop key as upgrade authority is
-        an implicit custodian; §1.5's redeploy needs it until then).
-- [ ] **3.4** Verify on-chain — `solana program show <PROGRAM_ID>`
-      reports the expected authority.
+- [x] **3.3** Handle the **upgrade authority** for mainnet.
+      **Decided (2026-08-15): Option A — immutable.** The program freezes
+      permanently with `--final`; exact sequence in the runbook below.
+      The devnet program stays upgradeable until the audit (§4) closes
+      so any findings can still be patched — the freeze happens only at
+      mainnet deploy.
+- [ ] **3.4** Verify on-chain **at mainnet deploy** — `solana program
+      show <MAINNET_PROGRAM_ID>` reports `Authority: None` (immutable)
+      after the freeze.
+
+### Mainnet freeze runbook (immutable, Option A)
+
+Order matters. Freeze **last**, once the program is deployed, configured,
+and a first small flow is verified end-to-end:
+
+1. Deploy the reproducible `.so` (§5) to mainnet:
+   `solana program deploy --program-id <MAINNET_PROGRAM_ID> <reproduced .so>`
+2. `init_config` with the mainnet settlement authority (Squads vault —
+   or the operator key if that's the call).
+3. Sanity-check: one small `pay_for_compute` + `finalize_pro_rata`.
+4. Freeze permanently:
+   `solana program set-upgrade-authority <MAINNET_PROGRAM_ID> --final`
+5. Verify (§3.4): `solana program show <MAINNET_PROGRAM_ID>` →
+   `Authority: None`.
+
+`--final` is **irreversible** — no rollback exists, and after step 4 the
+bytecode on-chain is the source of truth forever. Do not freeze the
+devnet program while the soak (§6) and audit (§4) are still open.
 
 **Who.**
 - **You:** the operator — hold the deploy key, run `init_config` on
