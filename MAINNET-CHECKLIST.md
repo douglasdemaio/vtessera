@@ -308,35 +308,43 @@ matches what's running. With it, no trust required.
 
 ### Steps
 
-- [ ] **5.1** Install `solana-verify`:
+- [x] **5.1** Install `solana-verify` — automated in CI, pinned to 0.5.1:
       ```
-      cargo install solana-verify
+      cargo install solana-verify --version 0.5.1 --locked
       ```
-- [ ] **5.2** From `programs/vtessera-escrow/`, run:
-      ```
-      solana-verify build
-      ```
-      Confirm the `.so` SHA-256 is reproducible across two clean
-      builds.
+- [ ] **5.2** The `.so` SHA-256 is reproducible across two clean builds.
+      Automated in `.github/workflows/reproducible-build.yml` (manual
+      dispatch, PRs touching `programs/`, and pushes to `main`) and in
+      the `release.yml` gate: two `solana-verify build` runs in the
+      pinned Docker image must produce byte-identical
+      `vtessera_escrow.so`, or the job fails. **Baseline SHA-256 to be
+      recorded from the first green run** and pasted here.
 - [ ] **5.3** Commit the SHA to
       `programs/vtessera-escrow/DEPLOYED_SHA256.txt` with the deploy
-      date, program ID, and the commit hash it corresponds to.
-- [ ] **5.4** Document the verification command in the README:
+      date, program ID, and the commit hash it corresponds to. (The CI
+      jobs already fail if a build ever drifts from this file.)
+- [x] **5.4** Verification command documented in
+      `programs/vtessera-escrow/README.md`:
       ```
       solana-verify verify-from-repo https://github.com/douglasdemaio/vtessera \
-        --program-id <MAINNET_PROGRAM_ID> --url mainnet-beta
+        --program-id <PROGRAM_ID> --url <devnet|mainnet-beta> \
+        --commit-hash <DEPLOYED_COMMIT> --library-name vtessera_escrow \
+        --mount-path programs --bpf
       ```
 - [ ] **5.5** Run the verify command yourself after mainnet deploy and
-      include the output in the release notes.
+      include the output in the release notes (template gate in
+      `packaging/release-notes-template.md`).
 
 **Who.** All me, except step 5.5 which you run.
 
 **Effort.** 2-4 hours, mostly fighting Docker.
 
-**Note.** GitHub Actions runners have Docker, so steps 5.1-5.2 can run as a
-CI job (two `solana-verify build` runs whose SHAs must match) instead of
-locally — say the word and it goes into `release.yml` next to the Flatpak
-build.
+**Note.** Steps 5.1-5.4 are now CI jobs — `.github/workflows/
+reproducible-build.yml` and the `reproducible-build` job in
+`.github/workflows/release.yml` (two clean `solana-verify build` runs
+whose `.so` SHAs must match, plus a check against
+`DEPLOYED_SHA256.txt` when present). The first green run records the
+baseline for 5.2.
 
 ---
 
