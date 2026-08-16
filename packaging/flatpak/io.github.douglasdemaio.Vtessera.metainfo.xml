@@ -89,6 +89,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.1" date="2026-08-16">
+      <description>
+        <p>First-run metering consent gate; separate off-by-default "Accept workloads from others" switch; three-state status (Off / Metering only / Accepting jobs); honest backend copy (noop-cpu simulates, local-cpu has no sandbox); v0 metering opens no sockets.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-08-13"/>
   </releases>
   <provides>

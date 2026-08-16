@@ -102,16 +102,35 @@ override (state stays inside the app dir), `--socket=session-bus` /
 `--system-talk-name` (no system service access), and no `--talk-name`
 for arbitrary D-Bus targets.
 
+## Signed releases (MAINNET-CHECKLIST §7.6)
+
+Every release is produced by `.github/workflows/release.yml` (manual
+dispatch or a `v*` tag push). It builds this Flatpak, computes the
+SHA-256 digest, and drafts a GitHub release with:
+
+- the `vtessera.flatpak` bundle and a `SHA256SUMS` file
+- a release-notes template that carries the digest, a VirusTotal
+  pre-submission checklist (upload the bundle at https://www.virustotal.com
+  before announcing; link the result), and the `docs/CONSENT.md` §3
+  claims re-read (MAINNET-CHECKLIST §7.7)
+
+The digest in the release notes lets a user verify the artifact they
+downloaded:
+
+```sh
+sha256sum -c SHA256SUMS   # compare against the digest in the release notes
+```
+
 ## Before a FlatHub submission
 
-1. Push `screenshots/vtessera-settings.png` to the repo so the metainfo
+1. `screenshots/vtessera-settings.png` is committed, so the metainfo
    screenshot URL
    (`https://raw.githubusercontent.com/douglasdemaio/vtessera/main/packaging/flatpak/screenshots/vtessera-settings.png`)
-   resolves. Until then, `flatpak-builder-lint repo` reports
+   resolves. (Before it was pushed, `flatpak-builder-lint repo` reported
    `appstream-missing-screenshots` /
    `appstream-screenshots-not-mirrored-in-ostree`, and `appstreamcli
-   validate` reports `screenshot-image-not-found`. These all clear
-   automatically once the URL is reachable — nothing else needs changing.
+   validate` reported `screenshot-image-not-found`. These clear
+   automatically once the URL is reachable.)
 2. Re-run the lint checks below and fix anything new.
 3. Optionally add more screenshots (e.g. the Status view) to
    `screenshots/` and reference them in the metainfo.
@@ -126,4 +145,5 @@ appstreamcli validate io.github.douglasdemaio.Vtessera.metainfo.xml
 ```
 
 Current status: `finish-args` (ipc/x11), branch naming, metainfo schema and
-Cargo vendoring all validate cleanly.
+Cargo vendoring all validate cleanly; the screenshot URL resolves; releases
+carry SHA-256 digests via `.github/workflows/release.yml`.
