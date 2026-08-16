@@ -40,7 +40,7 @@ jobs:
       - name: Build #2 (clean)
         working-directory: programs
         run: |
-          rm -rf target
+          sudo rm -rf target
           solana-verify build
           sha256sum target/deploy/vtessera_escrow.so | tee /tmp/escrow-2.sha256
 
