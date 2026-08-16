@@ -50,12 +50,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache solana CLI
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/solana
+          key: solana-cli-3.1.14-x86_64-linux
+
       - name: Install solana CLI
         run: |
           set -euo pipefail
+          # release.solana.com is unreachable from GitHub Actions runners
+          # (persistent SSL_ERROR_SYSCALL), so fetch the release tarball
+          # straight from the anza-xyz/agave GitHub release instead.
+          if [ -x "$HOME/.local/share/solana/install/active_release/bin/solana" ]; then
+            "$HOME/.local/share/solana/install/active_release/bin/solana" --version
+            exit 0
+          fi
           curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 \
-            -o /tmp/solana-install.sh https://release.solana.com/v3.1.14/install
-          sh /tmp/solana-install.sh
+            -o /tmp/solana-release.tar.bz2 \
+            https://github.com/anza-xyz/agave/releases/download/v3.1.14/solana-release-x86_64-unknown-linux-gnu.tar.bz2
+          mkdir -p "$HOME/.local/share/solana/install/active_release"
+          tar -xjf /tmp/solana-release.tar.bz2 \
+            -C "$HOME/.local/share/solana/install/active_release" --strip-components=1
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
           "$HOME/.local/share/solana/install/active_release/bin/solana" --version
 
