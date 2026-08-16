@@ -130,8 +130,8 @@ const EDGE_CADENCE: u64 = 10;
 ///
 /// i.e. ≥ 2,904,880 lamports or the system-program CPI inside
 /// `pay_for_compute` fails with `custom program error: 0x1`
-/// (ResultWithNegativeLamports). 5M keeps a safety margin without
-/// burning much off the payer (100 iters ≈ 0.5 SOL).
+/// (ResultWithNegativeLamports). 5M keeps a safety margin; buyer SOL
+/// budgets total ≈ 0.5 SOL per 100-iteration run.
 const BUYER_SOL_LAMPORTS: u64 = 5_000_000;
 
 /// Stablecoin decimals for the test mint — matches the demo.
