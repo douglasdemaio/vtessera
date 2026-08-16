@@ -59,6 +59,7 @@ jobs:
       - name: Install solana CLI
         run: |
           set -euo pipefail
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
           # release.solana.com is unreachable from GitHub Actions runners
           # (persistent SSL_ERROR_SYSCALL), so fetch the release tarball
           # straight from the anza-xyz/agave GitHub release instead.
@@ -75,7 +76,6 @@ jobs:
           mkdir -p "$HOME/.local/share/solana/install/active_release"
           tar -xjf /tmp/solana-release.tar.bz2 \
             -C "$HOME/.local/share/solana/install/active_release" --strip-components=1
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
           "$HOME/.local/share/solana/install/active_release/bin/solana" --version
 
       - name: Write payer keypair from secret
