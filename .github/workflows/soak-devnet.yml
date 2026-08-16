@@ -50,13 +50,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache solana CLI
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/solana
+          key: solana-cli-3.1.14-x86_64-linux
+
       - name: Install solana CLI
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 \
-            -o /tmp/solana-install.sh https://release.solana.com/v3.1.14/install
-          sh /tmp/solana-install.sh
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          # release.solana.com is unreachable from GitHub Actions runners
+          # (persistent SSL_ERROR_SYSCALL), so fetch the release tarball
+          # straight from the anza-xyz/agave GitHub release instead.
+          if [ -x "$HOME/.local/share/solana/install/active_release/bin/solana" ]; then
+            "$HOME/.local/share/solana/install/active_release/bin/solana" --version
+            exit 0
+          fi
+          # Checksum is the integrity gate (same pinned digest as ci.yml).
+          EXPECTED=06f97c065cc977cbec2f13ffc9bc9d3b92fef485431fcb370a269de69532ef51
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o /tmp/solana-release.tar.bz2 \
+            https://github.com/anza-xyz/agave/releases/download/v3.1.14/solana-release-x86_64-unknown-linux-gnu.tar.bz2
+          echo "$EXPECTED  /tmp/solana-release.tar.bz2" | sha256sum -c -
+          mkdir -p "$HOME/.local/share/solana/install/active_release"
+          tar -xjf /tmp/solana-release.tar.bz2 \
+            -C "$HOME/.local/share/solana/install/active_release" --strip-components=1
           "$HOME/.local/share/solana/install/active_release/bin/solana" --version
 
       - name: Write payer keypair from secret
@@ -73,12 +92,28 @@ jobs:
 
       - name: Fund payer if low
         run: |
+          set -euo pipefail
           solana config set --url devnet --keypair "$HOME/.config/solana/id.json" >/dev/null
           BAL=$(solana balance | awk '{print $1}')
           echo "payer balance: $BAL SOL"
-          LOW=$(python3 -c "import sys; print(1 if float('$BAL') < 2.0 else 0)")
+          # 100 iters burn ~0.5 SOL (buyer budgets + ATA rents + tx fees), so
+          # target ~3 SOL. Devnet airdrops are rate-limited (per-address daily
+          # cap), so retry with backoff instead of limping into the soak.
+          LOW=$(python3 -c "import sys; print(1 if float('$BAL') < 3.0 else 0)")
           if [ "$LOW" = "1" ]; then
-            solana airdrop 2 --url devnet || echo "airdrop rate-limited; continuing with existing balance"
+            for attempt in 1 2 3 4; do
+              solana airdrop 2 --url devnet && break
+              echo "airdrop rate-limited (attempt $attempt/4); sleeping 45s"
+              sleep 45
+            done
+          fi
+          BAL=$(solana balance | awk '{print $1}')
+          echo "payer balance after top-up: $BAL SOL"
+          # Hard floor: a full 100-iter run needs ~0.5 SOL. Fail fast and
+          # loudly instead of running a soak that dies at iteration 1.
+          if ! python3 -c "import sys; sys.exit(0 if float('$BAL') >= 0.6 else 1)"; then
+            echo "::error::DEVNET_PAYER is below the 0.6 SOL floor for a full soak run. Top it up at https://faucet.solana.com for $(solana address), then re-dispatch."
+            exit 1
           fi
 
       - name: Cache cargo
@@ -96,6 +131,7 @@ jobs:
       - name: Run soak
         working-directory: crates/devnet-demo
         run: |
+          set -euo pipefail
           ITERS="${{ github.event.inputs.iters || '100' }}"
           CANCEL_P="${{ github.event.inputs.cancel_p || '0.2' }}"
           PARALLEL="${{ github.event.inputs.parallel || '3' }}"

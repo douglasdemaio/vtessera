@@ -119,10 +119,11 @@ const CANCEL_P: f64 = 0.2;
 /// (buyer refund must be exactly 0).
 const EDGE_CADENCE: u64 = 10;
 
-/// Fresh per-iteration buyer SOL budget (lamports) covering the per-tx
-/// protocol fee (100,000) with margin. The payer covers all transaction
-/// fees, so the buyer only ever needs this.
-const BUYER_SOL_LAMPORTS: u64 = 10_000_000;
+/// Fresh per-iteration buyer SOL budget (lamports). The payer covers every
+/// transaction fee and the ATA rents, so the buyer only ever needs enough to
+/// stay rent-exempt on its own account; 1M lamports is a safe margin without
+/// burning ~0.01 SOL per iteration off the payer (100 iters ≈ 1 SOL).
+const BUYER_SOL_LAMPORTS: u64 = 1_000_000;
 
 /// Stablecoin decimals for the test mint — matches the demo.
 const MINT_DECIMALS: u8 = 6;
