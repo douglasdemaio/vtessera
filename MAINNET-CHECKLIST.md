@@ -200,7 +200,11 @@ after deploy.
       mainnet deploy.
 - [ ] **3.4** Verify on-chain **at mainnet deploy** — `solana program
       show <MAINNET_PROGRAM_ID>` reports `Authority: None` (immutable)
-      after the freeze.
+      after the freeze. **Command validated (2026-08-16):** devnet
+      `solana program show 6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`
+      reports `Authority: 5vWdYSmcNJnoj2PM8LfLRvnviujnQCT1Eu8Csw6Jzfhs`
+      (still upgradeable — the correct pre-freeze state; the freeze
+      runs only at mainnet deploy per §3.3).
 
 ### Mainnet freeze runbook (immutable, Option A)
 
@@ -312,13 +316,16 @@ matches what's running. With it, no trust required.
       ```
       cargo install solana-verify --version 0.5.1 --locked
       ```
-- [ ] **5.2** The `.so` SHA-256 is reproducible across two clean builds.
+- [x] **5.2** The `.so` SHA-256 is reproducible across two clean builds.
       Automated in `.github/workflows/reproducible-build.yml` (manual
       dispatch, PRs touching `programs/`, and pushes to `main`) and in
       the `release.yml` gate: two `solana-verify build` runs in the
       pinned Docker image must produce byte-identical
-      `vtessera_escrow.so`, or the job fails. **Baseline SHA-256 to be
-      recorded from the first green run** and pasted here.
+      `vtessera_escrow.so`, or the job fails. **Baseline SHA-256
+      recorded (2026-08-16):**
+      `f016841145af38ecbbc7b489fa28aaa4b4bcc7412262829e5d6240662581cddf  target/deploy/vtessera_escrow.so`
+      — first green run on `fix/reproducible-build` (`a194c72`), and
+      the merged `main` run (`75c5ea7`) reproduced the identical hash.
 - [ ] **5.3** Commit the SHA to
       `programs/vtessera-escrow/DEPLOYED_SHA256.txt` with the deploy
       date, program ID, and the commit hash it corresponds to. (The CI
