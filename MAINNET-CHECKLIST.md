@@ -372,12 +372,21 @@ ATA-creation collisions; RPC failures mid-transaction.
       top-up via devnet airdrop; soak log uploaded as an artifact). The
       payer keypair is the throwaway CI key in the `DEVNET_PAYER_KEYPAIR`
       repo secret — deliberately *not* the operator's key.
-- [ ] **6.3** Vary specifically:
+- [x] **6.3** Vary specifically:
       - Concurrent jobs (2-3 in flight at once) to catch any
-        non-serializable race
-      - One run with `price = 1` to find rounding edges
+        non-serializable race — **done:** the runner takes `--parallel`
+        (default 3, round-robin workers); the hourly workflow defaults to
+        3 in flight.
+      - One run with `price = 1` to find rounding edges — **done:** the
+        runner draws `price_micros` in `1..=10_000_000`, so `price = 1`
+        (1 lamport of stablecoin) occurs; rounding is u128 checked.
       - One run with `f_micros = 1_000_000` to verify buyer refund is
-        exactly 0
+        exactly 0 — **done:** `f = 1` is in the weighted pool and the
+        runner asserts the buyer refund is exactly 0.
+      - Per-run `job_id` seeding: default seed now includes a per-run
+        nonce (`vtessera-soak-seed:` + payer pubkey + run nonce), so
+        reruns never collide with leftover contract PDAs on the same
+        devnet program (`Allocate: already in use` was the failure mode).
 - [ ] **6.4** Watch the log file. Any non-zero error rate gets
       investigated **before** mainnet.
 - [ ] **6.5** Run for at least **one week** of continuous green
@@ -391,6 +400,43 @@ ATA-creation collisions; RPC failures mid-transaction.
   the week.
 
 **Effort.** Half a day to build; one week wall-clock to soak.
+
+---
+
+## 7. Consumer consent & disclosure
+
+**What it is.** Vtessera sells compute: other agents execute code on the
+machine. Before mainnet, the consent contract (`docs/CONSENT.md`) must be
+implemented in the shipped GUI and the packaging must not start anything on
+its own. This section tracks the non-negotiables from `docs/CONSENT.md` §1
+and the anti-misclassification checklist §4 that gate a public release.
+
+**What breaks if we skip it.** The product misclassifies itself: a machine
+owner installs something that runs other people's code without their
+explicit, legible consent. That is an uninstall-and-bad-word-of-mouth
+outcome, not a technical one.
+
+### Steps
+
+- [x] **7.1** First-run metering consent gate in the GUI (nothing shown or
+      started until "Enable metering"; "Not now" quits).
+- [x] **7.2** "Accept workloads from others" switch, off by default, with
+      the honest no-sandbox copy; off = metering only, no offer written, no
+      node spawned.
+- [x] **7.3** Three-state status surface (Off / Metering only / Accepting
+      jobs), recent-jobs list, settlement-authority disclosure row.
+- [x] **7.4** One-action stop; no autostart in RPM (`%service_add`) or
+      Flatpak; complete-uninstall documentation in the README.
+- [x] **7.5** v0 metering opens no sockets — pinned by
+      `tests/no_socket.rs`.
+- [ ] **7.6** Signed releases with SHA-256 digests and VirusTotal
+      pre-submission in the release flow (`docs/CONSENT.md` §4).
+- [ ] **7.7** Re-read `docs/CONSENT.md` §3 (claims table) before every
+      release announcement.
+
+**Who.**
+- **Me:** implement the consent flow, the no-socket test, the docs.
+- **You:** release process (7.6), copy review before announcements (7.7).
 
 ---
 

@@ -16,6 +16,11 @@ This document is an index. The authoritative design lives in:
   `vtesserad` (scope, hard rules, module contracts, systemd hardening,
   CI, definition of done). v0 must not widen beyond this; new modules
   live in separate crates.
+- [CONSENT.md](CONSENT.md) — Consent & disclosure spec: behavioural
+  invariants (no autostart, two consent gates, one-action stop, no
+  silent resume, legible activity, complete uninstall, honest naming,
+  declared network surface), GUI consent copy, claims-precision rules,
+  and the anti-misclassification checklist.
 
 ## Workspace map
 

@@ -47,6 +47,11 @@ pub struct StartOptions<'a> {
     /// Where the node writes signed job receipts (`vtessera-node
     /// --state-dir`, under `job-receipts/`).
     pub state_dir: PathBuf,
+    /// Whether to spawn (or reuse) the agent-facing `vtessera-node`. This is
+    /// the "Accept workloads from others" consent gate: with `false` only
+    /// `vtesserad` runs (metering only), and an already-serving node is
+    /// neither spawned nor reused.
+    pub spawn_node: bool,
 }
 
 /// Directory holding the built binaries, when set (local runs). In the
@@ -106,6 +111,14 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
     let meter = meter_cmd
         .spawn()
         .map_err(|e| format!("spawn vtesserad: {e}"))?;
+
+    if !opts.spawn_node {
+        return Ok(Daemons {
+            meter,
+            node: None,
+            node_reused: false,
+        });
+    }
 
     // If a node is already answering on the configured port (e.g. leaked by
     // a hard-killed previous session), reusing it beats spawning a second
