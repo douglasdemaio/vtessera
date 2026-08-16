@@ -45,9 +45,54 @@ jobs:
             vtessera.flatpak
             SHA256SUMS
 
+  reproducible-build:
+    name: Reproducible escrow build
+    runs-on: ubuntu-latest
+    outputs:
+      escrow_sha256: ${{ steps.emit.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install solana-verify (pinned)
+        run: cargo install solana-verify --version 0.5.1 --locked
+
+      - name: Build #1
+        working-directory: programs
+        run: |
+          solana-verify build
+          sha256sum target/deploy/vtessera_escrow.so > /tmp/escrow-1.sha256
+
+      - name: Build #2 (clean)
+        working-directory: programs
+        run: |
+          rm -rf target
+          solana-verify build
+          sha256sum target/deploy/vtessera_escrow.so > /tmp/escrow-2.sha256
+
+      - name: Compare + emit SHA-256
+        id: emit
+        run: |
+          diff /tmp/escrow-1.sha256 /tmp/escrow-2.sha256
+          sha=$(cut -d' ' -f1 /tmp/escrow-1.sha256)
+          if [ -f programs/vtessera-escrow/DEPLOYED_SHA256.txt ]; then
+            deployed=$(awk '/^[0-9a-f]{64}/ {print $1; exit}' programs/vtessera-escrow/DEPLOYED_SHA256.txt)
+            if [ "$deployed" != "$sha" ]; then
+              echo "::error::Built SHA-256 $sha does not match DEPLOYED_SHA256.txt ($deployed)"
+              exit 1
+            fi
+          fi
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "::notice::Reproducible escrow build SHA-256: $sha"
+
+      - name: Upload .so
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: programs/target/deploy/vtessera_escrow.so
+
   release:
     name: Draft release
-    needs: flatpak
+    needs: [flatpak, reproducible-build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,12 +110,14 @@ jobs:
       - name: Build release notes
         run: |
           SHA=$(awk '{print $1}' artifacts/SHA256SUMS)
+          ESCROW_SHA="${{ needs.reproducible-build.outputs.escrow_sha256 }}"
           python3 - packaging/release-notes-template.md > notes.md <<EOF
           import sys
           text = open(sys.argv[1]).read()
           text = text.replace("{VERSION}", "$VERSION")
           text = text.replace("{DATE}", "$(date -u +%F)")
           text = text.replace("{SHA256}", "$SHA")
+          text = text.replace("{ESCROW_SHA256}", "$ESCROW_SHA")
           sys.stdout.write(text)
           EOF
 

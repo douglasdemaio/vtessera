@@ -48,6 +48,42 @@ To build:
 anchor build
 ```
 
+## Reproducible build + verification (MAINNET-CHECKLIST §5)
+
+The program is built deterministically with
+[`solana-verify`](https://github.com/solana-foundation/solana-verifiable-build)
+inside a pinned Docker image, so anyone can prove the on-chain bytecode
+matches this source. CI runs this on every change under `programs/`
+(`.github/workflows/reproducible-build.yml`) and again as a gate at
+release (`release.yml`): **two clean builds whose `.so` SHA-256 must
+match**, using `solana-verify` 0.5.1 and the image pinned to the
+`Cargo.lock` solana-program version (1.18.26).
+
+Locally (requires Docker):
+
+```
+cargo install solana-verify --version 0.5.1 --locked
+cd programs
+solana-verify build
+sha256sum target/deploy/vtessera_escrow.so
+```
+
+The reproducible SHA-256 of the deployed program is committed at
+`DEPLOYED_SHA256.txt` (§5.3 — filled at mainnet deploy with the deploy
+date, program ID, and commit). Anyone can verify the deployed program
+against this repo:
+
+```
+solana-verify verify-from-repo https://github.com/douglasdemaio/vtessera \
+  --program-id <PROGRAM_ID> --url <devnet|mainnet-beta> \
+  --commit-hash <DEPLOYED_COMMIT> --library-name vtessera_escrow \
+  --mount-path programs --bpf
+```
+
+(`--bpf` matches how Anchor-built programs are hashed on-chain; the
+`programs/` mount path points at the workspace whose `Cargo.toml`
+contains the `vtessera_escrow` library.)
+
 ## Program ID
 
 Devnet: **`6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`**

@@ -1,0 +1,68 @@
+name: reproducible-build
+
+# MAINNET-CHECKLIST §5.2: the escrow program must be reproducible —
+# two clean builds inside the pinned solana-verify Docker image must
+# produce a byte-identical vtessera_escrow.so. Runs on demand, on every
+# PR touching programs/, and on main changes to programs/.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "programs/**"
+      - ".github/workflows/reproducible-build.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "programs/**"
+      - ".github/workflows/reproducible-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Reproducible escrow build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install solana-verify (pinned)
+        run: cargo install solana-verify --version 0.5.1 --locked
+
+      - name: Build #1
+        working-directory: programs
+        run: |
+          solana-verify build
+          sha256sum target/deploy/vtessera_escrow.so | tee /tmp/escrow-1.sha256
+
+      - name: Build #2 (clean)
+        working-directory: programs
+        run: |
+          rm -rf target
+          solana-verify build
+          sha256sum target/deploy/vtessera_escrow.so | tee /tmp/escrow-2.sha256
+
+      - name: Compare SHA-256 + check DEPLOYED_SHA256.txt
+        run: |
+          diff /tmp/escrow-1.sha256 /tmp/escrow-2.sha256
+          echo "::notice title=Reproducible escrow build::$(cut -d' ' -f1 /tmp/escrow-1.sha256)"
+          if [ -f programs/vtessera-escrow/DEPLOYED_SHA256.txt ]; then
+            deployed=$(awk '/^[0-9a-f]{64}/ {print $1; exit}' programs/vtessera-escrow/DEPLOYED_SHA256.txt)
+            built=$(cut -d' ' -f1 /tmp/escrow-1.sha256)
+            if [ "$deployed" != "$built" ]; then
+              echo "::error::Built SHA-256 $built does not match DEPLOYED_SHA256.txt ($deployed)"
+              exit 1
+            fi
+            echo "::notice::Built SHA-256 matches DEPLOYED_SHA256.txt"
+          else
+            echo "::notice::DEPLOYED_SHA256.txt not present (filled at mainnet deploy, §5.3)"
+          fi
+
+      - name: Upload .so
+        uses: actions/upload-artifact@v4
+        with:
+          name: vtessera-escrow-so
+          path: programs/target/deploy/vtessera_escrow.so
+          retention-days: 7

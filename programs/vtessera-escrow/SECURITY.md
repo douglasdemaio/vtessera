@@ -130,5 +130,7 @@ Any new privileged component (executor, dispatch API) must re-run
 - Soak: hourly devnet soak (`.github/workflows/soak-devnet.yml`).
 - Host invariants: `tests/no_socket.rs` (v0 metering opens no sockets);
   `systemd-analyze security` on the unit in CI (best-effort).
-- Reproducibility: `solana-verify build` — SHA committed to
+- Reproducibility: `solana-verify build` (0.5.1) — two clean builds in
+  CI (`.github/workflows/reproducible-build.yml`, plus a `release.yml`
+  gate) whose `.so` SHAs must match; SHA committed to
   `DEPLOYED_SHA256.txt` (§5).
