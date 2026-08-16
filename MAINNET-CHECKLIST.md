@@ -264,14 +264,19 @@ fast enough to fix it, or (b) accept the loss.
 
 - [ ] **4.1** Decide tier. Default: community review first, paid audit
       gated on revenue / TVL.
-- [ ] **4.2** Prepare for review:
+- [x] **4.2** Prepare for review:
       - Write `programs/vtessera-escrow/SECURITY.md` with:
         - Threat model — what we defend against (custodial drain by
           settlement authority, double-spend), what we don't
           (Solana validator censorship, Circle freezing edge addresses)
         - Known limitations
         - Deploy procedure (the immutable / multisig step)
-      - Tag the audit-ready commit hash
+        **Done:** `de08a4d` — threat model, attack-surface map pinned to
+        the adversarial suite, known limitations, deploy procedure, and
+        host-side hardening; current against the program source.
+      - Tag the audit-ready commit hash. **Done (2026-08-16):** tag
+        `escrow-audit-v1` at `06cbe70`, carrying the reproducible
+        baseline SHA (`f0168411…cddf`, §5.2).
 - [ ] **4.3** Post to channels:
       - Solana Discord `#auditing`
       - r/solana
