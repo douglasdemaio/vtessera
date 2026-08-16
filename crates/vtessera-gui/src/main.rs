@@ -206,7 +206,8 @@ fn count_receipts() -> usize {
 /// **Off**, **Metering only** (vtesserad sampling; nothing accepts jobs),
 /// **Accepting jobs** (vtesserad + vtessera-node serving).
 fn current_state(state: &NodeState) -> &'static str {
-    let Some(daemons) = state.daemons.borrow().as_ref() else {
+    let borrowed = state.daemons.borrow();
+    let Some(daemons) = borrowed.as_ref() else {
         return "Off";
     };
     if daemons.node.is_some() || daemons.node_reused {
@@ -248,14 +249,14 @@ fn refresh_status(ui: &Ui, state: &NodeState) {
 }
 
 /// Enumerate the signed per-job receipts the node has written under
-/// `<state-dir>/job-receipts/` (newest last) — the legible activity record
+/// `<state-dir>/job-receipts/` (newest first) — the legible activity record
 /// the status page promises (§1.5 / §2.3).
 fn refresh_jobs(ui: &Ui) {
     use std::time::SystemTime;
 
     let dir = settings::state_dir().join("job-receipts");
     let now = SystemTime::now();
-    let mut jobs: Vec<(String, String)> = match std::fs::read_dir(&dir) {
+    let mut jobs: Vec<(u64, String)> = match std::fs::read_dir(&dir) {
         Ok(rd) => rd
             .flatten()
             .map(|e| e.path())
@@ -267,16 +268,7 @@ fn refresh_jobs(ui: &Ui) {
                     .and_then(|t| now.duration_since(t).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(u64::MAX);
-                let stamp = if age == u64::MAX {
-                    "unknown time".to_string()
-                } else if age < 60 {
-                    format!("{age}s ago")
-                } else if age < 3600 {
-                    format!("{}m ago", age / 60)
-                } else {
-                    format!("{}h ago", age / 3600)
-                };
-                Some((stamp, p.file_name()?.to_string_lossy().into_owned()))
+                Some((age, p.file_name()?.to_string_lossy().into_owned()))
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -286,9 +278,19 @@ fn refresh_jobs(ui: &Ui) {
         "No jobs yet — per-job receipts appear here when the node completes work.".to_string()
     } else {
         jobs.into_iter()
-            .rev()
             .take(50)
-            .map(|(stamp, name)| format!("{stamp}  {name}"))
+            .map(|(age, name)| {
+                let stamp = if age == u64::MAX {
+                    "unknown time".to_string()
+                } else if age < 60 {
+                    format!("{age}s ago")
+                } else if age < 3600 {
+                    format!("{}m ago", age / 60)
+                } else {
+                    format!("{}h ago", age / 3600)
+                };
+                format!("{stamp}  {name}")
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -456,6 +458,7 @@ fn build_ui(app: &gtk4::Application) {
         receipts_label: gtk4::Label::new(None),
         settlement_label: gtk4::Label::new(None),
         jobs_view: gtk4::TextView::new(),
+        log_view: gtk4::TextView::new(),
         start_btn: gtk4::Button::with_label("Start"),
         stop_btn: gtk4::Button::with_label("Stop"),
     });
