@@ -66,9 +66,12 @@ jobs:
             "$HOME/.local/share/solana/install/active_release/bin/solana" --version
             exit 0
           fi
+          # Checksum is the integrity gate (same pinned digest as ci.yml).
+          EXPECTED=06f97c065cc977cbec2f13ffc9bc9d3b92fef485431fcb370a269de69532ef51
           curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 \
             -o /tmp/solana-release.tar.bz2 \
             https://github.com/anza-xyz/agave/releases/download/v3.1.14/solana-release-x86_64-unknown-linux-gnu.tar.bz2
+          echo "$EXPECTED  /tmp/solana-release.tar.bz2" | sha256sum -c -
           mkdir -p "$HOME/.local/share/solana/install/active_release"
           tar -xjf /tmp/solana-release.tar.bz2 \
             -C "$HOME/.local/share/solana/install/active_release" --strip-components=1
