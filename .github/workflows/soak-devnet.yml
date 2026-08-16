@@ -30,6 +30,10 @@ on:
         description: 'Cancel probability [0-1]'
         required: false
         default: '0.2'
+      parallel:
+        description: 'Concurrent jobs in flight (2-3 recommended)'
+        required: false
+        default: '3'
 
 concurrency:
   group: devnet-soak
@@ -48,8 +52,12 @@ jobs:
 
       - name: Install solana CLI
         run: |
-          sh -c "$(curl -sSfL https://release.solana.com/v3.1.14/install)"
+          set -euo pipefail
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o /tmp/solana-install.sh https://release.solana.com/v3.1.14/install
+          sh /tmp/solana-install.sh
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/share/solana/install/active_release/bin/solana" --version
 
       - name: Write payer keypair from secret
         env:
@@ -90,7 +98,8 @@ jobs:
         run: |
           ITERS="${{ github.event.inputs.iters || '100' }}"
           CANCEL_P="${{ github.event.inputs.cancel_p || '0.2' }}"
-          ./target/release/soak --iters "$ITERS" --cancel-p "$CANCEL_P" 2>&1 | tee soak.log
+          PARALLEL="${{ github.event.inputs.parallel || '3' }}"
+          ./target/release/soak --iters "$ITERS" --cancel-p "$CANCEL_P" --parallel "$PARALLEL" 2>&1 | tee soak.log
 
       - name: Upload soak log
         if: always()
