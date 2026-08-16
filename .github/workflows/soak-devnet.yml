@@ -95,10 +95,18 @@ jobs:
           solana config set --url devnet --keypair "$HOME/.config/solana/id.json" >/dev/null
           BAL=$(solana balance | awk '{print $1}')
           echo "payer balance: $BAL SOL"
-          LOW=$(python3 -c "import sys; print(1 if float('$BAL') < 2.0 else 0)")
+          # Target ~3 SOL: 100 iters burn ~0.35 SOL (buyer budgets + ATA
+          # rents + fees). Devnet airdrops are rate-limited, so retry with
+          # backoff instead of failing or limping into the soak.
+          LOW=$(python3 -c "import sys; print(1 if float('$BAL') < 3.0 else 0)")
           if [ "$LOW" = "1" ]; then
-            solana airdrop 2 --url devnet || echo "airdrop rate-limited; continuing with existing balance"
+            for attempt in 1 2 3 4; do
+              solana airdrop 2 --url devnet && break
+              echo "airdrop rate-limited (attempt $attempt/4); sleeping 45s"
+              sleep 45
+            done
           fi
+          solana balance
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -115,6 +123,7 @@ jobs:
       - name: Run soak
         working-directory: crates/devnet-demo
         run: |
+          set -euo pipefail
           ITERS="${{ github.event.inputs.iters || '100' }}"
           CANCEL_P="${{ github.event.inputs.cancel_p || '0.2' }}"
           PARALLEL="${{ github.event.inputs.parallel || '3' }}"
