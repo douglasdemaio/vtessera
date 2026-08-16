@@ -92,12 +92,13 @@ jobs:
 
       - name: Fund payer if low
         run: |
+          set -euo pipefail
           solana config set --url devnet --keypair "$HOME/.config/solana/id.json" >/dev/null
           BAL=$(solana balance | awk '{print $1}')
           echo "payer balance: $BAL SOL"
-          # Target ~3 SOL: 100 iters burn ~0.35 SOL (buyer budgets + ATA
-          # rents + fees). Devnet airdrops are rate-limited, so retry with
-          # backoff instead of failing or limping into the soak.
+          # 100 iters burn ~0.5 SOL (buyer budgets + ATA rents + tx fees), so
+          # target ~3 SOL. Devnet airdrops are rate-limited (per-address daily
+          # cap), so retry with backoff instead of limping into the soak.
           LOW=$(python3 -c "import sys; print(1 if float('$BAL') < 3.0 else 0)")
           if [ "$LOW" = "1" ]; then
             for attempt in 1 2 3 4; do
@@ -106,7 +107,14 @@ jobs:
               sleep 45
             done
           fi
-          solana balance
+          BAL=$(solana balance | awk '{print $1}')
+          echo "payer balance after top-up: $BAL SOL"
+          # Hard floor: a full 100-iter run needs ~0.5 SOL. Fail fast and
+          # loudly instead of running a soak that dies at iteration 1.
+          if ! python3 -c "import sys; sys.exit(0 if float('$BAL') >= 0.6 else 1)"; then
+            echo "::error::DEVNET_PAYER is below the 0.6 SOL floor for a full soak run. Top it up at https://faucet.solana.com for $(solana address), then re-dispatch."
+            exit 1
+          fi
 
       - name: Cache cargo
         uses: actions/cache@v4
