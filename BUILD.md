@@ -69,6 +69,10 @@ systemd unit and an AppArmor profile.
    telemetry. No phoning home in the default build.
 10. **Small, reviewable modules:** one responsibility per file; document each
     public item.
+11. **Consent & disclosure:** the invariants in `docs/CONSENT.md` §1 are
+    binding — no autostart (packaging never starts the app), no silent
+    resume, honest process names, and a declared + tested network surface.
+    v0's no-inbound rule (rule 5) is pinned by `tests/no_socket.rs`.
 
 ---
 

@@ -14,6 +14,10 @@ pub const DEFAULT_ESCROW: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
 pub const DEFAULT_NETWORK: &str = "solana-devnet";
 /// Job executor the GUI passes to the spawned `vtessera-node` via `--backend`.
 pub const DEFAULT_BACKEND: &str = "noop-cpu";
+/// Bump when the consent copy or the consent contract changes: a stored
+/// `consent_version` below this re-shows the first-run gate (§2 of
+/// `docs/CONSENT.md`) so users re-read what they're consenting to.
+pub const CURRENT_CONSENT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +46,23 @@ pub struct Settings {
     /// `noop-cpu` so existing `settings.toml` files keep their behavior.
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// Explicit consent to metering (first-run gate, §2.1 of
+    /// `docs/CONSENT.md`). `false` re-shows the gate; the user must press
+    /// "Enable metering" before the app will start anything.
+    #[serde(default)]
+    pub metering_consent: bool,
+    /// Second consent gate (§2.2): whether this machine accepts workloads
+    /// from other agents. OFF by default and off until explicitly enabled.
+    /// The local-cpu executor is not isolated, so this is deliberately a
+    /// separate, explicit decision from metering consent.
+    #[serde(default)]
+    pub accept_workloads: bool,
+    /// Version of the consent copy this `metering_consent` was given
+    /// against. Bumped by `CURRENT_CONSENT_VERSION`; stored values below it
+    /// re-show the gate. `0` also marks "never consented" for pre-consent
+    /// `settings.toml` files that predate this field.
+    #[serde(default)]
+    pub consent_version: u32,
 }
 
 fn default_backend() -> String {
@@ -61,8 +82,18 @@ impl Default for Settings {
             network: DEFAULT_NETWORK.into(),
             sample_interval_secs: 60,
             backend: DEFAULT_BACKEND.into(),
+            metering_consent: false,
+            accept_workloads: false,
+            consent_version: 0,
         }
     }
+}
+
+/// Whether the stored settings still need the first-run consent gate.
+/// True when consent was never recorded, or when the copy has been updated
+/// since it was (see `CURRENT_CONSENT_VERSION`).
+pub fn needs_consent(settings: &Settings) -> bool {
+    !settings.metering_consent || settings.consent_version < CURRENT_CONSENT_VERSION
 }
 
 impl Settings {
@@ -207,6 +238,9 @@ mod tests {
             network: "solana-devnet".into(),
             sample_interval_secs: 60,
             backend: DEFAULT_BACKEND.into(),
+            metering_consent: true,
+            accept_workloads: false,
+            consent_version: CURRENT_CONSENT_VERSION,
         }
     }
 
@@ -258,6 +292,11 @@ mod tests {
         assert_eq!(s.mode, "paid");
         assert_eq!(s.port, DEFAULT_PORT);
         assert_eq!(s.backend, DEFAULT_BACKEND);
+        // Fresh installs start without consent and with workloads off.
+        assert!(!s.metering_consent);
+        assert!(!s.accept_workloads);
+        assert_eq!(s.consent_version, 0);
+        assert!(needs_consent(&s));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -289,6 +328,40 @@ mod tests {
         let s = Settings::load_or_default(&path);
         assert_eq!(s.mode, "free");
         assert_eq!(s.backend, DEFAULT_BACKEND);
+        // Pre-consent settings.toml files re-show the gate once.
+        assert!(needs_consent(&s));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn consent_version_gating() {
+        let mut s = valid();
+        assert!(!needs_consent(&s));
+
+        // Stale copy → re-show.
+        s.consent_version = CURRENT_CONSENT_VERSION - 1;
+        assert!(needs_consent(&s));
+        s.consent_version = CURRENT_CONSENT_VERSION;
+        assert!(!needs_consent(&s));
+
+        // Consent revoked → re-show regardless of version.
+        s.metering_consent = false;
+        assert!(needs_consent(&s));
+    }
+
+    #[test]
+    fn accept_workloads_defaults_off() {
+        let mut s = valid();
+        assert!(!s.accept_workloads);
+        s.accept_workloads = true;
+        s.save(&std::env::temp_dir().join("vtessera_gui_accept_workloads_test.toml"))
+            .ok();
+        let loaded = Settings::load_or_default(
+            &std::env::temp_dir().join("vtessera_gui_accept_workloads_test.toml"),
+        );
+        assert!(loaded.accept_workloads);
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join("vtessera_gui_accept_workloads_test.toml"),
+        );
     }
 }

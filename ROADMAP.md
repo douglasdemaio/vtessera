@@ -438,6 +438,34 @@ mint, no governance, no registry.
 
 ---
 
+## Consent & disclosure (cross-cutting)
+
+Vtessera sells compute — other people execute code on your machine — so the
+product carries an explicit consent contract. The full spec lives in
+[`docs/CONSENT.md`](docs/CONSENT.md); the roadmap items are:
+
+- **GUI consent flow (done in the consent-disclosure PR):** first-run
+  metering gate (§2.1), the off-by-default "Accept workloads from others"
+  switch with honest no-sandbox copy (§2.2), and the three-state status
+  surface (Off / Metering only / Accepting jobs) with a recent-jobs list and
+  the settlement-authority row (§2.3).
+- **Behavioural invariants (§1):** no autostart, two consent gates,
+  one-action stop, no silent resume, legible activity, complete uninstall,
+  honest process naming, declared + tested network surface (v0 metering
+  opens no sockets — `tests/no_socket.rs`).
+- **Precision in claims (§3):** the do-not-say / say-instead table governs
+  the README and UI copy; settlement-authority centralisation and the flat
+  fee are disclosed, not hidden.
+- **Anti-misclassification (§4):** reproducible builds, signed releases with
+  digests, VirusTotal pre-submission, minimal Flatpak permissions with
+  rationale, hardening visible in SECURITY.md, third-party review before
+  mainnet. Tracked in `MAINNET-CHECKLIST.md`.
+- **Future:** accept-workloads consent should gate the *executor choice* per
+  job once sandboxed backends (Kata, Module 1e) exist — the no-sandbox copy
+  then becomes a per-backend disclosure rather than the default truth.
+
+---
+
 ## Build status
 
 CI is green for the v0 daemon under the workspace layout. Every new

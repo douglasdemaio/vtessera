@@ -81,6 +81,9 @@ mod tests {
             network: "solana-devnet".into(),
             sample_interval_secs: 60,
             backend: crate::settings::DEFAULT_BACKEND.into(),
+            metering_consent: true,
+            accept_workloads: false,
+            consent_version: crate::settings::CURRENT_CONSENT_VERSION,
         }
     }
 

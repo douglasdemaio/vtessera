@@ -8,9 +8,17 @@
   <description>
     <p>
       Vtessera lets GNU/Linux machine owners rent out CPU (and later GPU)
-      capacity to AI agents and other software workloads, settling in HNT
-      while buyers pay in EURC or USDC. It is technology that plugs into
-      the existing Helium economy — there is no Vtessera token.
+      capacity to AI agents, settling in the same stablecoin the buyer
+      pays — EURC or USDC — plus a flat SOL protocol fee. There is no
+      Vtessera token; the protocol is technology, not a token.
+    </p>
+    <p>
+      It asks your permission before it does anything: metering consent on
+      first run, and a separate off-by-default switch before it accepts
+      workloads from other agents. Jobs run through your chosen backend —
+      simulated by default, or executed on this machine with no sandbox if
+      you say so. You can stop everything with one button and uninstall
+      completely at any time.
     </p>
     <p>
       This desktop app turns a machine into a node in a few clicks:
@@ -19,12 +27,13 @@
       <li>Advertise your machine with a signed, self-hosted offer.</li>
       <li>Charge a price per CPU-hour in EURC or USDC, or donate your compute for free.</li>
       <li>Run the metering daemon and the agent-facing node server from one window.</li>
-      <li>Watch the live log and the receipt count as jobs come in.</li>
+      <li>Watch the state, recent jobs, settlement authority, and the live log as jobs come in.</li>
     </ul>
     <p>
       Free mode runs no transactions at all; paid mode quotes a price and
-      records usage. Settlement in v0 is off-chain — the Solana escrow and
-      HNT swap layers are under active development.
+      records usage. Settlement in v0 is off-chain — the escrow program
+      (live on Solana devnet) pays sellers directly in the same stablecoin
+      the buyer paid.
     </p>
   </description>
   <developer id="io.github.douglasdemaio">
@@ -43,8 +52,8 @@
     <keyword>compute</keyword>
     <keyword>CPU</keyword>
     <keyword>GPU</keyword>
-    <keyword>HNT</keyword>
-    <keyword>Helium</keyword>
+    <keyword>EURC</keyword>
+    <keyword>USDC</keyword>
     <keyword>node</keyword>
   </keywords>
   <content_rating type="oars-1.1">

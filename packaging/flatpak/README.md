@@ -80,12 +80,27 @@ done
 - The app only ever writes inside the Flatpak's own dirs
   (`~/.var/app/io.github.douglasdemaio.Vtessera/`); no `--filesystem`
   overrides are needed.
-- `--share=network` is required so `vtessera-node` can serve agents on the
-  configured port (the advertised endpoint must be reachable from the
-  internet for agents to connect).
 - v0 settlement is off-chain; the Solana escrow (module 4) settles
   sellers directly in the same stablecoin the buyer paid (EURC/USDC).
   See the repo `ROADMAP.md`.
+
+## Permission rationale (docs/CONSENT.md §4)
+
+JSON manifests cannot hold comments, so each `finish-arg` is justified here.
+The set is the minimum for a GTK4 GUI that can also run the node server:
+
+| finish-arg | Why it's there | What it does NOT grant |
+| --- | --- | --- |
+| `--share=network` | `vtessera-node` must accept connections from agents on the configured port (the advertised endpoint has to be reachable). Also covers `vtesserad`'s optional `submit` feature (off by default). | No host-filesystem access; the network grants are sandbox-scoped. |
+| `--socket=wayland` | The GUI's display connection (native). | Nothing else — no portals beyond the defaults. |
+| `--socket=fallback-x11` | Display fallback for X11-only sessions. | |
+| `--share=ipc` | Required for X11 shared memory (XShm) when running on the fallback X11 socket. | |
+| `--device=dri` | Hardware-accelerated rendering of the GUI itself (OpenGL compositing). | It does not grant host GPU *compute* to jobs — the executor runs outside the Flatpak's GPU scope in v0. |
+
+Deliberately **not** granted: `--filesystem=home` or any `--filesystem`
+override (state stays inside the app dir), `--socket=session-bus` /
+`--system-talk-name` (no system service access), and no `--talk-name`
+for arbitrary D-Bus targets.
 
 ## Before a FlatHub submission
 

@@ -108,11 +108,27 @@ run one small end-to-end flow, then
 `solana program set-upgrade-authority <PROGRAM_ID> --final` and verify
 `Authority: None`. `--final` is irreversible.
 
+## Host-side hardening (node software)
+
+The program is one side; the software that meters and serves jobs is the
+other. v0 (`vtesserad`) is built with `#![forbid(unsafe_code)]`, opens **no
+sockets** in its default build (pinned by `tests/no_socket.rs`; unit
+restriction `RestrictAddressFamilies=AF_UNIX` in `BUILD.md` §5), and ships a
+hardened systemd unit (`DynamicUser=yes`, `ProtectSystem=strict`,
+`NoNewPrivileges`, empty capability set — `packaging/vtesserad.service`) plus
+an AppArmor profile (`packaging/vtessera.apparmor`) that denies `/dev`,
+`/sys`, and `/proc` writes. The consent model that gates job acceptance lives
+in `docs/CONSENT.md` (two consent gates, no autostart, one-action stop).
+Any new privileged component (executor, dispatch API) must re-run
+`systemd-analyze security` before it ships (ROADMAP §5).
+
 ## Review / verification
 
 - Build: `anchor build` (or the CI-equivalent pinned toolchain).
 - Tests: program unit tests + drift guard; `tests/adversarial/`
   standalone LiteSVM suite (`cargo test --locked`).
 - Soak: hourly devnet soak (`.github/workflows/soak-devnet.yml`).
+- Host invariants: `tests/no_socket.rs` (v0 metering opens no sockets);
+  `systemd-analyze security` on the unit in CI (best-effort).
 - Reproducibility: `solana-verify build` — SHA committed to
   `DEPLOYED_SHA256.txt` (§5).

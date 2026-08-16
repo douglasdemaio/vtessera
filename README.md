@@ -81,7 +81,8 @@ vtessera/
 ├── scripts/
 │   └── x402-demo.sh                # one-command agent demo against devnet
 ├── docs/
-│   └── DESIGN.md                   # design index
+│   ├── DESIGN.md                   # design index
+│   └── CONSENT.md                  # consent & disclosure spec (UI + copy rules)
 └── .github/workflows/ci.yml
 ```
 
@@ -110,6 +111,37 @@ escrow program and a discovery layer; nothing else.
   `pay_for_compute`, `finalize_pro_rata`, and `cancel_before_start`,
   stored in `Config` at `init_config` (immutable after). See `ROADMAP.md`
   §0.
+
+## Consent & disclosure
+
+Vtessera is an opt-in compute node for AI agents, settled in EURC/USDC. It
+asks your permission before it does anything: **metering consent on first
+run**, and a separate, **off-by-default switch** before it accepts workloads
+from other agents. Jobs run through your chosen backend — simulated by
+default, or executed on this machine **with no sandbox** if you say so. You
+can stop everything with one button and uninstall completely at any time.
+Vtessera never starts itself, never restarts itself, and never runs code you
+didn't approve. There is no token, and settlement is a flat SOL protocol fee
+on top of the stablecoin the buyer pays.
+
+In short:
+
+- **Two consent gates, both explicit.** Nothing runs without the first-run
+  "Enable metering" gate; nothing accepts jobs until "Accept workloads from
+  others" is turned on (it defaults off).
+- **One-action stop.** Stop halts metering and job acceptance together. No
+  silent resume.
+- **Legible activity.** The Status tab shows the state (Off / Metering only /
+  Accepting jobs), the settlement authority, and the per-job receipts written
+  to `<state-dir>/job-receipts/`.
+- **No autostart, complete uninstall.** Installing never starts the app;
+  uninstalling removes the service, config, key, and state (see below).
+- **v0 metering opens no network sockets** — pinned by a test
+  (`tests/no_socket.rs`). Only `vtessera-node` binds (loopback by default)
+  and only when accepting workloads.
+- **Honest claims.** What the settlement authority can and cannot do, and
+  what the fee is, are documented — see `docs/CONSENT.md` for the
+  do-not-say / say-instead rules and the full consent spec.
 
 ## Prerequisites (v0 daemon)
 
@@ -352,6 +384,29 @@ Watch live logs:
 sudo journalctl -u vtesserad -f
 ```
 
+## Uninstall
+
+Vtessera never starts itself, so removing it is straightforward and leaves
+nothing running. The GUI (Flatpak) and the RPM daemon are independent
+install paths; remove the one you installed.
+
+**Flatpak (GUI):**
+
+```bash
+flatpak uninstall io.github.douglasdemaio.Vtessera
+# optional: remove the per-user state it left behind
+rm -rf ~/.var/app/io.github.douglasdemaio.Vtessera
+```
+
+**RPM (daemon, if installed):**
+
+```bash
+sudo systemctl disable --now vtesserad      # if you enabled/started it
+sudo zypper remove vtessera                 # or rpm -e vtessera
+sudo rm -rf /var/lib/vtessera               # receipts + identity key
+sudo rm -rf /etc/vtessera                   # config (contains payout_id)
+```
+
 ## Troubleshooting
 
 **`status=203/EXEC` / `Unable to locate executable '/usr/bin/vtesserad'`**
@@ -407,6 +462,9 @@ value.
   rules, module contracts, systemd hardening, CI, definition of done).
   v0 must not widen beyond this; new modules live in separate crates.
 - **`docs/DESIGN.md`** — Design index pointing at the documents above.
+- **`docs/CONSENT.md`** — The consent & disclosure spec: behavioural
+  invariants, the GUI consent flow, copy rules, the claims-precision
+  table, and the anti-misclassification checklist.
 
 ## License
 
