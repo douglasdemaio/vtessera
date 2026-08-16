@@ -119,11 +119,20 @@ const CANCEL_P: f64 = 0.2;
 /// (buyer refund must be exactly 0).
 const EDGE_CADENCE: u64 = 10;
 
-/// Fresh per-iteration buyer SOL budget (lamports). The payer covers every
-/// transaction fee and the ATA rents, so the buyer only ever needs enough to
-/// stay rent-exempt on its own account; 1M lamports is a safe margin without
-/// burning ~0.01 SOL per iteration off the payer (100 iters ≈ 1 SOL).
-const BUYER_SOL_LAMPORTS: u64 = 1_000_000;
+/// Fresh per-iteration buyer SOL budget (lamports). The buyer is the
+/// `payer` for the `pay_for_compute` contract-PDA `init` and pays the flat
+/// protocol fee, so it must cover, in one shot:
+///
+/// - contract PDA rent: `8 + Contract::LEN` = 147 bytes →
+///   devnet minimum rent 1,914,000 lamports
+/// - its own rent exemption: 890,880 lamports (0-byte system account)
+/// - the 100,000-lamport protocol fee to the fee wallet
+///
+/// i.e. ≥ 2,904,880 lamports or the system-program CPI inside
+/// `pay_for_compute` fails with `custom program error: 0x1`
+/// (ResultWithNegativeLamports). 5M keeps a safety margin without
+/// burning much off the payer (100 iters ≈ 0.5 SOL).
+const BUYER_SOL_LAMPORTS: u64 = 5_000_000;
 
 /// Stablecoin decimals for the test mint — matches the demo.
 const MINT_DECIMALS: u8 = 6;
