@@ -75,6 +75,36 @@ next `cargo generate-lockfile`/`update`. If that happens, change the
 header back to `version = 3` (registry-only lockfiles are identical in
 v3 and v4) and re-run the job.
 
+**Every crate in the lockfile must be parseable and buildable with
+Rust 1.75.** Cargo 1.75 rejects any crate published with
+`edition = "2024"` (`feature edition2024 is required`) — including
+crates that never compile on this platform, because `cargo build-sbf`
+runs `cargo metadata` over the whole graph — and the pinned `rustc`
+1.75 cannot compile crates that declare a higher MSRV. The lockfile
+pins the transitive downgrades that keep the tree 1.75-compatible; a
+`cargo update` that floats them back up will break the build, so
+preserve them:
+
+```
+blake3            = 1.8.2      (>= 1.8.3 needs edition 2024; pulls digest 0.10, not 0.11)
+borsh             = 1.5.7      (1.6+/1.7 need Rust 1.77; ^1.5 satisfies every spl-* pin)
+jobserver         = 0.1.32     (0.1.34 pulls getrandom 0.3.4 -> wasip2 -> wit-bindgen 0.57)
+proc-macro-crate  = 3.4.0      (3.5.0 pulls toml_edit 0.25 + toml_parser 1.1, both edition 2024)
+toml_edit         = 0.23.5     (0.23.9+ declares Rust 1.76)
+toml_parser       = 1.0.2      (1.1.x needs edition 2024; 1.0.4+ declares Rust 1.76)
+toml_datetime     = 0.7.1      (0.7.2+ declares Rust 1.76)
+indexmap          = 2.11.4     (2.12+ declares Rust 1.82; 2.14.0 pulls hashbrown 0.17)
+hashbrown         = 0.16.1     (0.17.1 is edition 2024)
+rayon             = 1.10.0     (1.11+ declares Rust 1.80)
+rayon-core        = 1.12.1     (1.13.0 declares Rust 1.80)
+unicode-segmentation = 1.12.0  (1.13.3 declares Rust 1.85)
+zeroize_derive    = 1.4.3      (1.5.0 is edition 2024)
+```
+
+`cargo update` picks newer semver-compatible versions, so if a
+dependency bump demands one of these, verify with
+`cargo +1.75.0 metadata --locked` before committing.
+
 The reproducible SHA-256 of the deployed program is committed at
 `DEPLOYED_SHA256.txt` (§5.3 — filled at mainnet deploy with the deploy
 date, program ID, and commit). Anyone can verify the deployed program
