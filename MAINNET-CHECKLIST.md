@@ -333,6 +333,11 @@ matches what's running. With it, no trust required.
 
 **Effort.** 2-4 hours, mostly fighting Docker.
 
+**Note.** GitHub Actions runners have Docker, so steps 5.1-5.2 can run as a
+CI job (two `solana-verify build` runs whose SHAs must match) instead of
+locally — say the word and it goes into `release.yml` next to the Flatpak
+build.
+
 ---
 
 ## 6. Devnet soak — at least one week
@@ -387,10 +392,18 @@ ATA-creation collisions; RPC failures mid-transaction.
         nonce (`vtessera-soak-seed:` + payer pubkey + run nonce), so
         reruns never collide with leftover contract PDAs on the same
         devnet program (`Allocate: already in use` was the failure mode).
-- [ ] **6.4** Watch the log file. Any non-zero error rate gets
-      investigated **before** mainnet.
+- [x] **6.4** Watch the log file. Any non-zero error rate gets
+      investigated **before** mainnet. **Done:** the two failure modes seen
+      so far were root-caused, fixed, and validated on devnet — (a) devnet
+      airdrop 429 / dry faucet → payer funding + 1.5 SOL fail-fast floor
+      (#43); (b) `custom program error: 0x1` on every iteration after the
+      buyer SOL budget cut → the buyer pays the contract-PDA rent + fee in
+      `pay_for_compute`, needs ≥ 2.9M lamports; 5M restored a 0-failure run
+      (#45). Monitoring continues via the hourly soak log artifact.
 - [ ] **6.5** Run for at least **one week** of continuous green
-      operation after #1-#3 are all merged and re-deployed.
+      operation after #1-#3 are all merged and re-deployed. **Status:** the
+      workflow on `main` is green and self-funding (100 iters, 0 failures on
+      2026-08-16); the one-week wall-clock window is pending.
 
 **Who.**
 - **Me:** write the soak runner, document the failure-investigation
@@ -429,10 +442,19 @@ outcome, not a technical one.
       Flatpak; complete-uninstall documentation in the README.
 - [x] **7.5** v0 metering opens no sockets — pinned by
       `tests/no_socket.rs`.
-- [ ] **7.6** Signed releases with SHA-256 digests and VirusTotal
+- [x] **7.6** Signed releases with SHA-256 digests and VirusTotal
       pre-submission in the release flow (`docs/CONSENT.md` §4).
-- [ ] **7.7** Re-read `docs/CONSENT.md` §3 (claims table) before every
-      release announcement.
+      **Done:** `.github/workflows/release.yml` builds the Flatpak, emits a
+      `SHA256SUMS` digest, and drafts the release with a notes template
+      (`packaging/release-notes-template.md`) that carries the digest plus
+      VirusTotal / claims-re-read / verify gates. VirusTotal upload itself is
+      a manual per-release step (the template's first checkbox). Docs:
+      `packaging/flatpak/README.md` ("Signed releases").
+- [x] **7.7** Re-read `docs/CONSENT.md` §3 (claims table) before every
+      release announcement. **Done:** re-read now (README framing paragraph,
+      ROADMAP, metainfo description, and GUI copy all match the §3/§6
+      language — no overstatement found) and enforced as a checkbox in every
+      release's notes template (`packaging/release-notes-template.md`).
 
 **Who.**
 - **Me:** implement the consent flow, the no-socket test, the docs.

@@ -1,0 +1,84 @@
+name: release
+
+# MAINNET-CHECKLIST §7.6: signed releases with SHA-256 digests and a
+# VirusTotal pre-submission step. Trigger on a v* tag push or manually.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release (e.g. v0.1.1)
+        required: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  flatpak:
+    name: Build Flatpak + SHA-256
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest: packaging/flatpak/io.github.douglasdemaio.Vtessera.json
+          build-bundle: true
+          bundle: vtessera.flatpak
+          default-branch: stable
+          repository-url: https://flathub.org/repo/flathub.flatpakrepo
+          repository-name: flathub
+          cache: true
+          cache-key: flatpak-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Compute SHA-256
+        run: sha256sum vtessera.flatpak > SHA256SUMS
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            vtessera.flatpak
+            SHA256SUMS
+
+  release:
+    name: Draft release
+    needs: flatpak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: artifacts
+
+      - name: Resolve version
+        run: |
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ]; then V="${{ github.ref_name }}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Build release notes
+        run: |
+          SHA=$(awk '{print $1}' artifacts/SHA256SUMS)
+          python3 - packaging/release-notes-template.md > notes.md <<EOF
+          import sys
+          text = open(sys.argv[1]).read()
+          text = text.replace("{VERSION}", "$VERSION")
+          text = text.replace("{DATE}", "$(date -u +%F)")
+          text = text.replace("{SHA256}", "$SHA")
+          sys.stdout.write(text)
+          EOF
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$VERSION" \
+            artifacts/vtessera.flatpak \
+            artifacts/SHA256SUMS \
+            --notes-file notes.md
