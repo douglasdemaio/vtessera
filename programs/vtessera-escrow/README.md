@@ -68,6 +68,13 @@ solana-verify build
 sha256sum target/deploy/vtessera_escrow.so
 ```
 
+**`programs/Cargo.lock` must stay at lockfile version 3.** The pinned
+build image for Solana 1.18.26 ships Rust 1.75, which cannot parse
+version-4 lockfiles; a newer `cargo` will rewrite the header on the
+next `cargo generate-lockfile`/`update`. If that happens, change the
+header back to `version = 3` (registry-only lockfiles are identical in
+v3 and v4) and re-run the job.
+
 The reproducible SHA-256 of the deployed program is committed at
 `DEPLOYED_SHA256.txt` (§5.3 — filled at mainnet deploy with the deploy
 date, program ID, and commit). Anyone can verify the deployed program
