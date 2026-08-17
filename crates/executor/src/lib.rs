@@ -16,7 +16,12 @@
 //! **Shipped:** the `cloud-hypervisor` feature gates the first production
 //! CPU backend: `cloud_hypervisor::CloudHypervisorExecutor`, which boots
 //! each job in a disposable Cloud Hypervisor microVM (host kernel +
-//! custom initramfs, virtio-fs job share, no guest network).
+//! custom initramfs, virtio-fs job share, no guest network). The `gpu`
+//! feature extends the CH backend with whole-GPU VFIO passthrough
+//! (ROADMAP.md §1c): the `vtessera-gpu` helper manages PCI bind/unbind,
+//! the executor passes `--device host=...` to CH, and the guest loads
+//! vendor drivers from the workload image. Both NVIDIA and AMD are
+//! supported.
 //!
 //! See ROADMAP.md §1 for the full picture, in particular:
 //!

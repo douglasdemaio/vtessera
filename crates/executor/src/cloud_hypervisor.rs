@@ -44,6 +44,11 @@ pub struct CloudHypervisorConfig {
     pub extra_args: Vec<String>,
     /// Debug: keep the workdir after the job for inspection.
     pub keep_jobs: bool,
+    /// PCI addresses of VFIO devices to pass through (GPU jobs).
+    /// Empty for CPU-only jobs.
+    pub vfio_devices: Vec<String>,
+    /// Path to the vtessera-gpu helper binary.
+    pub gpu_helper: PathBuf,
 }
 
 impl Default for CloudHypervisorConfig {
@@ -57,6 +62,8 @@ impl Default for CloudHypervisorConfig {
             virtiofsd_binary: PathBuf::from("/usr/libexec/virtiofsd"),
             extra_args: Vec::new(),
             keep_jobs: false,
+            vfio_devices: Vec::new(),
+            gpu_helper: PathBuf::from("/usr/bin/vtessera-gpu"),
         }
     }
 }
@@ -144,27 +151,46 @@ fn parse_metering(
         }
     };
 
+    let is_gpu = matches!(
+        spec.devices.class,
+        DeviceClass::NvidiaGpu { .. } | DeviceClass::AmdGpu { .. }
+    );
+
     Ok(JobMetering {
         job_id: spec.job_id.clone(),
         backend,
         device: spec.devices.class.clone(),
         cpu_seconds: guest.cpu_seconds,
         peak_mem_kb: guest.peak_mem_kb,
-        gpu_seconds: 0.0,
+        gpu_seconds: if is_gpu {
+            guest.elapsed_secs as f64
+        } else {
+            0.0
+        },
         vram_gb_hours: 0.0,
         exit_status,
         elapsed_secs: guest.elapsed_secs,
     })
 }
 
-/// CH-specific admission: CPU-only, network-policy `None` only.
-fn ch_admission(spec: &JobSpec) -> Result<(), ExecutorError> {
+/// CH-specific admission: GPU allowed when vfio_devices configured,
+/// network-policy `None` only.
+fn ch_admission(spec: &JobSpec, config: &CloudHypervisorConfig) -> Result<(), ExecutorError> {
     crate::admission_check(spec)?;
-    if !matches!(spec.devices.class, DeviceClass::Cpu) {
-        return Err(ExecutorError::Admission(
-            "CloudHypervisorExecutor only runs CPU-class jobs; GPU passthrough is a follow-up"
-                .into(),
-        ));
+    match &spec.devices.class {
+        DeviceClass::Cpu => {}
+        DeviceClass::NvidiaMig { .. } => {
+            return Err(ExecutorError::Admission(
+                "MIG not yet supported; use whole-GPU".into(),
+            ));
+        }
+        DeviceClass::NvidiaGpu { .. } | DeviceClass::AmdGpu { .. } => {
+            if config.vfio_devices.is_empty() {
+                return Err(ExecutorError::Admission(
+                    "GPU job requires vfio_devices in config".into(),
+                ));
+            }
+        }
     }
     if spec.network != NetworkPolicy::None {
         return Err(ExecutorError::Admission(
@@ -175,9 +201,75 @@ fn ch_admission(spec: &JobSpec) -> Result<(), ExecutorError> {
     Ok(())
 }
 
+/// GPU state entry read from the helper's state file.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GpuDevice {
+    pub pci_address: String,
+    pub vendor: String,
+    pub model: String,
+    pub vram_mb: u32,
+    pub bound_at: String,
+}
+
+/// Match a GPU job's DeviceRequirements against available VFIO-bound GPUs.
+fn select_gpu(
+    spec: &JobSpec,
+    config: &CloudHypervisorConfig,
+) -> Result<Vec<String>, ExecutorError> {
+    let (vendor, min_vram) = match &spec.devices.class {
+        DeviceClass::NvidiaGpu { .. } => ("nvidia", spec.devices.min_vram_mb),
+        DeviceClass::AmdGpu { .. } => ("amd", spec.devices.min_vram_mb),
+        DeviceClass::NvidiaMig { .. } => {
+            return Err(ExecutorError::Admission(
+                "MIG not yet supported; use whole-GPU".into(),
+            ));
+        }
+        DeviceClass::Cpu => return Ok(Vec::new()),
+    };
+
+    let state_path = config
+        .gpu_helper
+        .parent()
+        .unwrap_or(&PathBuf::from("/usr/bin"))
+        .join("..")
+        .join("lib")
+        .join("vtessera")
+        .join("gpus.json");
+    let state_path = if state_path.exists() {
+        state_path
+    } else {
+        PathBuf::from("/var/lib/vtessera/gpus.json")
+    };
+
+    let devices: Vec<GpuDevice> = fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let matched: Vec<String> = devices
+        .iter()
+        .filter(|g| g.vendor == vendor && g.vram_mb >= min_vram)
+        .filter(|g| config.vfio_devices.contains(&g.pci_address))
+        .map(|g| g.pci_address.clone())
+        .collect();
+
+    if matched.is_empty() {
+        let available: Vec<String> = devices
+            .iter()
+            .map(|g| format!("{} ({}, {}MB)", g.pci_address, g.vendor, g.vram_mb))
+            .collect();
+        return Err(ExecutorError::Admission(format!(
+            "no matching GPU: vendor={vendor}, min_vram={min_vram}MB, available=[{}]",
+            available.join(", ")
+        )));
+    }
+
+    Ok(matched)
+}
+
 impl Executor for CloudHypervisorExecutor {
     fn run(&self, spec: &JobSpec) -> Result<JobMetering, ExecutorError> {
-        ch_admission(spec)?;
+        ch_admission(spec, &self.config)?;
 
         // virtiofs shared memory + kernel overhead requires >= 128 MiB.
         const MIN_MEM_KB: u64 = 128 * 1024;
@@ -295,6 +387,16 @@ impl Executor for CloudHypervisorExecutor {
             .arg("--api-socket")
             .arg(job_dir.join("ch.sock"))
             .args(&self.config.extra_args);
+
+        // GPU: pass VFIO devices through to the guest.
+        if !self.config.vfio_devices.is_empty() {
+            // Validate that requested GPUs are actually bound.
+            let _matched = select_gpu(spec, &self.config)?;
+            for device in &self.config.vfio_devices {
+                cmd.args(["--device", &format!("host={device}")]);
+            }
+        }
+
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
@@ -337,13 +439,17 @@ impl Executor for CloudHypervisorExecutor {
 
         let result = if timed_out {
             let elapsed_secs = spec.max_duration_secs.max(1);
+            let is_gpu = matches!(
+                spec.devices.class,
+                DeviceClass::NvidiaGpu { .. } | DeviceClass::AmdGpu { .. }
+            );
             Ok(JobMetering {
                 job_id: spec.job_id.clone(),
                 backend: crate::Backend::CloudHypervisor,
                 device: spec.devices.class.clone(),
                 cpu_seconds: 0.0,
                 peak_mem_kb: 0,
-                gpu_seconds: 0.0,
+                gpu_seconds: if is_gpu { elapsed_secs as f64 } else { 0.0 },
                 vram_gb_hours: 0.0,
                 exit_status: ExitStatus::TimedOut,
                 elapsed_secs,
@@ -466,8 +572,9 @@ mod tests {
         spec.devices.class = DeviceClass::NvidiaGpu {
             model: "H100".into(),
         };
+        let config = CloudHypervisorConfig::default();
         assert!(matches!(
-            ch_admission(&spec),
+            ch_admission(&spec, &config),
             Err(ExecutorError::Admission(_))
         ));
     }
@@ -476,14 +583,76 @@ mod tests {
     fn admission_rejects_network() {
         let mut spec = cpu_spec("net");
         spec.network = NetworkPolicy::OutboundHttps;
+        let config = CloudHypervisorConfig::default();
         assert!(matches!(
-            ch_admission(&spec),
+            ch_admission(&spec, &config),
             Err(ExecutorError::Admission(_))
         ));
     }
 
     #[test]
     fn admission_accepts_cpu_none() {
-        assert!(ch_admission(&cpu_spec("ok")).is_ok());
+        let config = CloudHypervisorConfig::default();
+        assert!(ch_admission(&cpu_spec("ok"), &config).is_ok());
+    }
+
+    #[test]
+    fn admission_allows_gpu_with_vfio() {
+        let mut spec = cpu_spec("gpu-ok");
+        spec.devices.class = DeviceClass::NvidiaGpu {
+            model: "H100".into(),
+        };
+        spec.devices.min_vram_mb = 80000;
+        let config = CloudHypervisorConfig {
+            vfio_devices: vec!["0000:01:00.0".into()],
+            ..Default::default()
+        };
+        assert!(ch_admission(&spec, &config).is_ok());
+    }
+
+    #[test]
+    fn admission_rejects_gpu_without_vfio() {
+        let mut spec = cpu_spec("gpu-novfio");
+        spec.devices.class = DeviceClass::NvidiaGpu {
+            model: "H100".into(),
+        };
+        spec.devices.min_vram_mb = 80000;
+        let config = CloudHypervisorConfig::default();
+        assert!(matches!(
+            ch_admission(&spec, &config),
+            Err(ExecutorError::Admission(_))
+        ));
+    }
+
+    #[test]
+    fn admission_rejects_mig() {
+        let mut spec = cpu_spec("mig");
+        spec.devices.class = DeviceClass::NvidiaMig {
+            parent_model: "H100".into(),
+            profile: "1g.10gb".into(),
+        };
+        spec.devices.min_vram_mb = 10000;
+        let config = CloudHypervisorConfig {
+            vfio_devices: vec!["0000:01:00.0".into()],
+            ..Default::default()
+        };
+        assert!(matches!(
+            ch_admission(&spec, &config),
+            Err(ExecutorError::Admission(_))
+        ));
+    }
+
+    #[test]
+    fn admission_allows_amd_gpu_with_vfio() {
+        let mut spec = cpu_spec("amd-gpu");
+        spec.devices.class = DeviceClass::AmdGpu {
+            model: "MI300X".into(),
+        };
+        spec.devices.min_vram_mb = 192000;
+        let config = CloudHypervisorConfig {
+            vfio_devices: vec!["0000:01:00.0".into()],
+            ..Default::default()
+        };
+        assert!(ch_admission(&spec, &config).is_ok());
     }
 }

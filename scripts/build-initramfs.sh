@@ -82,6 +82,36 @@ cd /mnt
 
 mkdir -p /run
 
+# --- GPU detection: load driver from workload image if present ---------------
+# Scan for VGA (0x030000) or 3D controller (0x030200) in sysfs.
+# The workload image is expected to contain driver/<vendor>.ko files.
+for _cls in /sys/bus/pci/devices/*/class; do
+    [ -r "$_cls" ] || continue
+    _class=$(cat "$_cls" 2>/dev/null)
+    case "$_class" in
+        0x030000|0x030200)
+            _devdir=$(dirname "$_cls")
+            _vendor=$(cat "$_devdir/vendor" 2>/dev/null)
+            case "$_vendor" in
+                0x10de) # NVIDIA
+                    if [ -f /mnt/driver/nvidia.ko ]; then
+                        insmod /mnt/driver/nvidia.ko 2>/dev/null || true
+                    fi
+                    if [ -f /mnt/driver/nvidia-uvm.ko ]; then
+                        insmod /mnt/driver/nvidia-uvm.ko 2>/dev/null || true
+                    fi
+                    ;;
+                0x1002) # AMD
+                    if [ -f /mnt/driver/amdgpu.ko ]; then
+                        insmod /mnt/driver/amdgpu.ko 2>/dev/null || true
+                    fi
+                    ;;
+            esac
+            break
+            ;;
+    esac
+done
+
 # --- parse manifest.json (JSON → raw lines) --------------------------------
 # awk extracts command args and env pairs as raw strings (one per line).
 # No quoting is done here — the shell handles it below.

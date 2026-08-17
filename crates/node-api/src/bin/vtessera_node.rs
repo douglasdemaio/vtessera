@@ -81,6 +81,7 @@ fn usage_and_exit() -> ! {
         --escrow <pda> --network <id> \
         --key <identity.key> --state-dir <dir> \
         [--backend noop-cpu|local-cpu|cloud-hypervisor] \
+        [--vfio-devices <pci,pci,...>] \
         [--publish <index-url>] [--publish-interval <secs>]"
     );
     process::exit(2);
@@ -94,6 +95,7 @@ struct Args {
     key_path: String,
     state_dir: String,
     backend: BackendChoice,
+    vfio_devices: Vec<String>,
     publish: Option<String>,
     publish_interval: Duration,
 }
@@ -115,7 +117,7 @@ impl BackendChoice {
         }
     }
 
-    fn build(self, id: &NodeIdentity) -> Arc<dyn JobRunner> {
+    fn build(self, id: &NodeIdentity, vfio_devices: &[String]) -> Arc<dyn JobRunner> {
         match self {
             BackendChoice::NoopCpu => Arc::new(ExecutorRunner {
                 executor: Box::new(vtessera_executor::NoopCpuExecutor),
@@ -138,15 +140,20 @@ impl BackendChoice {
                     receipts_dir: id.receipts_dir.clone(),
                 })
             }
-            BackendChoice::CloudHypervisor => Arc::new(ExecutorRunner {
-                executor: Box::new(
-                    vtessera_executor::cloud_hypervisor::CloudHypervisorExecutor::default(),
-                ),
-                node_id: id.node_id.clone(),
-                payout_id: id.payout_id.clone(),
-                signing_key: id.signing_key.clone(),
-                receipts_dir: id.receipts_dir.clone(),
-            }),
+            BackendChoice::CloudHypervisor => {
+                let mut config =
+                    vtessera_executor::cloud_hypervisor::CloudHypervisorConfig::default();
+                config.vfio_devices = vfio_devices.to_vec();
+                Arc::new(ExecutorRunner {
+                    executor: Box::new(
+                        vtessera_executor::cloud_hypervisor::CloudHypervisorExecutor { config },
+                    ),
+                    node_id: id.node_id.clone(),
+                    payout_id: id.payout_id.clone(),
+                    signing_key: id.signing_key.clone(),
+                    receipts_dir: id.receipts_dir.clone(),
+                })
+            }
         }
     }
 }
@@ -159,6 +166,7 @@ fn parse_args() -> Args {
     let mut key_path: Option<String> = None;
     let mut state_dir: Option<String> = None;
     let mut backend = BackendChoice::NoopCpu;
+    let mut vfio_devices: Vec<String> = Vec::new();
     let mut publish: Option<String> = None;
     let mut publish_interval: u64 = DEFAULT_PUBLISH_INTERVAL_SECS;
     let mut it = env::args().skip(1);
@@ -170,6 +178,15 @@ fn parse_args() -> Args {
             "--network" => network = it.next(),
             "--key" => key_path = it.next(),
             "--state-dir" => state_dir = it.next(),
+            "--vfio-devices" => {
+                if let Some(s) = it.next() {
+                    vfio_devices = s
+                        .split(',')
+                        .filter(|d| !d.is_empty())
+                        .map(String::from)
+                        .collect();
+                }
+            }
             "--publish" => publish = it.next(),
             "--publish-interval" => {
                 if let Some(s) = it.next() {
@@ -196,6 +213,7 @@ fn parse_args() -> Args {
             key_path: k,
             state_dir: s,
             backend,
+            vfio_devices,
             publish,
             publish_interval: Duration::from_secs(publish_interval),
         },
@@ -429,7 +447,7 @@ fn main() {
         payout_id,
         receipts_dir,
     };
-    let runner = args.backend.build(&identity);
+    let runner = args.backend.build(&identity, &args.vfio_devices);
 
     // Offer-index wiring: register the offer with the index now, then keep
     // refreshing it on an interval. Registration failures are logged, never

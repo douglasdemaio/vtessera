@@ -10,9 +10,19 @@ repository.workspace = true
 name = "vtessera_executor"
 path = "src/lib.rs"
 
+[[bin]]
+name = "vtessera-gpu"
+path = "src/bin/vtessera_gpu.rs"
+required-features = ["gpu"]
+
 [[test]]
 name = "ch_cpu_integration"
 path = "tests/ch_cpu_integration.rs"
+required-features = ["cloud-hypervisor"]
+
+[[test]]
+name = "ch_gpu_integration"
+path = "tests/ch_gpu_integration.rs"
 required-features = ["cloud-hypervisor"]
 
 [features]
@@ -22,6 +32,10 @@ default = []
 # only serde_json for the manifest/metering JSON. The default build stays
 # dep-light (serde + hex) so CI and the v0 daemon never link this surface.
 cloud-hypervisor = ["dep:serde_json"]
+# GPU passthrough via VFIO (ROADMAP.md §1c). Extends the CH backend with
+# --device host=... for whole-GPU passthrough. Adds the vtessera-gpu helper
+# binary for PCI bind/unbind lifecycle.
+gpu = ["cloud-hypervisor"]
 
 [dependencies]
 # Pinned via the workspace. The executor crate's threat model is documented in
