@@ -6,14 +6,15 @@ sellers settling in the **same stablecoin the buyer pays** — **EURC or
 USDC** — plus a flat SOL protocol fee. There is **no Vtessera token** —
 the protocol is technology, not a token.
 
-> **Status.** v0 (`vtesserad`) is a read-only metering daemon: it samples
+> **Status.** `vtesserad` v0 is a read-only metering daemon: it samples
 > `/proc`, writes signed Ed25519 receipts to a state directory, opens no
 > sockets, and runs no third-party code. The escrow program is built
 > (Anchor) and deployed live on **Solana devnet**; `vtessera-node`
 > advertises a signed offer and negotiates paid jobs over **x402**
 > (`HTTP 402 Payment Required`), demonstrated end-to-end by
-> `crates/x402-client` + `scripts/x402-demo.sh`. The remaining modules
-> are in active build under separate workspace crates (see `ROADMAP.md`).
+> `crates/x402-client` + `scripts/x402-demo.sh`. **Module 1 shipped:**
+> `--backend cloud-hypervisor` runs each job in a disposable Cloud
+> Hypervisor microVM (CPU-only, no guest network). See `ROADMAP.md`.
 
 ## What Vtessera is
 
@@ -43,6 +44,7 @@ agent contracts node  ──▶  job contract; price OR free
    ↓
  free path  ─▶  HTTP 200, job runs, no transaction
  paid path  ─▶  HTTP 402 (x402) → agent signs stablecoin payment → retries
+ executor   ─▶  --backend cloud-hypervisor boots a disposable microVM
 
 paid path on confirmation:
    buyer EURC/USDC  ─▶  escrow PDA (program-owned, no human withdraw)
@@ -70,7 +72,7 @@ vtessera/
 │   ├── vtesserad/                  # v0 metering daemon (this README's quickstart)
 │   ├── vtessera-offer/             # signed-offer types (canonical bytes + Ed25519)
 │   ├── vtessera-node-api/          # agent-facing HTTP server: offer, jobs, 402/x402
-│   ├── vtessera-executor/          # job execution backends (Module 1: noop-cpu, local-cpu)
+│   ├── vtessera-executor/          # job execution backends (Module 1: noop-cpu, local-cpu, cloud-hypervisor)
 │   ├── vtessera-settlement/        # receipt verification + settlement (Module 3, skeleton)
 │   ├── vtessera-gui/               # GTK4 desktop app (Flatpak-packaged)
 │   ├── devnet-demo/                # excluded: exercises the devnet escrow end-to-end
@@ -79,7 +81,8 @@ vtessera/
 │   └── vtessera-escrow/            # Anchor escrow program — live on Solana devnet
 ├── packaging/                      # RPM spec, systemd unit, AppArmor, example config, Flatpak
 ├── scripts/
-│   └── x402-demo.sh                # one-command agent demo against devnet
+│   ├── x402-demo.sh                # one-command agent demo against devnet
+│   └── build-initramfs.sh          # builds the CH executor's guest initramfs
 ├── docs/
 │   ├── DESIGN.md                   # design index
 │   └── CONSENT.md                  # consent & disclosure spec (UI + copy rules)
@@ -118,7 +121,9 @@ Vtessera is an opt-in compute node for AI agents, settled in EURC/USDC. It
 asks your permission before it does anything: **metering consent on first
 run**, and a separate, **off-by-default switch** before it accepts workloads
 from other agents. Jobs run through your chosen backend — simulated by
-default, or executed on this machine **with no sandbox** if you say so. You
+default, executed on this machine **with no sandbox** if you say so, or
+run inside a disposable **Cloud Hypervisor microVM** (CPU-only, no guest
+network) for real isolation. You
 can stop everything with one button and uninstall completely at any time.
 Vtessera never starts itself, never restarts itself, and never runs code you
 didn't approve. There is no token, and settlement is a flat SOL protocol fee
@@ -225,6 +230,23 @@ CI additionally gates the module crates (incl. `vtessera-node-api` with
 `.github/workflows/ci.yml`. Note `cargo fmt --check` checks the whole
 workspace, so the GUI code must be formatted even on machines without the
 GTK4 dev libraries.
+
+### Integration tests (Cloud Hypervisor CPU backend)
+
+These boot a real VM and require `/dev/kvm`, `cloud-hypervisor`,
+`virtiofsd`, and an initramfs built by `scripts/build-initramfs.sh`:
+
+```bash
+VTESSERA_CH_INTEGRATION=1 CH_INITRAMFS=/var/lib/vtessera/initramfs.cpio.gz \
+  cargo test -p vtessera-executor --features cloud-hypervisor --test ch_cpu_integration
+```
+
+The initramfs must be built first (requires `busybox-static` and the
+host kernel's `fuse.ko`/`virtiofs.ko` modules):
+
+```bash
+sudo scripts/build-initramfs.sh
+```
 
 ## Quickstart — smoke test (no systemd)
 
