@@ -13,6 +13,11 @@
 //! the VM, VFIO for GPU passthrough, DCGM for per-job GPU metering — land
 //! behind cargo features.
 //!
+//! **Shipped:** the `cloud-hypervisor` feature gates the first production
+//! CPU backend: `cloud_hypervisor::CloudHypervisorExecutor`, which boots
+//! each job in a disposable Cloud Hypervisor microVM (host kernel +
+//! custom initramfs, virtio-fs job share, no guest network).
+//!
 //! See ROADMAP.md §1 for the full picture, in particular:
 //!
 //! - §1a — VMM choice (Kata + Cloud Hypervisor recommended)
@@ -28,6 +33,13 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+/// Cloud Hypervisor microVM backend — Module 1's production CPU path
+/// (ROADMAP.md §1). Feature-gated: the default build never compiles this
+/// surface. See the module docs and
+/// `docs/superpowers/specs/2026-08-16-cloud-hypervisor-cpu-executor-design.md`.
+#[cfg(feature = "cloud-hypervisor")]
+pub mod cloud_hypervisor;
 
 /// What the executor can run.
 ///
@@ -365,7 +377,7 @@ impl Executor for LocalCpuExecutor {
 /// Pure function so it's straightforward to test. Backends call this
 /// before any privileged operation so a malformed spec can't escape the
 /// trait boundary into VMM territory.
-fn admission_check(spec: &JobSpec) -> Result<(), ExecutorError> {
+pub(crate) fn admission_check(spec: &JobSpec) -> Result<(), ExecutorError> {
     if spec.job_id.is_empty() {
         return Err(ExecutorError::Admission("empty job_id".into()));
     }

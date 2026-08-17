@@ -10,9 +10,23 @@ repository.workspace = true
 name = "vtessera_executor"
 path = "src/lib.rs"
 
+[[test]]
+name = "ch_cpu_integration"
+path = "tests/ch_cpu_integration.rs"
+required-features = ["cloud-hypervisor"]
+
+[features]
+default = []
+# Production CPU backend: Cloud Hypervisor microVM (ROADMAP.md §1). Spawns the
+# `cloud-hypervisor` binary — no Rust-side VMM bindings — so the feature adds
+# only serde_json for the manifest/metering JSON. The default build stays
+# dep-light (serde + hex) so CI and the v0 daemon never link this surface.
+cloud-hypervisor = ["dep:serde_json"]
+
 [dependencies]
 # Pinned via the workspace. The executor crate's threat model is documented in
 # ROADMAP.md §1; production backends (Kata + Cloud Hypervisor + VFIO + DCGM)
 # add their own deps behind cargo features as they land.
 serde = { workspace = true }
 hex = { workspace = true }
+serde_json = { workspace = true, optional = true }

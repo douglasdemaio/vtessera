@@ -82,6 +82,14 @@ model and audit.
 
 **Workspace home:** `crates/executor`.
 
+**Shipped: Cloud Hypervisor CPU backend.** A production CPU execution path
+that boots each job in a disposable Cloud Hypervisor microVM (host kernel +
+custom initramfs, no guest network, virtio-fs job share). Feature-gated
+behind `cloud-hypervisor` in the executor crate; `vtessera-node --backend
+cloud-hypervisor` wires it. `scripts/build-initramfs.sh` builds the
+guest. GPU, networking, CPU pinning, and the Kata/OCI path remain
+follow-ups below.
+
 ### 1a. Pick a VMM that can pass through accelerators
 
 - **Kata Containers on a Cloud Hypervisor backend** — *recommended.*

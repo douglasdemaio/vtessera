@@ -30,6 +30,10 @@
 //!     the devnet demo, never a production choice.
 //!   - `local-cpu` — runs the job's command on the host. **Not isolated**
 //!     (no cgroups/namespaces). Only choose this for trusted workloads.
+//!   - `cloud-hypervisor` — production isolation (ROADMAP.md §1): each job
+//!     boots a disposable microVM (host kernel + custom initramfs) with no
+//!     guest network. Requires `/dev/kvm`, `cloud-hypervisor`, and an
+//!     initramfs built by `scripts/build-initramfs.sh`.
 //!
 //! Routes (see `vtessera_node_api::dispatch`):
 //!
@@ -76,7 +80,7 @@ fn usage_and_exit() -> ! {
         "usage: vtessera-node --bind <host:port> --offer <path.json> \
         --escrow <pda> --network <id> \
         --key <identity.key> --state-dir <dir> \
-        [--backend noop-cpu|local-cpu] \
+        [--backend noop-cpu|local-cpu|cloud-hypervisor] \
         [--publish <index-url>] [--publish-interval <secs>]"
     );
     process::exit(2);
@@ -98,6 +102,7 @@ struct Args {
 enum BackendChoice {
     NoopCpu,
     LocalCpu,
+    CloudHypervisor,
 }
 
 impl BackendChoice {
@@ -105,6 +110,7 @@ impl BackendChoice {
         match s {
             "noop-cpu" => Some(BackendChoice::NoopCpu),
             "local-cpu" => Some(BackendChoice::LocalCpu),
+            "cloud-hypervisor" => Some(BackendChoice::CloudHypervisor),
             _ => None,
         }
     }
@@ -132,6 +138,15 @@ impl BackendChoice {
                     receipts_dir: id.receipts_dir.clone(),
                 })
             }
+            BackendChoice::CloudHypervisor => Arc::new(ExecutorRunner {
+                executor: Box::new(
+                    vtessera_executor::cloud_hypervisor::CloudHypervisorExecutor::default(),
+                ),
+                node_id: id.node_id.clone(),
+                payout_id: id.payout_id.clone(),
+                signing_key: id.signing_key.clone(),
+                receipts_dir: id.receipts_dir.clone(),
+            }),
         }
     }
 }

@@ -122,6 +122,41 @@ in `docs/CONSENT.md` (two consent gates, no autostart, one-action stop).
 Any new privileged component (executor, dispatch API) must re-run
 `systemd-analyze security` before it ships (ROADMAP §5).
 
+## Module 1 executor — Cloud Hypervisor CPU backend
+
+The executor (`crates/executor`, feature `cloud-hypervisor`) is the
+privileged component that actually runs buyer-submitted jobs. It lives
+**outside** the Anchor program but is the strongest attack surface in
+the stack.
+
+**Trust model (CPU backend):**
+
+- The executor runs as root inside the hardened `vtessera-node` systemd
+  unit. The `cloud-hypervisor` process is spawned as a child of the node.
+- Each job boots a **disposable microVM** (host kernel + custom initramfs)
+  with no guest network device (only a virtio-fs shared directory for
+  `manifest.json` and `out/`).
+- The **host is authoritative** for the wall-clock timeout
+  (`max_duration_secs`); the guest runner enforces a best-effort cap.
+- Admission requires `DeviceClass::Cpu` and `NetworkPolicy::None` — GPU
+  and networking are follow-ups that will have their own threat models.
+
+**Known limitations (documented, accepted):**
+
+- **Plaintext manifest and env on the shared dir.** The `manifest.json`
+  and environment variables are not encrypted at rest on the virtio-fs
+  share. Host policy must ensure `env` contains no secrets (credentials,
+  tokens, keys). A future attestation/confidential-compute path mitigates
+  this.
+- **Single-tenant-per-VM.** Each job gets its own microVM; there is no
+  multi-tenant isolation within a VM. This is a strength (isolation) and
+  a cost (per-job boot overhead).
+- **No attestation yet.** A buyer cannot currently verify that the
+  correct kernel/initramfs booted. Attestation hooks (Module 3 link) are
+  a follow-up.
+
+---
+
 ## Review / verification
 
 - Build: `anchor build` (or the CI-equivalent pinned toolchain).
