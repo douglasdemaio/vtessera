@@ -34,6 +34,10 @@ serve = [
     "dep:vtessera-executor",
     "dep:vtessera-settlement",
     "dep:ureq",
+    # Production CPU backend (ROADMAP.md §1): Cloud Hypervisor microVM. The
+    # feature only pulls serde_json in the executor crate; it spawns the
+    # `cloud-hypervisor` binary at runtime.
+    "vtessera-executor/cloud-hypervisor",
 ]
 
 [dependencies]
