@@ -49,6 +49,10 @@ pub struct CloudHypervisorConfig {
     pub vfio_devices: Vec<String>,
     /// Path to the vtessera-gpu helper binary.
     pub gpu_helper: PathBuf,
+    /// Allow time-sliced GPU access (multiple jobs sharing one GPU).
+    /// Only appropriate when the node operator trusts all workloads.
+    /// Default: false (whole-GPU only).
+    pub gpu_time_slice: bool,
 }
 
 impl Default for CloudHypervisorConfig {
@@ -64,6 +68,7 @@ impl Default for CloudHypervisorConfig {
             keep_jobs: false,
             vfio_devices: Vec::new(),
             gpu_helper: PathBuf::from("/usr/bin/vtessera-gpu"),
+            gpu_time_slice: false,
         }
     }
 }
@@ -153,7 +158,10 @@ fn parse_metering(
 
     let is_gpu = matches!(
         spec.devices.class,
-        DeviceClass::NvidiaGpu { .. } | DeviceClass::AmdGpu { .. }
+        DeviceClass::NvidiaGpu { .. }
+            | DeviceClass::NvidiaMig { .. }
+            | DeviceClass::NvidiaVgpu { .. }
+            | DeviceClass::AmdGpu { .. }
     );
 
     Ok(JobMetering {
@@ -174,15 +182,28 @@ fn parse_metering(
 }
 
 /// CH-specific admission: GPU allowed when vfio_devices configured,
-/// network-policy `None` only.
+/// network-policy `None` only. When `gpu_time_slice` is false (default),
+/// GPU jobs are whole-GPU exclusive; when true, multiple jobs may share
+/// one GPU (trusted-tenant only).
 fn ch_admission(spec: &JobSpec, config: &CloudHypervisorConfig) -> Result<(), ExecutorError> {
     crate::admission_check(spec)?;
     match &spec.devices.class {
         DeviceClass::Cpu => {}
         DeviceClass::NvidiaMig { .. } => {
-            return Err(ExecutorError::Admission(
-                "MIG not yet supported; use whole-GPU".into(),
-            ));
+            if config.vfio_devices.is_empty() {
+                return Err(ExecutorError::Admission(
+                    "MIG job requires vfio_devices in config".into(),
+                ));
+            }
+            // Profile validation happens in select_gpu
+        }
+        DeviceClass::NvidiaVgpu { .. } => {
+            if config.vfio_devices.is_empty() {
+                return Err(ExecutorError::Admission(
+                    "vGPU job requires vfio_devices in config".into(),
+                ));
+            }
+            // Profile validation happens in select_gpu
         }
         DeviceClass::NvidiaGpu { .. } | DeviceClass::AmdGpu { .. } => {
             if config.vfio_devices.is_empty() {
@@ -190,6 +211,11 @@ fn ch_admission(spec: &JobSpec, config: &CloudHypervisorConfig) -> Result<(), Ex
                     "GPU job requires vfio_devices in config".into(),
                 ));
             }
+            // Time-slicing policy: when gpu_time_slice is false, the
+            // scheduler must ensure only one GPU job runs at a time on
+            // each device. When true, multiple jobs may share a GPU.
+            // The actual occupancy check is enforced by select_gpu at
+            // schedule time, not here.
         }
     }
     if spec.network != NetworkPolicy::None {
@@ -209,6 +235,36 @@ pub struct GpuDevice {
     pub model: String,
     pub vram_mb: u32,
     pub bound_at: String,
+    /// MIG profiles this GPU supports (e.g. "1g.10gb", "3g.40gb").
+    #[serde(default)]
+    pub mig_profiles: Vec<String>,
+    /// Active MIG instances on this GPU.
+    #[serde(default)]
+    pub mig_instances: Vec<MigInstance>,
+    /// Available mediated device types (e.g. "nvidia-256", "nvidia-16").
+    #[serde(default)]
+    pub mdev_types: Vec<String>,
+    /// Active mediated device (vGPU) instances.
+    #[serde(default)]
+    pub mdev_instances: Vec<MdevInstance>,
+}
+
+/// A single MIG instance created on a parent GPU.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MigInstance {
+    pub uuid: String,
+    pub profile: String,
+    pub pci_address: String,
+    pub vram_mb: u32,
+}
+
+/// A single mediated device (vGPU) instance created on a parent GPU.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MdevInstance {
+    pub uuid: String,
+    pub vgpu_type: String,
+    pub pci_address: String,
+    pub vram_mb: u32,
 }
 
 /// Match a GPU job's DeviceRequirements against available VFIO-bound GPUs.
@@ -216,17 +272,6 @@ fn select_gpu(
     spec: &JobSpec,
     config: &CloudHypervisorConfig,
 ) -> Result<Vec<String>, ExecutorError> {
-    let (vendor, min_vram) = match &spec.devices.class {
-        DeviceClass::NvidiaGpu { .. } => ("nvidia", spec.devices.min_vram_mb),
-        DeviceClass::AmdGpu { .. } => ("amd", spec.devices.min_vram_mb),
-        DeviceClass::NvidiaMig { .. } => {
-            return Err(ExecutorError::Admission(
-                "MIG not yet supported; use whole-GPU".into(),
-            ));
-        }
-        DeviceClass::Cpu => return Ok(Vec::new()),
-    };
-
     let state_path = config
         .gpu_helper
         .parent()
@@ -246,25 +291,133 @@ fn select_gpu(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
-    let matched: Vec<String> = devices
-        .iter()
-        .filter(|g| g.vendor == vendor && g.vram_mb >= min_vram)
-        .filter(|g| config.vfio_devices.contains(&g.pci_address))
-        .map(|g| g.pci_address.clone())
-        .collect();
+    match &spec.devices.class {
+        DeviceClass::NvidiaGpu { .. } => {
+            let matched: Vec<String> = devices
+                .iter()
+                .filter(|g| g.vendor == "nvidia" && g.vram_mb >= spec.devices.min_vram_mb)
+                .filter(|g| config.vfio_devices.contains(&g.pci_address))
+                .map(|g| g.pci_address.clone())
+                .collect();
 
-    if matched.is_empty() {
-        let available: Vec<String> = devices
-            .iter()
-            .map(|g| format!("{} ({}, {}MB)", g.pci_address, g.vendor, g.vram_mb))
-            .collect();
-        return Err(ExecutorError::Admission(format!(
-            "no matching GPU: vendor={vendor}, min_vram={min_vram}MB, available=[{}]",
-            available.join(", ")
-        )));
+            if matched.is_empty() {
+                let available: Vec<String> = devices
+                    .iter()
+                    .map(|g| format!("{} ({}, {}MB)", g.pci_address, g.vendor, g.vram_mb))
+                    .collect();
+                return Err(ExecutorError::Admission(format!(
+                    "no matching GPU: vendor=nvidia, min_vram={}MB, available=[{}]",
+                    spec.devices.min_vram_mb,
+                    available.join(", ")
+                )));
+            }
+            Ok(matched)
+        }
+        DeviceClass::AmdGpu { .. } => {
+            let matched: Vec<String> = devices
+                .iter()
+                .filter(|g| g.vendor == "amd" && g.vram_mb >= spec.devices.min_vram_mb)
+                .filter(|g| config.vfio_devices.contains(&g.pci_address))
+                .map(|g| g.pci_address.clone())
+                .collect();
+
+            if matched.is_empty() {
+                let available: Vec<String> = devices
+                    .iter()
+                    .map(|g| format!("{} ({}, {}MB)", g.pci_address, g.vendor, g.vram_mb))
+                    .collect();
+                return Err(ExecutorError::Admission(format!(
+                    "no matching GPU: vendor=amd, min_vram={}MB, available=[{}]",
+                    spec.devices.min_vram_mb,
+                    available.join(", ")
+                )));
+            }
+            Ok(matched)
+        }
+        DeviceClass::NvidiaMig {
+            parent_model,
+            profile,
+        } => {
+            // Find a parent GPU matching the model with an active MIG instance
+            // matching the requested profile, whose VFIO PCI address is in our config.
+            let matched: Vec<String> = devices
+                .iter()
+                .filter(|g| {
+                    g.vendor == "nvidia"
+                        && (parent_model.is_empty() || g.model.contains(parent_model.as_str()))
+                })
+                .flat_map(|g| {
+                    g.mig_instances
+                        .iter()
+                        .filter(move |m| m.profile == *profile)
+                        .map(move |m| (g, m))
+                })
+                .filter(|(_, m)| config.vfio_devices.contains(&m.pci_address))
+                .map(|(_, m)| m.pci_address.clone())
+                .collect();
+
+            if matched.is_empty() {
+                let available: Vec<String> = devices
+                    .iter()
+                    .flat_map(|g| {
+                        g.mig_instances.iter().map(move |m| {
+                            format!(
+                                "{} ({}, profile={}, {}MB)",
+                                m.pci_address, g.model, m.profile, m.vram_mb
+                            )
+                        })
+                    })
+                    .collect();
+                return Err(ExecutorError::Admission(format!(
+                    "no matching MIG instance: parent_model={parent_model}, profile={profile}, available=[{}]",
+                    available.join(", ")
+                )));
+            }
+            Ok(matched)
+        }
+        DeviceClass::NvidiaVgpu {
+            parent_model,
+            profile,
+        } => {
+            // Find a parent GPU matching the model with an active mediated device
+            // matching the requested vGPU type, whose VFIO PCI address is in our config.
+            let matched: Vec<String> = devices
+                .iter()
+                .filter(|g| {
+                    g.vendor == "nvidia"
+                        && (parent_model.is_empty() || g.model.contains(parent_model.as_str()))
+                })
+                .flat_map(|g| {
+                    g.mdev_instances
+                        .iter()
+                        .filter(move |m| m.vgpu_type == *profile)
+                        .map(move |m| (g, m))
+                })
+                .filter(|(_, m)| config.vfio_devices.contains(&m.pci_address))
+                .map(|(_, m)| m.pci_address.clone())
+                .collect();
+
+            if matched.is_empty() {
+                let available: Vec<String> = devices
+                    .iter()
+                    .flat_map(|g| {
+                        g.mdev_instances.iter().map(move |m| {
+                            format!(
+                                "{} ({}, type={}, {}MB)",
+                                m.pci_address, g.model, m.vgpu_type, m.vram_mb
+                            )
+                        })
+                    })
+                    .collect();
+                return Err(ExecutorError::Admission(format!(
+                    "no matching vGPU instance: parent_model={parent_model}, profile={profile}, available=[{}]",
+                    available.join(", ")
+                )));
+            }
+            Ok(matched)
+        }
+        DeviceClass::Cpu => Ok(Vec::new()),
     }
-
-    Ok(matched)
 }
 
 impl Executor for CloudHypervisorExecutor {
@@ -441,7 +594,10 @@ impl Executor for CloudHypervisorExecutor {
             let elapsed_secs = spec.max_duration_secs.max(1);
             let is_gpu = matches!(
                 spec.devices.class,
-                DeviceClass::NvidiaGpu { .. } | DeviceClass::AmdGpu { .. }
+                DeviceClass::NvidiaGpu { .. }
+                    | DeviceClass::NvidiaMig { .. }
+                    | DeviceClass::NvidiaVgpu { .. }
+                    | DeviceClass::AmdGpu { .. }
             );
             Ok(JobMetering {
                 job_id: spec.job_id.clone(),
@@ -625,17 +781,29 @@ mod tests {
     }
 
     #[test]
-    fn admission_rejects_mig() {
-        let mut spec = cpu_spec("mig");
+    fn admission_allows_mig_with_vfio() {
+        let mut spec = cpu_spec("mig-ok");
         spec.devices.class = DeviceClass::NvidiaMig {
             parent_model: "H100".into(),
             profile: "1g.10gb".into(),
         };
         spec.devices.min_vram_mb = 10000;
         let config = CloudHypervisorConfig {
-            vfio_devices: vec!["0000:01:00.0".into()],
+            vfio_devices: vec!["0000:01:00.1".into()],
             ..Default::default()
         };
+        assert!(ch_admission(&spec, &config).is_ok());
+    }
+
+    #[test]
+    fn admission_rejects_mig_without_vfio() {
+        let mut spec = cpu_spec("mig-novfio");
+        spec.devices.class = DeviceClass::NvidiaMig {
+            parent_model: "H100".into(),
+            profile: "1g.10gb".into(),
+        };
+        spec.devices.min_vram_mb = 10000;
+        let config = CloudHypervisorConfig::default();
         assert!(matches!(
             ch_admission(&spec, &config),
             Err(ExecutorError::Admission(_))
@@ -654,5 +822,73 @@ mod tests {
             ..Default::default()
         };
         assert!(ch_admission(&spec, &config).is_ok());
+    }
+
+    #[test]
+    fn admission_allows_vgpu_with_vfio() {
+        let mut spec = cpu_spec("vgpu-ok");
+        spec.devices.class = DeviceClass::NvidiaVgpu {
+            parent_model: "A100".into(),
+            profile: "A100-80GB-5C".into(),
+        };
+        spec.devices.min_vram_mb = 16000;
+        let config = CloudHypervisorConfig {
+            vfio_devices: vec!["0000:01:00.0".into()],
+            ..Default::default()
+        };
+        assert!(ch_admission(&spec, &config).is_ok());
+    }
+
+    #[test]
+    fn admission_rejects_vgpu_without_vfio() {
+        let mut spec = cpu_spec("vgpu-novfio");
+        spec.devices.class = DeviceClass::NvidiaVgpu {
+            parent_model: "A100".into(),
+            profile: "A100-80GB-5C".into(),
+        };
+        spec.devices.min_vram_mb = 16000;
+        let config = CloudHypervisorConfig::default();
+        assert!(matches!(
+            ch_admission(&spec, &config),
+            Err(ExecutorError::Admission(_))
+        ));
+    }
+
+    #[test]
+    fn gpu_time_slice_default_is_false() {
+        let config = CloudHypervisorConfig::default();
+        assert!(!config.gpu_time_slice);
+    }
+
+    #[test]
+    fn gpu_time_slice_allows_gpu_with_vfio() {
+        let mut spec = cpu_spec("ts-ok");
+        spec.devices.class = DeviceClass::NvidiaGpu {
+            model: "H100".into(),
+        };
+        spec.devices.min_vram_mb = 80000;
+        let config = CloudHypervisorConfig {
+            vfio_devices: vec!["0000:01:00.0".into()],
+            gpu_time_slice: true,
+            ..Default::default()
+        };
+        assert!(ch_admission(&spec, &config).is_ok());
+    }
+
+    #[test]
+    fn gpu_time_slice_rejects_without_vfio() {
+        let mut spec = cpu_spec("ts-novfio");
+        spec.devices.class = DeviceClass::NvidiaGpu {
+            model: "H100".into(),
+        };
+        spec.devices.min_vram_mb = 80000;
+        let config = CloudHypervisorConfig {
+            gpu_time_slice: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            ch_admission(&spec, &config),
+            Err(ExecutorError::Admission(_))
+        ));
     }
 }

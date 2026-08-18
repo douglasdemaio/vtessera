@@ -53,6 +53,7 @@ pub enum FilterDevice {
     Cpu,
     NvidiaGpu,
     NvidiaMig,
+    NvidiaVgpu,
     AmdGpu,
 }
 
@@ -86,6 +87,7 @@ fn device_kind(d: &AdvertisedDevice) -> FilterDevice {
         AdvertisedDevice::Cpu { .. } => FilterDevice::Cpu,
         AdvertisedDevice::NvidiaGpu { .. } => FilterDevice::NvidiaGpu,
         AdvertisedDevice::NvidiaMig { .. } => FilterDevice::NvidiaMig,
+        AdvertisedDevice::NvidiaVgpu { .. } => FilterDevice::NvidiaVgpu,
         AdvertisedDevice::AmdGpu { .. } => FilterDevice::AmdGpu,
     }
 }
@@ -422,6 +424,7 @@ fn parse_filter(query: Option<&str>) -> OfferFilter {
                     "cpu" => f.device = Some(FilterDevice::Cpu),
                     "nvidia_gpu" => f.device = Some(FilterDevice::NvidiaGpu),
                     "nvidia_mig" => f.device = Some(FilterDevice::NvidiaMig),
+                    "nvidia_vgpu" => f.device = Some(FilterDevice::NvidiaVgpu),
                     "amd_gpu" => f.device = Some(FilterDevice::AmdGpu),
                     _ => {}
                 },

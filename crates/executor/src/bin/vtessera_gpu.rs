@@ -26,10 +26,68 @@ pub struct GpuDevice {
     pub model: String,
     pub vram_mb: u32,
     pub bound_at: String,
+    /// MIG profiles this GPU supports (e.g. "1g.10gb", "3g.40gb").
+    /// Empty for non-MIG GPUs or GPUs not yet queried.
+    #[serde(default)]
+    pub mig_profiles: Vec<String>,
+    /// Active MIG instances on this GPU.
+    #[serde(default)]
+    pub mig_instances: Vec<MigInstance>,
+    /// Available mediated device types (e.g. "nvidia-256", "nvidia-16").
+    /// Empty for GPUs without mdev support.
+    #[serde(default)]
+    pub mdev_types: Vec<String>,
+    /// Active mediated device (vGPU) instances.
+    #[serde(default)]
+    pub mdev_instances: Vec<MdevInstance>,
+}
+
+/// A single MIG instance created on a parent GPU.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MigInstance {
+    /// NVIDIA-assigned UUID for this MIG instance.
+    pub uuid: String,
+    /// MIG profile (e.g. "1g.10gb", "3g.40gb").
+    pub profile: String,
+    /// VFIO PCI address of the MIG instance (after bind to vfio-pci).
+    pub pci_address: String,
+    /// VRAM in MB for this MIG slice.
+    pub vram_mb: u32,
+}
+
+/// A single mediated device (vGPU) instance created on a parent GPU.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MdevInstance {
+    /// UUID assigned to this mediated device.
+    pub uuid: String,
+    /// vGPU type (e.g. "nvidia-256", "nvidia-16").
+    pub vgpu_type: String,
+    /// VFIO PCI address of the mediated device (after bind to vfio-pci).
+    pub pci_address: String,
+    /// VRAM in MB allocated to this vGPU instance.
+    pub vram_mb: u32,
 }
 
 fn usage() -> ! {
-    eprintln!("Usage: vtessera-gpu <bind|unbind|list> [--device <PCI_ADDRESS>]");
+    eprintln!("Usage: vtessera-gpu <COMMAND> [OPTIONS]");
+    eprintln!();
+    eprintln!("Commands:");
+    eprintln!("  bind        --device <ADDR>              Bind GPU to vfio-pci");
+    eprintln!("  unbind      --device <ADDR>              Unbind GPU from vfio-pci");
+    eprintln!("  list                                     List VFIO-bound GPUs");
+    eprintln!("  mig-list    --device <ADDR>              List MIG profiles and instances");
+    eprintln!("  mig-create  --device <ADDR> --profile <PROFILE>");
+    eprintln!(
+        "                                            Create a MIG instance and bind to vfio-pci"
+    );
+    eprintln!("  mig-destroy --device <ADDR> --uuid <UUID>");
+    eprintln!("                                            Destroy a MIG instance");
+    eprintln!("  mdev-list   --device <ADDR>              List mediated device types");
+    eprintln!("  mdev-create --device <ADDR> --type <TYPE>");
+    eprintln!(
+        "                                            Create a mediated device and bind to vfio-pci"
+    );
+    eprintln!("  mdev-destroy --uuid <UUID>               Destroy a mediated device");
     process::exit(1);
 }
 
@@ -175,6 +233,10 @@ fn detect_gpu(pci_addr: &str) -> Result<GpuDevice, String> {
         model: model.to_string(),
         vram_mb,
         bound_at: timestamp_now(),
+        mig_profiles: Vec::new(),
+        mig_instances: Vec::new(),
+        mdev_types: Vec::new(),
+        mdev_instances: Vec::new(),
     })
 }
 
@@ -218,10 +280,14 @@ fn cmd_bind(pci_addr: &str) -> Result<(), String> {
     eprintln!("{pci_addr}: bound to vfio-pci");
 
     // Detect GPU metadata
-    let gpu = detect_gpu(&pci_addr)?;
+    let mut gpu = detect_gpu(&pci_addr)?;
+    gpu.mdev_types = detect_mdev_types(&pci_addr).unwrap_or_default();
     eprintln!(
-        "{pci_addr}: vendor={} model={} vram={}MB",
-        gpu.vendor, gpu.model, gpu.vram_mb
+        "{pci_addr}: vendor={} model={} vram={}MB mdev_types={}",
+        gpu.vendor,
+        gpu.model,
+        gpu.vram_mb,
+        gpu.mdev_types.len()
     );
 
     // Update state file
@@ -296,6 +362,689 @@ fn cmd_list() -> Result<(), String> {
     Ok(())
 }
 
+/// Detect available MIG profiles for a GPU by parsing nvidia-smi output.
+/// Falls back to sysfs if nvidia-smi is not available.
+fn detect_mig_profiles(pci_addr: &str) -> Result<Vec<String>, String> {
+    let mut profiles = Vec::new();
+
+    // Try nvidia-smi mig --list first (most reliable)
+    let output = process::Command::new("nvidia-smi")
+        .args(["mig", "--list"])
+        .output();
+    if let Ok(o) = output {
+        if o.status.success() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for line in stdout.lines() {
+                // nvidia-smi mig --list output has lines like:
+                // "   1g.10gb       1        10240 MiB"
+                let trimmed = line.trim();
+                if trimmed.starts_with("1g.")
+                    || trimmed.starts_with("2g.")
+                    || trimmed.starts_with("3g.")
+                    || trimmed.starts_with("4g.")
+                    || trimmed.starts_with("7g.")
+                {
+                    if let Some(profile) = trimmed.split_whitespace().next() {
+                        profiles.push(profile.to_string());
+                    }
+                }
+            }
+            if !profiles.is_empty() {
+                return Ok(profiles);
+            }
+        }
+    }
+
+    // Fallback: check sysfs for MIG manager
+    let mig_dir = sysfs_path(pci_addr, "mig_manager");
+    if mig_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&mig_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // sysfs MIG entries are typically numeric instance IDs
+                if name.chars().all(|c| c.is_ascii_digit()) {
+                    let profile_path = entry.path().join("gpu_instance_profile");
+                    if let Ok(profile) = fs::read_to_string(&profile_path) {
+                        profiles.push(profile.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(profiles)
+}
+
+/// Detect active MIG instances on a GPU.
+fn detect_mig_instances(pci_addr: &str) -> Result<Vec<MigInstance>, String> {
+    let mut instances = Vec::new();
+
+    // Try nvidia-smi mig --list-devices
+    let output = process::Command::new("nvidia-smi")
+        .args(["mig", "--list-devices"])
+        .output();
+    if let Ok(o) = output {
+        if o.status.success() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                // Output format: "GPU 0: H100-80GB (UUID: GPU-xxxxx)"
+                // followed by MIG instances
+                if trimmed.contains("MIG") || trimmed.contains("Instance") {
+                    // Parse MIG instance lines
+                    if let Some(uuid_start) = trimmed.find("UUID:") {
+                        let uuid_part = &trimmed[uuid_start + 5..];
+                        if let Some(uuid_end) = uuid_part.find(')') {
+                            let uuid = uuid_part[..uuid_end].trim().to_string();
+                            // Try to determine profile from the line
+                            let profile = if trimmed.contains("1g.") {
+                                extract_profile(trimmed, "1g.")
+                            } else if trimmed.contains("2g.") {
+                                extract_profile(trimmed, "2g.")
+                            } else if trimmed.contains("3g.") {
+                                extract_profile(trimmed, "3g.")
+                            } else if trimmed.contains("4g.") {
+                                extract_profile(trimmed, "4g.")
+                            } else if trimmed.contains("7g.") {
+                                extract_profile(trimmed, "7g.")
+                            } else {
+                                "unknown".to_string()
+                            };
+                            instances.push(MigInstance {
+                                uuid,
+                                profile,
+                                pci_address: String::new(), // Filled after vfio-bind
+                                vram_mb: 0,                 // Filled from profile lookup
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: check sysfs
+    if instances.is_empty() {
+        let mig_dir = sysfs_path(pci_addr, "mig_manager");
+        if mig_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&mig_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.chars().all(|c| c.is_ascii_digit()) {
+                        let profile_path = entry.path().join("gpu_instance_profile");
+                        let profile = fs::read_to_string(&profile_path)
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        instances.push(MigInstance {
+                            uuid: format!("mig-{pci_addr}-{name}"),
+                            profile,
+                            pci_address: String::new(),
+                            vram_mb: 0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(instances)
+}
+
+fn extract_profile(line: &str, prefix: &str) -> String {
+    for word in line.split_whitespace() {
+        if word.starts_with(prefix) {
+            return word.to_string();
+        }
+    }
+    format!("{prefix}unknown")
+}
+
+/// Map a MIG profile to its approximate VRAM in MB.
+fn mig_profile_vram_mb(profile: &str) -> u32 {
+    if profile.contains("1g.") {
+        // 1g profiles: 10GB, 20GB, 40GB
+        if profile.contains("40gb") {
+            40960
+        } else if profile.contains("20gb") {
+            20480
+        } else {
+            10240
+        }
+    } else if profile.contains("2g.") {
+        // 2g profiles: 20GB, 40GB
+        if profile.contains("40gb") {
+            40960
+        } else {
+            20480
+        }
+    } else if profile.contains("3g.") {
+        // 3g profiles: 40GB, 80GB
+        if profile.contains("80gb") {
+            81920
+        } else {
+            40960
+        }
+    } else if profile.contains("4g.") {
+        // 4g profiles: 40GB, 80GB
+        if profile.contains("80gb") {
+            81920
+        } else {
+            40960
+        }
+    } else if profile.contains("7g.") {
+        // 7g is full GPU
+        81920
+    } else {
+        0
+    }
+}
+
+fn cmd_mig_list(pci_addr: &str) -> Result<(), String> {
+    let pci_addr = parse_pci_address(pci_addr)?;
+
+    // Check device exists
+    if !sysfs_path(&pci_addr, "vendor").exists() {
+        return Err(format!("PCI device not found: {pci_addr}"));
+    }
+
+    let profiles = detect_mig_profiles(&pci_addr)?;
+    let instances = detect_mig_instances(&pci_addr)?;
+
+    let output = serde_json::json!({
+        "pci_address": pci_addr,
+        "available_profiles": profiles,
+        "active_instances": instances,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).map_err(|e| format!("failed to serialize: {e}"))?
+    );
+    Ok(())
+}
+
+fn cmd_mig_create(pci_addr: &str, profile: &str) -> Result<(), String> {
+    let pci_addr = parse_pci_address(pci_addr)?;
+
+    // Check device exists
+    if !sysfs_path(&pci_addr, "vendor").exists() {
+        return Err(format!("PCI device not found: {pci_addr}"));
+    }
+
+    // Validate profile is available
+    let available = detect_mig_profiles(&pci_addr)?;
+    if !available.contains(&profile.to_string()) {
+        return Err(format!(
+            "MIG profile {profile} not available on {pci_addr}. Available: {:?}",
+            available
+        ));
+    }
+
+    // Create MIG instance via nvidia-smi
+    let output = process::Command::new("nvidia-smi")
+        .args(["mig", "--create-gpu-instance", profile, "--gpu", &pci_addr])
+        .output()
+        .map_err(|e| format!("failed to run nvidia-smi: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nvidia-smi mig create failed: {stderr}"));
+    }
+
+    // Discover the newly created MIG instance
+    let instances = detect_mig_instances(&pci_addr)?;
+    let new_instance = instances
+        .iter()
+        .find(|i| i.profile == profile)
+        .ok_or_else(|| "MIG instance created but not found in detection".to_string())?;
+
+    // Find the MIG instance's PCI address from sysfs
+    let mig_dir = sysfs_path(&pci_addr, "mig_manager");
+    let mut instance_pci = String::new();
+    if mig_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&mig_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.chars().all(|c| c.is_ascii_digit()) {
+                    // Check if this is the newly created instance
+                    let uuid_path = entry.path().join("gpu_instance_uuid");
+                    if let Ok(uuid) = fs::read_to_string(&uuid_path) {
+                        if uuid.trim() == new_instance.uuid {
+                            // Look for the PCI device in sysfs
+                            let pci_dir = entry.path().join("pci");
+                            if pci_dir.exists() {
+                                if let Ok(pci_entries) = fs::read_dir(&pci_dir) {
+                                    for pci_entry in pci_entries.flatten() {
+                                        let pci_name =
+                                            pci_entry.file_name().to_string_lossy().to_string();
+                                        if parse_pci_address(&pci_name).is_ok() {
+                                            instance_pci = pci_name;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if instance_pci.is_empty() {
+        eprintln!(
+            "warning: could not determine MIG instance PCI address; it may need manual vfio-bind"
+        );
+        instance_pci = format!("mig-{}-{}", pci_addr, new_instance.uuid);
+    }
+
+    // Unbind MIG instance from nvidia driver and bind to vfio-pci
+    let unbind_path = sysfs_path(&instance_pci, "driver/unbind");
+    if unbind_path.exists() {
+        fs::write(&unbind_path, &instance_pci)
+            .map_err(|e| format!("failed to unbind MIG instance: {e}"))?;
+    }
+
+    // Load vfio-pci
+    let status = process::Command::new("modprobe")
+        .arg("vfio-pci")
+        .status()
+        .map_err(|e| format!("failed to run modprobe vfio-pci: {e}"))?;
+    if !status.success() {
+        return Err("modprobe vfio-pci failed".into());
+    }
+
+    // Bind to vfio-pci
+    let bind_path = PathBuf::from("/sys/bus/pci/drivers/vfio-pci/bind");
+    if bind_path.exists() {
+        fs::write(&bind_path, &instance_pci)
+            .map_err(|e| format!("failed to bind MIG instance to vfio-pci: {e}"))?;
+    }
+
+    // Update state file
+    let mut devices = load_state();
+    if let Some(gpu) = devices.iter_mut().find(|d| d.pci_address == pci_addr) {
+        let mig = MigInstance {
+            uuid: new_instance.uuid.clone(),
+            profile: profile.to_string(),
+            pci_address: instance_pci.clone(),
+            vram_mb: mig_profile_vram_mb(profile),
+        };
+        // Don't add duplicate
+        if !gpu.mig_instances.iter().any(|i| i.uuid == mig.uuid) {
+            gpu.mig_instances.push(mig);
+        }
+    } else {
+        // GPU not in state file yet — detect and add it
+        let mut gpu = detect_gpu(&pci_addr)?;
+        gpu.mig_profiles = detect_mig_profiles(&pci_addr).unwrap_or_default();
+        gpu.mig_instances.push(MigInstance {
+            uuid: new_instance.uuid.clone(),
+            profile: profile.to_string(),
+            pci_address: instance_pci.clone(),
+            vram_mb: mig_profile_vram_mb(profile),
+        });
+        devices.push(gpu);
+    }
+    save_state(&devices)?;
+
+    eprintln!(
+        "MIG instance {} created on {pci_addr} (profile={profile}, pci={instance_pci})",
+        new_instance.uuid
+    );
+    eprintln!("state saved to {STATE_FILE}");
+    Ok(())
+}
+
+fn cmd_mig_destroy(pci_addr: &str, uuid: &str) -> Result<(), String> {
+    let pci_addr = parse_pci_address(pci_addr)?;
+
+    // Find the MIG instance in state
+    let mut devices = load_state();
+    let gpu = devices
+        .iter()
+        .find(|d| d.pci_address == pci_addr)
+        .ok_or_else(|| format!("GPU {pci_addr} not found in state file"))?;
+
+    let instance = gpu
+        .mig_instances
+        .iter()
+        .find(|i| i.uuid == uuid)
+        .ok_or_else(|| format!("MIG instance {uuid} not found on {pci_addr}"))?;
+
+    let instance_pci = instance.pci_address.clone();
+
+    // Unbind from vfio-pci if bound
+    if !instance_pci.is_empty() && !instance_pci.starts_with("mig-") {
+        let driver = current_driver(&instance_pci)?;
+        if driver.as_deref() == Some("vfio-pci") {
+            let unbind_path = sysfs_path(&instance_pci, "driver/unbind");
+            fs::write(&unbind_path, &instance_pci)
+                .map_err(|e| format!("failed to unbind MIG instance from vfio-pci: {e}"))?;
+            eprintln!("{instance_pci}: unbound from vfio-pci");
+        }
+    }
+
+    // Destroy via nvidia-smi
+    let output = process::Command::new("nvidia-smi")
+        .args([
+            "mig",
+            "--destroy-gpu-instance",
+            "--instance",
+            uuid,
+            "--gpu",
+            &pci_addr,
+        ])
+        .output()
+        .map_err(|e| format!("failed to run nvidia-smi: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nvidia-smi mig destroy failed: {stderr}"));
+    }
+
+    // Remove from state file
+    if let Some(gpu) = devices.iter_mut().find(|d| d.pci_address == pci_addr) {
+        gpu.mig_instances.retain(|i| i.uuid != uuid);
+    }
+    save_state(&devices)?;
+
+    eprintln!("MIG instance {uuid} destroyed on {pci_addr}");
+    eprintln!("state saved to {STATE_FILE}");
+    Ok(())
+}
+
+/// Detect available mediated device types for a GPU from sysfs.
+fn detect_mdev_types(pci_addr: &str) -> Result<Vec<String>, String> {
+    let mut types = Vec::new();
+    let mdev_dir = PathBuf::from(format!(
+        "/sys/bus/pci/devices/{pci_addr}/mdev_supported_types"
+    ));
+    if mdev_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&mdev_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // MDEV type directories are named like "nvidia-256", "nvidia-16"
+                if name.starts_with("nvidia-") || name.starts_with("amdgpu-") {
+                    types.push(name);
+                }
+            }
+        }
+    }
+    Ok(types)
+}
+
+/// Detect active mediated device instances on a GPU.
+fn detect_mdev_instances(pci_addr: &str) -> Result<Vec<MdevInstance>, String> {
+    let mut instances = Vec::new();
+    let mdev_dir = PathBuf::from(format!(
+        "/sys/bus/pci/devices/{pci_addr}/mdev_supported_types"
+    ));
+    if !mdev_dir.exists() {
+        return Ok(instances);
+    }
+
+    if let Ok(type_entries) = fs::read_dir(&mdev_dir) {
+        for type_entry in type_entries.flatten() {
+            let vgpu_type = type_entry.file_name().to_string_lossy().to_string();
+            let devices_dir = type_entry.path().join("devices");
+            if devices_dir.exists() {
+                if let Ok(dev_entries) = fs::read_dir(&devices_dir) {
+                    for dev_entry in dev_entries.flatten() {
+                        let uuid = dev_entry.file_name().to_string_lossy().to_string();
+                        // Read VRAM from the type's weight file
+                        let vram_path = type_entry.path().join("weight");
+                        let vram_mb = fs::read_to_string(&vram_path)
+                            .ok()
+                            .and_then(|s| s.trim().parse::<u32>().ok())
+                            .unwrap_or(0);
+
+                        instances.push(MdevInstance {
+                            uuid,
+                            vgpu_type: vgpu_type.clone(),
+                            pci_address: String::new(), // Filled after vfio-bind
+                            vram_mb,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(instances)
+}
+
+fn cmd_mdev_list(pci_addr: &str) -> Result<(), String> {
+    let pci_addr = parse_pci_address(pci_addr)?;
+
+    // Check device exists
+    if !sysfs_path(&pci_addr, "vendor").exists() {
+        return Err(format!("PCI device not found: {pci_addr}"));
+    }
+
+    let types = detect_mdev_types(&pci_addr)?;
+    let instances = detect_mdev_instances(&pci_addr)?;
+
+    let output = serde_json::json!({
+        "pci_address": pci_addr,
+        "available_types": types,
+        "active_instances": instances,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).map_err(|e| format!("failed to serialize: {e}"))?
+    );
+    Ok(())
+}
+
+fn cmd_mdev_create(pci_addr: &str, vgpu_type: &str) -> Result<(), String> {
+    let pci_addr = parse_pci_address(pci_addr)?;
+
+    // Check device exists
+    if !sysfs_path(&pci_addr, "vendor").exists() {
+        return Err(format!("PCI device not found: {pci_addr}"));
+    }
+
+    // Validate type is available
+    let available = detect_mdev_types(&pci_addr)?;
+    if !available.contains(&vgpu_type.to_string()) {
+        return Err(format!(
+            "mediated device type {vgpu_type} not available on {pci_addr}. Available: {:?}",
+            available
+        ));
+    }
+
+    // Check available instances
+    let avail_path = format!(
+        "/sys/bus/pci/devices/{pci_addr}/mdev_supported_types/{vgpu_type}/available_instances"
+    );
+    let avail_str = fs::read_to_string(&avail_path)
+        .map_err(|e| format!("failed to read available_instances: {e}"))?;
+    let avail_count: u32 = avail_str
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid available_instances value: {e}"))?;
+    if avail_count == 0 {
+        return Err(format!(
+            "no available instances for {vgpu_type} on {pci_addr}"
+        ));
+    }
+
+    // Create mediated device via sysfs
+    let create_path =
+        format!("/sys/bus/pci/devices/{pci_addr}/mdev_supported_types/{vgpu_type}/create");
+    // Generate a UUID for the new device
+    let uuid = format!(
+        "{{{:08x}-{:04x}-{:04x}-{:04x}-{:012x}}}",
+        rand_u32(),
+        rand_u16(),
+        rand_u16(),
+        rand_u16(),
+        rand_u48()
+    );
+    fs::write(&create_path, uuid.as_bytes())
+        .map_err(|e| format!("failed to create mediated device: {e}"))?;
+
+    // Find the newly created device's PCI address
+    let devices_dir =
+        format!("/sys/bus/pci/devices/{pci_addr}/mdev_supported_types/{vgpu_type}/devices/{uuid}");
+    let mut instance_pci = String::new();
+    let pci_dir = PathBuf::from(&devices_dir).join("pci");
+    if pci_dir.exists() {
+        if let Ok(pci_entries) = fs::read_dir(&pci_dir) {
+            for pci_entry in pci_entries.flatten() {
+                let pci_name = pci_entry.file_name().to_string_lossy().to_string();
+                if parse_pci_address(&pci_name).is_ok() {
+                    instance_pci = pci_name;
+                    break;
+                }
+            }
+        }
+    }
+
+    if instance_pci.is_empty() {
+        eprintln!("warning: could not determine mediated device PCI address; it may need manual vfio-bind");
+        instance_pci = format!("mdev-{pci_addr}-{uuid}");
+    }
+
+    // Unbind from the nvidia driver and bind to vfio-pci
+    let driver_path = PathBuf::from(format!("/sys/bus/pci/devices/{instance_pci}/driver"));
+    if driver_path.exists() {
+        let unbind_path =
+            PathBuf::from(format!("/sys/bus/pci/devices/{instance_pci}/driver/unbind"));
+        fs::write(&unbind_path, &instance_pci)
+            .map_err(|e| format!("failed to unbind mediated device: {e}"))?;
+    }
+
+    // Load vfio-pci
+    let status = process::Command::new("modprobe")
+        .arg("vfio-pci")
+        .status()
+        .map_err(|e| format!("failed to run modprobe vfio-pci: {e}"))?;
+    if !status.success() {
+        return Err("modprobe vfio-pci failed".into());
+    }
+
+    // Bind to vfio-pci
+    let bind_path = PathBuf::from("/sys/bus/pci/drivers/vfio-pci/bind");
+    if bind_path.exists() {
+        fs::write(&bind_path, &instance_pci)
+            .map_err(|e| format!("failed to bind mediated device to vfio-pci: {e}"))?;
+    }
+
+    // Read VRAM for this type
+    let vram_path =
+        format!("/sys/bus/pci/devices/{pci_addr}/mdev_supported_types/{vgpu_type}/weight");
+    let vram_mb = fs::read_to_string(&vram_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
+    // Update state file
+    let mut devices = load_state();
+    if let Some(gpu) = devices.iter_mut().find(|d| d.pci_address == pci_addr) {
+        let mdev = MdevInstance {
+            uuid: uuid.clone(),
+            vgpu_type: vgpu_type.to_string(),
+            pci_address: instance_pci.clone(),
+            vram_mb,
+        };
+        if !gpu.mdev_instances.iter().any(|i| i.uuid == mdev.uuid) {
+            gpu.mdev_instances.push(mdev);
+        }
+    } else {
+        let mut gpu = detect_gpu(&pci_addr)?;
+        gpu.mdev_types = detect_mdev_types(&pci_addr).unwrap_or_default();
+        gpu.mdev_instances.push(MdevInstance {
+            uuid: uuid.clone(),
+            vgpu_type: vgpu_type.to_string(),
+            pci_address: instance_pci.clone(),
+            vram_mb,
+        });
+        devices.push(gpu);
+    }
+    save_state(&devices)?;
+
+    eprintln!(
+        "mediated device {uuid} created on {pci_addr} (type={vgpu_type}, pci={instance_pci})"
+    );
+    eprintln!("state saved to {STATE_FILE}");
+    Ok(())
+}
+
+fn rand_u32() -> u32 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let s = RandomState::new();
+    s.build_hasher().finish() as u32
+}
+
+fn rand_u16() -> u16 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let s = RandomState::new();
+    s.build_hasher().finish() as u16
+}
+
+fn rand_u48() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let s = RandomState::new();
+    s.build_hasher().finish() & 0xFFFFFFFFFFFF
+}
+
+fn cmd_mdev_destroy(uuid: &str) -> Result<(), String> {
+    // Find the GPU that owns this mediated device
+    let mut devices = load_state();
+    let mut found_gpu_idx = None;
+    for (i, gpu) in devices.iter().enumerate() {
+        if gpu.mdev_instances.iter().any(|m| m.uuid == uuid) {
+            found_gpu_idx = Some(i);
+            break;
+        }
+    }
+
+    let gpu_idx =
+        found_gpu_idx.ok_or_else(|| format!("mediated device {uuid} not found in state file"))?;
+    let instance = devices[gpu_idx]
+        .mdev_instances
+        .iter()
+        .find(|m| m.uuid == uuid)
+        .unwrap();
+    let instance_pci = instance.pci_address.clone();
+    let parent_pci = devices[gpu_idx].pci_address.clone();
+
+    // Unbind from vfio-pci if bound
+    if !instance_pci.is_empty() && !instance_pci.starts_with("mdev-") {
+        let driver = current_driver(&instance_pci)?;
+        if driver.as_deref() == Some("vfio-pci") {
+            let unbind_path = sysfs_path(&instance_pci, "driver/unbind");
+            fs::write(&unbind_path, &instance_pci)
+                .map_err(|e| format!("failed to unbind mediated device from vfio-pci: {e}"))?;
+            eprintln!("{instance_pci}: unbound from vfio-pci");
+        }
+    }
+
+    // Remove via sysfs (write UUID to the parent's remove file)
+    let remove_path =
+        format!("/sys/bus/pci/devices/{parent_pci}/mdev_supported_types/devices/{uuid}/remove");
+    if PathBuf::from(&remove_path).exists() {
+        fs::write(&remove_path, "1".as_bytes())
+            .map_err(|e| format!("failed to remove mediated device: {e}"))?;
+    }
+
+    // Remove from state file
+    devices[gpu_idx].mdev_instances.retain(|m| m.uuid != uuid);
+    save_state(&devices)?;
+
+    eprintln!("mediated device {uuid} destroyed on {parent_pci}");
+    eprintln!("state saved to {STATE_FILE}");
+    Ok(())
+}
+
+fn find_arg(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -304,12 +1053,9 @@ fn main() {
 
     let result = match args[1].as_str() {
         "bind" => {
-            let device = args
-                .windows(2)
-                .find(|w| w[0] == "--device")
-                .map(|w| w[1].as_str());
+            let device = find_arg(&args, "--device");
             match device {
-                Some(addr) => cmd_bind(addr),
+                Some(addr) => cmd_bind(&addr),
                 None => {
                     eprintln!("bind requires --device <PCI_ADDRESS>");
                     usage();
@@ -317,12 +1063,9 @@ fn main() {
             }
         }
         "unbind" => {
-            let device = args
-                .windows(2)
-                .find(|w| w[0] == "--device")
-                .map(|w| w[1].as_str());
+            let device = find_arg(&args, "--device");
             match device {
-                Some(addr) => cmd_unbind(addr),
+                Some(addr) => cmd_unbind(&addr),
                 None => {
                     eprintln!("unbind requires --device <PCI_ADDRESS>");
                     usage();
@@ -330,6 +1073,69 @@ fn main() {
             }
         }
         "list" => cmd_list(),
+        "mig-list" => {
+            let device = find_arg(&args, "--device");
+            match device {
+                Some(addr) => cmd_mig_list(&addr),
+                None => {
+                    eprintln!("mig-list requires --device <PCI_ADDRESS>");
+                    usage();
+                }
+            }
+        }
+        "mig-create" => {
+            let device = find_arg(&args, "--device");
+            let profile = find_arg(&args, "--profile");
+            match (device, profile) {
+                (Some(addr), Some(profile)) => cmd_mig_create(&addr, &profile),
+                _ => {
+                    eprintln!("mig-create requires --device <PCI_ADDRESS> --profile <PROFILE>");
+                    usage();
+                }
+            }
+        }
+        "mig-destroy" => {
+            let device = find_arg(&args, "--device");
+            let uuid = find_arg(&args, "--uuid");
+            match (device, uuid) {
+                (Some(addr), Some(uuid)) => cmd_mig_destroy(&addr, &uuid),
+                _ => {
+                    eprintln!("mig-destroy requires --device <PCI_ADDRESS> --uuid <UUID>");
+                    usage();
+                }
+            }
+        }
+        "mdev-list" => {
+            let device = find_arg(&args, "--device");
+            match device {
+                Some(addr) => cmd_mdev_list(&addr),
+                None => {
+                    eprintln!("mdev-list requires --device <PCI_ADDRESS>");
+                    usage();
+                }
+            }
+        }
+        "mdev-create" => {
+            let device = find_arg(&args, "--device");
+            let vgpu_type = find_arg(&args, "--type");
+            match (device, vgpu_type) {
+                (Some(addr), Some(ty)) => cmd_mdev_create(&addr, &ty),
+                _ => {
+                    eprintln!("mdev-create requires --device <PCI_ADDRESS> --type <TYPE>");
+                    usage();
+                }
+            }
+        }
+        "mdev-destroy" => {
+            let uuid = find_arg(&args, "--uuid");
+            match uuid {
+                Some(uuid) => cmd_mdev_destroy(&uuid),
+                None => {
+                    eprintln!("mdev-destroy requires --uuid <UUID>");
+                    usage();
+                }
+            }
+        }
         other => {
             eprintln!("unknown command: {other}");
             usage();
@@ -408,6 +1214,15 @@ mod tests {
             model: "H100-80GB".into(),
             vram_mb: 81920,
             bound_at: "1234567890".into(),
+            mig_profiles: vec!["1g.10gb".into(), "3g.40gb".into()],
+            mig_instances: vec![MigInstance {
+                uuid: "GPU-abc-123".into(),
+                profile: "1g.10gb".into(),
+                pci_address: "0000:01:00.1".into(),
+                vram_mb: 10240,
+            }],
+            mdev_types: vec![],
+            mdev_instances: vec![],
         }];
         let json = serde_json::to_string_pretty(&devices).unwrap();
         let parsed: Vec<GpuDevice> = serde_json::from_str(&json).unwrap();
@@ -416,6 +1231,10 @@ mod tests {
         assert_eq!(parsed[0].vendor, "nvidia");
         assert_eq!(parsed[0].model, "H100-80GB");
         assert_eq!(parsed[0].vram_mb, 81920);
+        assert_eq!(parsed[0].mig_profiles, vec!["1g.10gb", "3g.40gb"]);
+        assert_eq!(parsed[0].mig_instances.len(), 1);
+        assert_eq!(parsed[0].mig_instances[0].uuid, "GPU-abc-123");
+        assert_eq!(parsed[0].mig_instances[0].profile, "1g.10gb");
     }
 
     #[test]
@@ -424,5 +1243,48 @@ mod tests {
         let json = serde_json::to_string_pretty(&devices).unwrap();
         let parsed: Vec<GpuDevice> = serde_json::from_str(&json).unwrap();
         assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn mig_instance_round_trip() {
+        let instance = MigInstance {
+            uuid: "GPU-abc-123".into(),
+            profile: "1g.10gb".into(),
+            pci_address: "0000:01:00.1".into(),
+            vram_mb: 10240,
+        };
+        let json = serde_json::to_string_pretty(&instance).unwrap();
+        let parsed: MigInstance = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.uuid, "GPU-abc-123");
+        assert_eq!(parsed.profile, "1g.10gb");
+        assert_eq!(parsed.pci_address, "0000:01:00.1");
+        assert_eq!(parsed.vram_mb, 10240);
+    }
+
+    #[test]
+    fn mig_instance_empty_state_compatible() {
+        // Old state files without mig_profiles/mig_instances should parse fine
+        let json = r#"[
+            {
+                "pci_address": "0000:01:00.0",
+                "vendor": "nvidia",
+                "model": "H100-80GB",
+                "vram_mb": 81920,
+                "bound_at": "1234567890"
+            }
+        ]"#;
+        let parsed: Vec<GpuDevice> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].mig_profiles.is_empty());
+        assert!(parsed[0].mig_instances.is_empty());
+    }
+
+    #[test]
+    fn mig_profile_vram() {
+        assert_eq!(mig_profile_vram_mb("1g.10gb"), 10240);
+        assert_eq!(mig_profile_vram_mb("1g.20gb"), 20480);
+        assert_eq!(mig_profile_vram_mb("3g.40gb"), 40960);
+        assert_eq!(mig_profile_vram_mb("7g.80gb"), 81920);
+        assert_eq!(mig_profile_vram_mb("unknown"), 0);
     }
 }

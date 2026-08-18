@@ -262,6 +262,14 @@ fn device_tag(d: &DeviceClass) -> Vec<u8> {
             buf.push(3);
             push_str(&mut buf, model);
         }
+        DeviceClass::NvidiaVgpu {
+            parent_model,
+            profile,
+        } => {
+            buf.push(4);
+            push_str(&mut buf, parent_model);
+            push_str(&mut buf, profile);
+        }
     }
     buf
 }
@@ -953,6 +961,29 @@ mod tests {
                 model: "H100".into()
             }),
             vec![1, 4, 0, b'H', b'1', b'0', b'0']
+        );
+        assert_eq!(
+            device_tag(&DeviceClass::NvidiaMig {
+                parent_model: "H100".into(),
+                profile: "1g.10gb".into()
+            }),
+            vec![2, 4, 0, b'H', b'1', b'0', b'0', 7, 0, b'1', b'g', b'.', b'1', b'0', b'g', b'b']
+        );
+        assert_eq!(
+            device_tag(&DeviceClass::AmdGpu {
+                model: "MI300X".into()
+            }),
+            vec![3, 6, 0, b'M', b'I', b'3', b'0', b'0', b'X']
+        );
+        assert_eq!(
+            device_tag(&DeviceClass::NvidiaVgpu {
+                parent_model: "A100".into(),
+                profile: "A100-80GB-5C".into()
+            }),
+            vec![
+                4, 4, 0, b'A', b'1', b'0', b'0', 12, 0, b'A', b'1', b'0', b'0', b'-', b'8', b'0',
+                b'G', b'B', b'-', b'5', b'C'
+            ]
         );
     }
 

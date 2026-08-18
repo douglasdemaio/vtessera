@@ -99,6 +99,13 @@ pub enum DeviceClass {
     AmdGpu {
         model: String,
     },
+    /// NVIDIA vGPU instance (software-partitioned, licensed). `parent_model`
+    /// is the host GPU, `profile` is the vGPU type (e.g. "Tesla-M10-8Q",
+    /// "A100-80GB-5C"). Requires NVIDIA vGPU licensing server.
+    NvidiaVgpu {
+        parent_model: String,
+        profile: String,
+    },
 }
 
 /// Job network policy.
@@ -578,5 +585,17 @@ mod tests {
         assert!(dbg.contains("NvidiaMig"));
         assert!(dbg.contains("H100-80GB"));
         assert!(dbg.contains("1g.10gb"));
+    }
+
+    #[test]
+    fn device_class_nvidia_vgpu_debug() {
+        let vgpu = DeviceClass::NvidiaVgpu {
+            parent_model: "A100-80GB".into(),
+            profile: "A100-80GB-5C".into(),
+        };
+        let dbg = format!("{vgpu:?}");
+        assert!(dbg.contains("NvidiaVgpu"));
+        assert!(dbg.contains("A100-80GB"));
+        assert!(dbg.contains("A100-80GB-5C"));
     }
 }
