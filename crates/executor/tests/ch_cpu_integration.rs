@@ -67,6 +67,8 @@ fn test_config() -> CloudHypervisorConfig {
         virtiofsd_binary: PathBuf::from(vfsd),
         extra_args: vec![],
         keep_jobs: false,
+        vfio_devices: vec![],
+        gpu_helper: PathBuf::from("/usr/bin/vtessera-gpu"),
     }
 }
 

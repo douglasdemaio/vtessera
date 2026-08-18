@@ -109,6 +109,12 @@ needed.
 
 ### 1c. GPU (the AI money-maker)
 
+**Shipped (2026-08-17):** whole-GPU VFIO passthrough via the CH backend.
+The `vtessera-gpu` helper manages PCI bind/unbind lifecycle; the executor
+passes `--device host=...` to CH; guest init loads vendor drivers from the
+workload image. Both NVIDIA and AMD supported. MIG, vGPU, and time-slicing
+are follow-ups. See `docs/superpowers/specs/2026-08-17-cloud-hypervisor-gpu-passthrough-design.md`.
+
 - **Whole-GPU passthrough** via VFIO: bind to `vfio-pci`, hand to the
   guest. One tenant per GPU.
 - **Sharing one GPU**, strongest to weakest isolation: **MIG**

@@ -38,6 +38,9 @@ serve = [
     # feature only pulls serde_json in the executor crate; it spawns the
     # `cloud-hypervisor` binary at runtime.
     "vtessera-executor/cloud-hypervisor",
+    # GPU passthrough via VFIO (ROADMAP.md §1c). Enables the vtessera-gpu
+    # helper binary and GPU admission path in the CH executor.
+    "vtessera-executor/gpu",
 ]
 
 [dependencies]
