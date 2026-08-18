@@ -153,7 +153,10 @@ fn parse_metering(
 
     let is_gpu = matches!(
         spec.devices.class,
-        DeviceClass::NvidiaGpu { .. } | DeviceClass::NvidiaMig { .. } | DeviceClass::AmdGpu { .. }
+        DeviceClass::NvidiaGpu { .. }
+            | DeviceClass::NvidiaMig { .. }
+            | DeviceClass::NvidiaVgpu { .. }
+            | DeviceClass::AmdGpu { .. }
     );
 
     Ok(JobMetering {
@@ -183,6 +186,14 @@ fn ch_admission(spec: &JobSpec, config: &CloudHypervisorConfig) -> Result<(), Ex
             if config.vfio_devices.is_empty() {
                 return Err(ExecutorError::Admission(
                     "MIG job requires vfio_devices in config".into(),
+                ));
+            }
+            // Profile validation happens in select_gpu
+        }
+        DeviceClass::NvidiaVgpu { .. } => {
+            if config.vfio_devices.is_empty() {
+                return Err(ExecutorError::Admission(
+                    "vGPU job requires vfio_devices in config".into(),
                 ));
             }
             // Profile validation happens in select_gpu
@@ -218,6 +229,12 @@ pub struct GpuDevice {
     /// Active MIG instances on this GPU.
     #[serde(default)]
     pub mig_instances: Vec<MigInstance>,
+    /// Available mediated device types (e.g. "nvidia-256", "nvidia-16").
+    #[serde(default)]
+    pub mdev_types: Vec<String>,
+    /// Active mediated device (vGPU) instances.
+    #[serde(default)]
+    pub mdev_instances: Vec<MdevInstance>,
 }
 
 /// A single MIG instance created on a parent GPU.
@@ -225,6 +242,15 @@ pub struct GpuDevice {
 pub struct MigInstance {
     pub uuid: String,
     pub profile: String,
+    pub pci_address: String,
+    pub vram_mb: u32,
+}
+
+/// A single mediated device (vGPU) instance created on a parent GPU.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MdevInstance {
+    pub uuid: String,
+    pub vgpu_type: String,
     pub pci_address: String,
     pub vram_mb: u32,
 }
@@ -332,6 +358,47 @@ fn select_gpu(
                     .collect();
                 return Err(ExecutorError::Admission(format!(
                     "no matching MIG instance: parent_model={parent_model}, profile={profile}, available=[{}]",
+                    available.join(", ")
+                )));
+            }
+            Ok(matched)
+        }
+        DeviceClass::NvidiaVgpu {
+            parent_model,
+            profile,
+        } => {
+            // Find a parent GPU matching the model with an active mediated device
+            // matching the requested vGPU type, whose VFIO PCI address is in our config.
+            let matched: Vec<String> = devices
+                .iter()
+                .filter(|g| {
+                    g.vendor == "nvidia"
+                        && (parent_model.is_empty() || g.model.contains(parent_model.as_str()))
+                })
+                .flat_map(|g| {
+                    g.mdev_instances
+                        .iter()
+                        .filter(move |m| m.vgpu_type == *profile)
+                        .map(move |m| (g, m))
+                })
+                .filter(|(_, m)| config.vfio_devices.contains(&m.pci_address))
+                .map(|(_, m)| m.pci_address.clone())
+                .collect();
+
+            if matched.is_empty() {
+                let available: Vec<String> = devices
+                    .iter()
+                    .flat_map(|g| {
+                        g.mdev_instances.iter().map(move |m| {
+                            format!(
+                                "{} ({}, type={}, {}MB)",
+                                m.pci_address, g.model, m.vgpu_type, m.vram_mb
+                            )
+                        })
+                    })
+                    .collect();
+                return Err(ExecutorError::Admission(format!(
+                    "no matching vGPU instance: parent_model={parent_model}, profile={profile}, available=[{}]",
                     available.join(", ")
                 )));
             }
@@ -517,6 +584,7 @@ impl Executor for CloudHypervisorExecutor {
                 spec.devices.class,
                 DeviceClass::NvidiaGpu { .. }
                     | DeviceClass::NvidiaMig { .. }
+                    | DeviceClass::NvidiaVgpu { .. }
                     | DeviceClass::AmdGpu { .. }
             );
             Ok(JobMetering {
@@ -742,5 +810,35 @@ mod tests {
             ..Default::default()
         };
         assert!(ch_admission(&spec, &config).is_ok());
+    }
+
+    #[test]
+    fn admission_allows_vgpu_with_vfio() {
+        let mut spec = cpu_spec("vgpu-ok");
+        spec.devices.class = DeviceClass::NvidiaVgpu {
+            parent_model: "A100".into(),
+            profile: "A100-80GB-5C".into(),
+        };
+        spec.devices.min_vram_mb = 16000;
+        let config = CloudHypervisorConfig {
+            vfio_devices: vec!["0000:01:00.0".into()],
+            ..Default::default()
+        };
+        assert!(ch_admission(&spec, &config).is_ok());
+    }
+
+    #[test]
+    fn admission_rejects_vgpu_without_vfio() {
+        let mut spec = cpu_spec("vgpu-novfio");
+        spec.devices.class = DeviceClass::NvidiaVgpu {
+            parent_model: "A100".into(),
+            profile: "A100-80GB-5C".into(),
+        };
+        spec.devices.min_vram_mb = 16000;
+        let config = CloudHypervisorConfig::default();
+        assert!(matches!(
+            ch_admission(&spec, &config),
+            Err(ExecutorError::Admission(_))
+        ));
     }
 }

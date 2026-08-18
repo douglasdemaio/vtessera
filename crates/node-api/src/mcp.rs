@@ -202,7 +202,7 @@ impl McpServer {
                         },
                         "device": {
                             "type": "string",
-                            "enum": ["cpu", "nvidia_gpu", "nvidia_mig", "amd_gpu"],
+                            "enum": ["cpu", "nvidia_gpu", "nvidia_mig", "nvidia_vgpu", "amd_gpu"],
                             "description": "Only offers advertising this device",
                         },
                         "available": {

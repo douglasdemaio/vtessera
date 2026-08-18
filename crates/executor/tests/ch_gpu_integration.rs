@@ -328,3 +328,98 @@ fn mig_rejects_wrong_profile() {
         result
     );
 }
+
+// --- vGPU (mediated device) tests ---
+
+/// Helper to detect if any mediated device instances are available.
+fn first_mdev_instance() -> Option<(String, String, String, u32)> {
+    // Read gpus.json state file for mdev_instances
+    let state_path = "/var/lib/vtessera/gpus.json";
+    let content = fs::read_to_string(state_path).ok()?;
+    let devices: Vec<serde_json::Value> = serde_json::from_str(&content).ok()?;
+    for dev in &devices {
+        let parent_model = dev.get("model")?.as_str()?.to_string();
+        let instances = dev.get("mdev_instances")?.as_array()?;
+        for inst in instances {
+            let vgpu_type = inst.get("vgpu_type")?.as_str()?.to_string();
+            let pci = inst.get("pci_address")?.as_str()?.to_string();
+            let vram = inst.get("vram_mb")?.as_u64()? as u32;
+            if !pci.is_empty() && !pci.starts_with("mdev-") {
+                return Some((parent_model, vgpu_type, pci, vram));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn vgpu_admission_requires_vfio() {
+    if !gpu_available() {
+        eprintln!("TEST SKIPPED: vgpu_admission_requires_vfio (no GPU)");
+        return;
+    }
+    let config = CloudHypervisorConfig::default(); // No vfio_devices
+    let spec = JobSpec {
+        job_id: "vgpu-novfio".into(),
+        image: "n/a".into(),
+        command: vec!["true".into()],
+        env: vec![],
+        devices: DeviceRequirements {
+            class: DeviceClass::NvidiaVgpu {
+                parent_model: "A100".into(),
+                profile: "A100-80GB-5C".into(),
+            },
+            vcpus: 1,
+            mem_kb: 256 * 1024,
+            min_vram_mb: 16000,
+            driver_hint: None,
+        },
+        network: NetworkPolicy::None,
+        max_duration_secs: 10,
+    };
+    let result = CloudHypervisorExecutor { config }.run(&spec);
+    assert!(
+        matches!(result, Err(vtessera_executor::ExecutorError::Admission(_))),
+        "expected Admission error for vGPU without vfio_devices, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn vgpu_rejects_wrong_type() {
+    if !gpu_available() {
+        eprintln!("TEST SKIPPED: vgpu_rejects_wrong_type (no GPU)");
+        return;
+    }
+    if first_mdev_instance().is_none() {
+        eprintln!("TEST SKIPPED: vgpu_rejects_wrong_type (no mdev instance)");
+        return;
+    }
+    let config = test_config();
+    let (parent_model, _vgpu_type, _pci, vram) = first_mdev_instance().expect("mdev instance");
+    // Request a type that doesn't exist
+    let spec = JobSpec {
+        job_id: "vgpu-wrong".into(),
+        image: "n/a".into(),
+        command: vec!["true".into()],
+        env: vec![],
+        devices: DeviceRequirements {
+            class: DeviceClass::NvidiaVgpu {
+                parent_model,
+                profile: "nonexistent-type".into(),
+            },
+            vcpus: 1,
+            mem_kb: 256 * 1024,
+            min_vram_mb: vram,
+            driver_hint: None,
+        },
+        network: NetworkPolicy::None,
+        max_duration_secs: 10,
+    };
+    let result = CloudHypervisorExecutor { config }.run(&spec);
+    assert!(
+        matches!(result, Err(vtessera_executor::ExecutorError::Admission(_))),
+        "expected Admission error for wrong vGPU type, got {:?}",
+        result
+    );
+}

@@ -72,6 +72,12 @@ pub enum AdvertisedDevice {
         model: String,
         vram_mb: u32,
     },
+    /// NVIDIA vGPU instance (software-partitioned, licensed).
+    NvidiaVgpu {
+        parent_model: String,
+        profile: String,
+        vram_mb: u32,
+    },
 }
 
 impl AdvertisedDevice {
@@ -101,6 +107,16 @@ impl AdvertisedDevice {
             AdvertisedDevice::AmdGpu { model, vram_mb } => {
                 buf.push(4);
                 push_str(buf, model);
+                buf.extend_from_slice(&vram_mb.to_le_bytes());
+            }
+            AdvertisedDevice::NvidiaVgpu {
+                parent_model,
+                profile,
+                vram_mb,
+            } => {
+                buf.push(5);
+                push_str(buf, parent_model);
+                push_str(buf, profile);
                 buf.extend_from_slice(&vram_mb.to_le_bytes());
             }
         }
@@ -363,6 +379,17 @@ fn device_to_json(d: &AdvertisedDevice, s: &mut String) {
             json_string(model, s);
             write!(s, ",\"vram_mb\":{vram_mb}").unwrap();
         }
+        AdvertisedDevice::NvidiaVgpu {
+            parent_model,
+            profile,
+            vram_mb,
+        } => {
+            s.push_str("\"kind\":\"nvidia_vgpu\",\"parent_model\":");
+            json_string(parent_model, s);
+            s.push_str(",\"profile\":");
+            json_string(profile, s);
+            write!(s, ",\"vram_mb\":{vram_mb}").unwrap();
+        }
     }
     s.push('}');
 }
@@ -520,5 +547,36 @@ mod tests {
         let pk_idx = j.find("\"pubkey_hex\":").unwrap();
         let sig_idx = j.find("\"sig_hex\":").unwrap();
         assert!(body_idx < pk_idx && pk_idx < sig_idx);
+    }
+
+    #[test]
+    fn vgpu_canonical_bytes_differ_from_gpu() {
+        let key = SigningKey::generate(&mut OsRng);
+        let node_id = derive_node_id(&key.verifying_key().to_bytes());
+        let gpu = sample_body(&node_id);
+        let mut vgpu = gpu.clone();
+        vgpu.device = AdvertisedDevice::NvidiaVgpu {
+            parent_model: "H100-80GB".into(),
+            profile: "A100-80GB-5C".into(),
+            vram_mb: 16 * 1024,
+        };
+        assert_ne!(canonical_bytes(&gpu), canonical_bytes(&vgpu));
+    }
+
+    #[test]
+    fn vgpu_json_contains_nvidia_vgpu_kind() {
+        let key = SigningKey::generate(&mut OsRng);
+        let node_id = derive_node_id(&key.verifying_key().to_bytes());
+        let mut body = sample_body(&node_id);
+        body.device = AdvertisedDevice::NvidiaVgpu {
+            parent_model: "A100".into(),
+            profile: "A100-80GB-5C".into(),
+            vram_mb: 16 * 1024,
+        };
+        let signed = sign(body, &key);
+        let j = to_json(&signed);
+        assert!(j.contains("\"kind\":\"nvidia_vgpu\""));
+        assert!(j.contains("\"parent_model\""));
+        assert!(j.contains("\"profile\""));
     }
 }
