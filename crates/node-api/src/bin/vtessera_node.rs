@@ -141,9 +141,10 @@ impl BackendChoice {
                 })
             }
             BackendChoice::CloudHypervisor => {
-                let mut config =
-                    vtessera_executor::cloud_hypervisor::CloudHypervisorConfig::default();
-                config.vfio_devices = vfio_devices.to_vec();
+                let config = vtessera_executor::cloud_hypervisor::CloudHypervisorConfig {
+                    vfio_devices: vfio_devices.to_vec(),
+                    ..Default::default()
+                };
                 Arc::new(ExecutorRunner {
                     executor: Box::new(
                         vtessera_executor::cloud_hypervisor::CloudHypervisorExecutor { config },
