@@ -123,6 +123,48 @@ fn first_gpu_vram() -> Option<u32> {
     devices.first()?.get("vram_mb")?.as_u64().map(|v| v as u32)
 }
 
+fn mig_available() -> bool {
+    if !gpu_available() {
+        return false;
+    }
+    // Check for MIG instances in the state file
+    let output = Command::new("vtessera-gpu").arg("list").output().ok();
+    match output {
+        Some(o) if o.status.success() => {
+            let devices: Vec<serde_json::Value> =
+                serde_json::from_slice(&o.stdout).unwrap_or_default();
+            devices.iter().any(|d| {
+                d.get("mig_instances")
+                    .and_then(|i| i.as_array())
+                    .map(|arr| !arr.is_empty())
+                    .unwrap_or(false)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn first_mig_instance() -> Option<(String, String, String, u32)> {
+    // Returns (parent_model, profile, pci_address, vram_mb)
+    let output = Command::new("vtessera-gpu").arg("list").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let devices: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
+    for device in &devices {
+        if let Some(instances) = device.get("mig_instances").and_then(|i| i.as_array()) {
+            if let Some(inst) = instances.first() {
+                let parent_model = device.get("model")?.as_str()?.to_string();
+                let profile = inst.get("profile")?.as_str()?.to_string();
+                let pci_address = inst.get("pci_address")?.as_str()?.to_string();
+                let vram_mb = inst.get("vram_mb")?.as_u64()? as u32;
+                return Some((parent_model, profile, pci_address, vram_mb));
+            }
+        }
+    }
+    None
+}
+
 #[test]
 fn gpu_true_exits_completed() {
     if !gpu_available() {
@@ -209,4 +251,80 @@ fn gpu_metering_populated() {
     assert!(m.gpu_seconds > 0.0, "gpu_seconds should be > 0");
     assert_eq!(m.vram_gb_hours, 0.0, "vram_gb_hours deferred to §1d");
     assert!(m.cpu_seconds >= 0.0, "cpu_seconds should be >= 0");
+}
+
+#[test]
+fn mig_true_exits_completed() {
+    if !mig_available() {
+        eprintln!("TEST SKIPPED: mig_true_exits_completed (no MIG instance available)");
+        return;
+    }
+    let config = test_config();
+    let executor = CloudHypervisorExecutor { config };
+    let (parent_model, profile, _pci, vram) = first_mig_instance().expect("MIG instance");
+    let spec = JobSpec {
+        job_id: "mig-true".into(),
+        image: "n/a".into(),
+        command: vec!["true".into()],
+        env: vec![("VT_TEST".into(), "1".into())],
+        devices: DeviceRequirements {
+            class: DeviceClass::NvidiaMig {
+                parent_model,
+                profile,
+            },
+            vcpus: 1,
+            mem_kb: 256 * 1024,
+            min_vram_mb: vram,
+            driver_hint: None,
+        },
+        network: NetworkPolicy::None,
+        max_duration_secs: 10,
+    };
+    let m = executor.run(&spec).expect("run should succeed");
+    assert!(
+        matches!(m.exit_status, ExitStatus::Completed),
+        "expected Completed, got {:?}",
+        m.exit_status
+    );
+    assert!(
+        m.gpu_seconds > 0.0,
+        "gpu_seconds should be > 0 for MIG jobs, got {}",
+        m.gpu_seconds
+    );
+    assert_eq!(m.backend, Backend::CloudHypervisor);
+}
+
+#[test]
+fn mig_rejects_wrong_profile() {
+    if !mig_available() {
+        eprintln!("TEST SKIPPED: mig_rejects_wrong_profile (no MIG instance available)");
+        return;
+    }
+    let config = test_config();
+    let (parent_model, _profile, _pci, vram) = first_mig_instance().expect("MIG instance");
+    // Request a profile that doesn't exist
+    let spec = JobSpec {
+        job_id: "mig-wrong".into(),
+        image: "n/a".into(),
+        command: vec!["true".into()],
+        env: vec![],
+        devices: DeviceRequirements {
+            class: DeviceClass::NvidiaMig {
+                parent_model,
+                profile: "7g.80gb".into(), // Unlikely to be available
+            },
+            vcpus: 1,
+            mem_kb: 256 * 1024,
+            min_vram_mb: vram,
+            driver_hint: None,
+        },
+        network: NetworkPolicy::None,
+        max_duration_secs: 10,
+    };
+    let result = CloudHypervisorExecutor { config }.run(&spec);
+    assert!(
+        matches!(result, Err(vtessera_executor::ExecutorError::Admission(_))),
+        "expected Admission error for wrong MIG profile, got {:?}",
+        result
+    );
 }
