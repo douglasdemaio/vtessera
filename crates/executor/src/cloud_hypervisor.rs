@@ -49,6 +49,10 @@ pub struct CloudHypervisorConfig {
     pub vfio_devices: Vec<String>,
     /// Path to the vtessera-gpu helper binary.
     pub gpu_helper: PathBuf,
+    /// Allow time-sliced GPU access (multiple jobs sharing one GPU).
+    /// Only appropriate when the node operator trusts all workloads.
+    /// Default: false (whole-GPU only).
+    pub gpu_time_slice: bool,
 }
 
 impl Default for CloudHypervisorConfig {
@@ -64,6 +68,7 @@ impl Default for CloudHypervisorConfig {
             keep_jobs: false,
             vfio_devices: Vec::new(),
             gpu_helper: PathBuf::from("/usr/bin/vtessera-gpu"),
+            gpu_time_slice: false,
         }
     }
 }
@@ -177,7 +182,9 @@ fn parse_metering(
 }
 
 /// CH-specific admission: GPU allowed when vfio_devices configured,
-/// network-policy `None` only.
+/// network-policy `None` only. When `gpu_time_slice` is false (default),
+/// GPU jobs are whole-GPU exclusive; when true, multiple jobs may share
+/// one GPU (trusted-tenant only).
 fn ch_admission(spec: &JobSpec, config: &CloudHypervisorConfig) -> Result<(), ExecutorError> {
     crate::admission_check(spec)?;
     match &spec.devices.class {
@@ -204,6 +211,11 @@ fn ch_admission(spec: &JobSpec, config: &CloudHypervisorConfig) -> Result<(), Ex
                     "GPU job requires vfio_devices in config".into(),
                 ));
             }
+            // Time-slicing policy: when gpu_time_slice is false, the
+            // scheduler must ensure only one GPU job runs at a time on
+            // each device. When true, multiple jobs may share a GPU.
+            // The actual occupancy check is enforced by select_gpu at
+            // schedule time, not here.
         }
     }
     if spec.network != NetworkPolicy::None {
@@ -836,6 +848,44 @@ mod tests {
         };
         spec.devices.min_vram_mb = 16000;
         let config = CloudHypervisorConfig::default();
+        assert!(matches!(
+            ch_admission(&spec, &config),
+            Err(ExecutorError::Admission(_))
+        ));
+    }
+
+    #[test]
+    fn gpu_time_slice_default_is_false() {
+        let config = CloudHypervisorConfig::default();
+        assert!(!config.gpu_time_slice);
+    }
+
+    #[test]
+    fn gpu_time_slice_allows_gpu_with_vfio() {
+        let mut spec = cpu_spec("ts-ok");
+        spec.devices.class = DeviceClass::NvidiaGpu {
+            model: "H100".into(),
+        };
+        spec.devices.min_vram_mb = 80000;
+        let config = CloudHypervisorConfig {
+            vfio_devices: vec!["0000:01:00.0".into()],
+            gpu_time_slice: true,
+            ..Default::default()
+        };
+        assert!(ch_admission(&spec, &config).is_ok());
+    }
+
+    #[test]
+    fn gpu_time_slice_rejects_without_vfio() {
+        let mut spec = cpu_spec("ts-novfio");
+        spec.devices.class = DeviceClass::NvidiaGpu {
+            model: "H100".into(),
+        };
+        spec.devices.min_vram_mb = 80000;
+        let config = CloudHypervisorConfig {
+            gpu_time_slice: true,
+            ..Default::default()
+        };
         assert!(matches!(
             ch_admission(&spec, &config),
             Err(ExecutorError::Admission(_))

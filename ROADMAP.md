@@ -147,6 +147,13 @@ in v0.
   exception).
 - **Caps enforced; minimal surface:** hold the executor to v0's
   `systemd-analyze security` bar.
+- **Private / enterprise network mode** ([#52](https://github.com/douglasdemaio/vtessera/issues/52)):
+  opt-in `mode = "private"` that restricts the daemon to internal
+  CIDR ranges, with a `[marketplace]` target selector (`public` /
+  `internal` / `none`) so enterprises can point at a company-run
+  marketplace endpoint or disable outbound submission entirely.
+  Enables internal compute accounting (charge-back, on-prem GPU
+  pools, edge fleets) without depending on the public internet.
 
 ---
 
