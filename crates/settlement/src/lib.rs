@@ -916,6 +916,7 @@ mod tests {
             vram_gb_hours: 0.0,
             exit_status: ExitStatus::Completed,
             elapsed_secs: 13,
+            gpu_sample: None,
         }
     }
 

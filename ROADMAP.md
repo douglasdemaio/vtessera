@@ -112,8 +112,11 @@ needed.
 **Shipped (2026-08-17):** whole-GPU VFIO passthrough via the CH backend.
 The `vtessera-gpu` helper manages PCI bind/unbind lifecycle; the executor
 passes `--device host=...` to CH; guest init loads vendor drivers from the
-workload image. Both NVIDIA and AMD supported. MIG, vGPU, and time-slicing
-are follow-ups. See `docs/superpowers/specs/2026-08-17-cloud-hypervisor-gpu-passthrough-design.md`.
+workload image. Both NVIDIA and AMD supported.
+
+**Shipped (2026-08-18):** GPU sharing — MIG (hardware-partitioned instances
+on A100/H100+), vGPU / mediated devices (NVIDIA), and time-slicing.
+See `docs/superpowers/specs/2026-08-17-cloud-hypervisor-gpu-passthrough-design.md`.
 
 - **Whole-GPU passthrough** via VFIO: bind to `vfio-pci`, hand to the
   guest. One tenant per GPU.
@@ -131,12 +134,13 @@ are follow-ups. See `docs/superpowers/specs/2026-08-17-cloud-hypervisor-gpu-pass
 
 ### 1d. Per-device metering (extends v0's receipts)
 
-The economics depend on measuring the **guest's accelerator** use.
-Extend `metrics.rs` (or a sidecar) to record, per job, into the signed
-receipt: GPU-seconds, **VRAM-GB-hours** (via NVIDIA DCGM/vendor
-telemetry), MIG profile, plus CPU/mem. These fields are what Module 3
-prices and what escrow releases against. Keep the receipt node-signed as
-in v0.
+**Shipped (2026-08-18):** host-side GPU polling via nvidia-smi, guest
+self-reporting, cross-validation. Extends the per-job `JobMetering`
+with a `gpu_sample` field containing avg GPU utilization, avg power draw,
+peak VRAM, and time-weighted VRAM-GB-hours. DCGM integration is
+optional (feature-gated) for production deployments that need finer
+telemetry. These fields are what Module 3 prices and what escrow
+releases against. The receipt remains node-signed as in v0.
 
 ### 1e. Scheduling, admission, network
 
