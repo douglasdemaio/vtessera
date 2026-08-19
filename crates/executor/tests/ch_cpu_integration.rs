@@ -69,6 +69,8 @@ fn test_config() -> CloudHypervisorConfig {
         keep_jobs: false,
         vfio_devices: vec![],
         gpu_helper: PathBuf::from("/usr/bin/vtessera-gpu"),
+        gpu_time_slice: false,
+        gpu_meter_poll_interval_secs: 5,
     }
 }
 

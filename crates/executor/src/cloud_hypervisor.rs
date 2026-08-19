@@ -53,6 +53,10 @@ pub struct CloudHypervisorConfig {
     /// Only appropriate when the node operator trusts all workloads.
     /// Default: false (whole-GPU only).
     pub gpu_time_slice: bool,
+    /// Interval in seconds between nvidia-smi GPU polling samples.
+    /// Lower = more accurate but higher overhead. 0 = disable host-side
+    /// GPU metering (guest self-reporting only). Default: 5.
+    pub gpu_meter_poll_interval_secs: u64,
 }
 
 impl Default for CloudHypervisorConfig {
@@ -69,6 +73,7 @@ impl Default for CloudHypervisorConfig {
             vfio_devices: Vec::new(),
             gpu_helper: PathBuf::from("/usr/bin/vtessera-gpu"),
             gpu_time_slice: false,
+            gpu_meter_poll_interval_secs: 5,
         }
     }
 }
@@ -96,6 +101,24 @@ pub struct GuestMetering {
     pub cpu_seconds: f64,
     pub peak_mem_kb: u64,
     pub elapsed_secs: u64,
+    /// Guest-reported GPU metrics (absent for CPU-only jobs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GuestGpuSelfReport>,
+}
+
+/// Guest-side GPU self-report (written by the guest runner inside the VM).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuestGpuSelfReport {
+    /// GPU-seconds from the guest's perspective.
+    pub gpu_seconds: f64,
+    /// Peak VRAM used inside the guest (MB).
+    pub vram_mb_peak: u32,
+    /// Average VRAM used inside the guest (MB).
+    pub vram_mb_avg: f32,
+    /// Average GPU utilization (0–100).
+    pub gpu_util_avg_pct: f32,
+    /// Guest NVIDIA driver version.
+    pub driver_version: String,
 }
 
 /// Wire format for the guest's exit status.
@@ -125,6 +148,7 @@ fn parse_metering(
     dir: &Path,
     spec: &JobSpec,
     backend: crate::Backend,
+    gpu_sample: Option<crate::gpu_meter::GpuSample>,
 ) -> Result<JobMetering, ExecutorError> {
     let metering_path = dir.join("out").join("metering.json");
     let result_path = dir.join("out").join("result.json");
@@ -164,20 +188,57 @@ fn parse_metering(
             | DeviceClass::AmdGpu { .. }
     );
 
+    // Cross-validate host vs guest GPU metrics. Host is authoritative;
+    // guest self-report is advisory. Warn on significant mismatch.
+    let (host_gpu_seconds, host_vram_gb_hours) = if let Some(ref sample) = gpu_sample {
+        if let Some(ref guest_gpu) = guest.gpu {
+            let seconds_diff = (sample.gpu_seconds - guest_gpu.gpu_seconds).abs();
+            let diff_pct = if guest_gpu.gpu_seconds > 0.0 {
+                seconds_diff / guest_gpu.gpu_seconds * 100.0
+            } else {
+                0.0
+            };
+            if diff_pct > 20.0 && seconds_diff > 5.0 {
+                eprintln!(
+                    "gpu_meter: cross-validation warn: host gpu_seconds {:.1} vs guest {:.1} ({:.0}% diff)",
+                    sample.gpu_seconds, guest_gpu.gpu_seconds, diff_pct
+                );
+            }
+            // Also warn on VRAM peak mismatch > 30%
+            let host_peak = sample.peak_vram_mb as f32;
+            let guest_peak = guest_gpu.vram_mb_peak as f32;
+            if guest_peak > 0.0 {
+                let vram_diff_pct = ((host_peak - guest_peak).abs() / guest_peak) * 100.0;
+                if vram_diff_pct > 30.0 {
+                    eprintln!(
+                        "gpu_meter: cross-validation warn: host peak_vram_mb {} vs guest {} ({:.0}% diff)",
+                        sample.peak_vram_mb, guest_gpu.vram_mb_peak, vram_diff_pct
+                    );
+                }
+            }
+        }
+        (sample.gpu_seconds, sample.vram_gb_hours)
+    } else {
+        (0.0, 0.0)
+    };
+
     Ok(JobMetering {
         job_id: spec.job_id.clone(),
         backend,
         device: spec.devices.class.clone(),
         cpu_seconds: guest.cpu_seconds,
         peak_mem_kb: guest.peak_mem_kb,
-        gpu_seconds: if is_gpu {
+        gpu_seconds: if host_gpu_seconds > 0.0 {
+            host_gpu_seconds
+        } else if is_gpu {
             guest.elapsed_secs as f64
         } else {
             0.0
         },
-        vram_gb_hours: 0.0,
+        vram_gb_hours: host_vram_gb_hours,
         exit_status,
         elapsed_secs: guest.elapsed_secs,
+        gpu_sample,
     })
 }
 
@@ -542,11 +603,27 @@ impl Executor for CloudHypervisorExecutor {
             .args(&self.config.extra_args);
 
         // GPU: pass VFIO devices through to the guest.
+        #[cfg(feature = "gpu")]
+        let mut gpu_meter: Option<crate::gpu_meter::GpuMeter> = None;
+        #[cfg(not(feature = "gpu"))]
+        let mut gpu_meter: Option<()> = None;
         if !self.config.vfio_devices.is_empty() {
             // Validate that requested GPUs are actually bound.
             let _matched = select_gpu(spec, &self.config)?;
             for device in &self.config.vfio_devices {
                 cmd.args(["--device", &format!("host={device}")]);
+            }
+            // Start host-side GPU metering if interval is configured.
+            if self.config.gpu_meter_poll_interval_secs > 0 {
+                #[cfg(feature = "gpu")]
+                {
+                    let poll_interval =
+                        Duration::from_secs(self.config.gpu_meter_poll_interval_secs);
+                    gpu_meter = Some(crate::gpu_meter::GpuMeter::start(
+                        &self.config.vfio_devices[0],
+                        poll_interval,
+                    ));
+                }
             }
         }
 
@@ -590,6 +667,12 @@ impl Executor for CloudHypervisorExecutor {
         let _ = vfsd_child.kill();
         let _ = vfsd_child.wait();
 
+        // Stop GPU metering and capture the sample.
+        #[cfg(feature = "gpu")]
+        let gpu_sample = gpu_meter.and_then(|mut m| m.stop());
+        #[cfg(not(feature = "gpu"))]
+        let gpu_sample: Option<crate::gpu_meter::GpuSample> = None;
+
         let result = if timed_out {
             let elapsed_secs = spec.max_duration_secs.max(1);
             let is_gpu = matches!(
@@ -609,9 +692,10 @@ impl Executor for CloudHypervisorExecutor {
                 vram_gb_hours: 0.0,
                 exit_status: ExitStatus::TimedOut,
                 elapsed_secs,
+                gpu_sample: None,
             })
         } else {
-            parse_metering(&job_dir, spec, crate::Backend::CloudHypervisor)
+            parse_metering(&job_dir, spec, crate::Backend::CloudHypervisor, gpu_sample)
         };
 
         cleanup(self.config.keep_jobs);
@@ -670,7 +754,7 @@ mod tests {
         .expect("write metering");
         fs::write(dir.join("out/result.json"), r#"{"exit_code":0}"#).expect("write result");
         let spec = cpu_spec("parse-ok");
-        let m = parse_metering(&dir, &spec, crate::Backend::CloudHypervisor).expect("parse");
+        let m = parse_metering(&dir, &spec, crate::Backend::CloudHypervisor, None).expect("parse");
         assert_eq!(m.job_id, "parse-ok");
         assert_eq!(m.cpu_seconds, 3.5);
         assert_eq!(m.peak_mem_kb, 2048);
@@ -688,7 +772,7 @@ mod tests {
         fs::write(dir.join("out/result.json"), r#"{"exit_code":0}"#).expect("write");
         let spec = cpu_spec("parse-bad");
         assert!(matches!(
-            parse_metering(&dir, &spec, crate::Backend::CloudHypervisor),
+            parse_metering(&dir, &spec, crate::Backend::CloudHypervisor, None),
             Err(ExecutorError::Backend(_))
         ));
         let _ = fs::remove_dir_all(&dir);
@@ -700,7 +784,7 @@ mod tests {
         fs::create_dir_all(dir.join("out")).expect("mkdir");
         let spec = cpu_spec("parse-missing");
         assert!(matches!(
-            parse_metering(&dir, &spec, crate::Backend::CloudHypervisor),
+            parse_metering(&dir, &spec, crate::Backend::CloudHypervisor, None),
             Err(ExecutorError::Backend(_))
         ));
         let _ = fs::remove_dir_all(&dir);
@@ -717,7 +801,7 @@ mod tests {
         .expect("write metering");
         fs::write(dir.join("out/result.json"), r#"{"exit_code":3}"#).expect("write result");
         let spec = cpu_spec("parse-exit");
-        let m = parse_metering(&dir, &spec, crate::Backend::CloudHypervisor).expect("parse");
+        let m = parse_metering(&dir, &spec, crate::Backend::CloudHypervisor, None).expect("parse");
         assert!(matches!(m.exit_status, ExitStatus::Failed { code: 3 }));
         let _ = fs::remove_dir_all(&dir);
     }

@@ -46,6 +46,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "cloud-hypervisor")]
 pub mod cloud_hypervisor;
 
+/// Host-side GPU metering via nvidia-smi polling (ROADMAP.md §1d).
+/// GpuSample (data) is always compiled; GpuMeter (polling) is feature-gated.
+pub mod gpu_meter;
+
 /// What the executor can run.
 ///
 /// One concrete value per backend, including the no-op CPU backend used by
@@ -201,6 +205,11 @@ pub struct JobMetering {
     pub exit_status: ExitStatus,
     /// Wall-clock the job actually ran for. Used to enforce `max_duration_secs`.
     pub elapsed_secs: u64,
+    /// Host-side GPU metering sample. None for CPU jobs or when GPU
+    /// metering is disabled. Carries full detail (avg util, power, peak
+    /// VRAM) for audit; the authoritative `gpu_seconds` and
+    /// `vram_gb_hours` are the top-level fields above.
+    pub gpu_sample: Option<gpu_meter::GpuSample>,
 }
 
 /// How a job ended. Open for additions; serialised as a tagged variant.
@@ -279,6 +288,7 @@ impl Executor for NoopCpuExecutor {
             vram_gb_hours: 0.0,
             exit_status: ExitStatus::Completed,
             elapsed_secs: 1,
+            gpu_sample: None,
         })
     }
 }
@@ -352,6 +362,7 @@ impl Executor for LocalCpuExecutor {
                             vram_gb_hours: 0.0,
                             exit_status: ExitStatus::TimedOut,
                             elapsed_secs,
+                            gpu_sample: None,
                         });
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -380,6 +391,7 @@ impl Executor for LocalCpuExecutor {
             vram_gb_hours: 0.0,
             exit_status,
             elapsed_secs,
+            gpu_sample: None,
         })
     }
 }

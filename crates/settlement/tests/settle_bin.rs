@@ -65,6 +65,7 @@ fn metering(job_id: &str, cpu_seconds: f64) -> JobMetering {
         vram_gb_hours: 0.0,
         exit_status: ExitStatus::Completed,
         elapsed_secs: cpu_seconds as u64,
+        gpu_sample: None,
     }
 }
 
