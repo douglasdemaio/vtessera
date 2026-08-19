@@ -83,6 +83,8 @@ fn usage_and_exit() -> ! {
         [--backend noop-cpu|local-cpu|cloud-hypervisor] \
         [--vfio-devices <pci,pci,...>] \
         [--gpu-time-slice] \
+        [--net-backend tap|macvtap] [--net-bridge <name>] \
+        [--net-enforcement guest|host|both] \
         [--publish <index-url>] [--publish-interval <secs>]"
     );
     process::exit(2);
@@ -98,6 +100,9 @@ struct Args {
     backend: BackendChoice,
     vfio_devices: Vec<String>,
     gpu_time_slice: bool,
+    net_backend: String,
+    net_bridge: String,
+    net_enforcement: String,
     publish: Option<String>,
     publish_interval: Duration,
 }
@@ -124,6 +129,9 @@ impl BackendChoice {
         id: &NodeIdentity,
         vfio_devices: &[String],
         gpu_time_slice: bool,
+        net_backend: &str,
+        net_bridge: &str,
+        net_enforcement: &str,
     ) -> Arc<dyn JobRunner> {
         match self {
             BackendChoice::NoopCpu => Arc::new(ExecutorRunner {
@@ -151,6 +159,9 @@ impl BackendChoice {
                 let config = vtessera_executor::cloud_hypervisor::CloudHypervisorConfig {
                     vfio_devices: vfio_devices.to_vec(),
                     gpu_time_slice,
+                    net_backend: net_backend.to_string(),
+                    net_bridge: net_bridge.to_string(),
+                    net_enforcement: net_enforcement.to_string(),
                     ..Default::default()
                 };
                 Arc::new(ExecutorRunner {
@@ -177,6 +188,9 @@ fn parse_args() -> Args {
     let mut backend = BackendChoice::NoopCpu;
     let mut vfio_devices: Vec<String> = Vec::new();
     let mut gpu_time_slice = false;
+    let mut net_backend = "tap".to_string();
+    let mut net_bridge = "virbr0".to_string();
+    let mut net_enforcement = "guest".to_string();
     let mut publish: Option<String> = None;
     let mut publish_interval: u64 = DEFAULT_PUBLISH_INTERVAL_SECS;
     let mut it = env::args().skip(1);
@@ -198,6 +212,21 @@ fn parse_args() -> Args {
                 }
             }
             "--gpu-time-slice" => gpu_time_slice = true,
+            "--net-backend" => {
+                if let Some(s) = it.next() {
+                    net_backend = s;
+                }
+            }
+            "--net-bridge" => {
+                if let Some(s) = it.next() {
+                    net_bridge = s;
+                }
+            }
+            "--net-enforcement" => {
+                if let Some(s) = it.next() {
+                    net_enforcement = s;
+                }
+            }
             "--publish" => publish = it.next(),
             "--publish-interval" => {
                 if let Some(s) = it.next() {
@@ -226,6 +255,9 @@ fn parse_args() -> Args {
             backend,
             vfio_devices,
             gpu_time_slice,
+            net_backend,
+            net_bridge,
+            net_enforcement,
             publish,
             publish_interval: Duration::from_secs(publish_interval),
         },
@@ -459,9 +491,14 @@ fn main() {
         payout_id,
         receipts_dir,
     };
-    let runner = args
-        .backend
-        .build(&identity, &args.vfio_devices, args.gpu_time_slice);
+    let runner = args.backend.build(
+        &identity,
+        &args.vfio_devices,
+        args.gpu_time_slice,
+        &args.net_backend,
+        &args.net_bridge,
+        &args.net_enforcement,
+    );
 
     // Offer-index wiring: register the offer with the index now, then keep
     // refreshing it on an interval. Registration failures are logged, never
