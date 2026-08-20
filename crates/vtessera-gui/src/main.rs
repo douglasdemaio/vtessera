@@ -523,6 +523,10 @@ fn stop_node(ui: &Ui, state: &NodeState) {
 
 fn build_ui(app: &gtk4::Application) {
     install_css();
+    // Force dark theme for native GTK widgets (header bar, tabs, scrollbars).
+    if let Some(ctx) = gtk4::Settings::default() {
+        ctx.set_property("gtk-application-prefer-dark-theme", true);
+    }
 
     let log_pending: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -879,7 +883,7 @@ fn build_ui(app: &gtk4::Application) {
 
     let window = gtk4::ApplicationWindow::new(app);
     window.set_title(Some("Vtessera — sell or donate your compute"));
-    window.set_default_size(860, 780);
+    window.set_default_size(860, 860);
     window.set_titlebar(Some(&header));
     window.set_child(Some(&notebook));
 
@@ -1082,19 +1086,14 @@ fn show_consent_gate(app: &gtk4::Application, ui: &Rc<Ui>, main_window: &gtk4::A
 fn install_css() {
     let provider = gtk4::CssProvider::new();
     provider.load_from_string(
-        // --- Base ---
         "window { background-color: #0d1117; } \
          .error { color: @error_color; } \
          .dim-label { opacity: 0.7; } \
-         \
-         // --- Segmented mode buttons ---
          .mode-segmented button { border-radius: 0; } \
          .mode-segmented button:checked { background: @theme_selected_bg_color; \
              color: @theme_selected_fg_color; } \
          .mode-segmented button:first-child { border-radius: 8px 0 0 8px; } \
          .mode-segmented button:last-child { border-radius: 0 8px 8px 0; } \
-         \
-         // --- Dashboard cards ---
          .dashboard-card { background-color: #161b22; border-radius: 6px; \
              border: 1px solid #30363d; padding: 16px; } \
          .dashboard-card-title { color: #8b949e; font-size: 11px; \
@@ -1102,39 +1101,27 @@ fn install_css() {
          .dashboard-card-value { color: #e6edf3; font-size: 22px; \
              font-weight: 700; } \
          .dashboard-card-subtitle { color: #8b949e; font-size: 11px; } \
-         \
-         // --- Progress bars ---
          .progress-track { background-color: #30363d; border-radius: 2px; \
              min-height: 4px; } \
          .progress-fill { border-radius: 2px; min-height: 4px; } \
          .progress-fill-cpu { background-color: #58a6ff; } \
          .progress-fill-mem { background-color: #d2a8ff; } \
-         \
-         // --- Status dots ---
          .status-dot { font-size: 14px; } \
          .status-off { color: #8b949e; } \
          .status-metering { color: #fbbf24; } \
          .status-active { color: #3fb950; } \
-         \
-         // --- Jobs table ---
          .job-table-header { background-color: #161b22; color: #8b949e; \
              font-size: 11px; font-weight: 600; } \
          .job-table-row { border-bottom: 1px solid #30363d; } \
          .job-table-row:hover { background-color: #1c2128; } \
          .job-table-cell { color: #e6edf3; font-size: 12px; padding: 8px; } \
-         \
-         // --- Summary metrics ---
          .summary-metric-value { color: #e6edf3; font-size: 18px; \
              font-weight: 700; } \
          .summary-metric-label { color: #8b949e; font-size: 11px; } \
-         \
-         // --- Accent colors ---
          .cpu-accent { color: #58a6ff; } \
          .mem-accent { color: #d2a8ff; } \
          .status-green { color: #3fb950; } \
          .earnings-gold { color: #fbbf24; } \
-         \
-         // --- Notebook tabs ---
          .tab-label { color: #8b949e; }",
     );
     if let Some(display) = gtk4::gdk::Display::default() {
