@@ -495,11 +495,41 @@ mod tests {
         }
     }
 
-    /// Test runner: echoes a fixed accepted response for a non-empty body,
-    /// rejects an empty one with 400, and fails with 500 for `"boom"`.
+    /// Minimal valid `JobSpec` JSON body.
+    fn valid_job_spec() -> Vec<u8> {
+        br#"{"job_id":"j-1","image":"ghcr.io/example/echo:latest","command":[],"env":[],"devices":{"class":{"kind":"cpu"},"vcpus":1,"mem_kb":1024,"min_vram_mb":0},"max_duration_secs":60}"#.to_vec()
+    }
+
+    /// Valid `JobSpec` with a caller-specified `job_id`.
+    fn valid_job_spec_with_id(job_id: &str) -> Vec<u8> {
+        format!(
+            r#"{{"job_id":"{job_id}","image":"ghcr.io/example/echo:latest","command":[],"env":[],"devices":{{"class":{{"kind":"cpu"}},"vcpus":1,"mem_kb":1024,"min_vram_mb":0}},"max_duration_secs":60}}"#
+        )
+        .into_bytes()
+    }
+
+    /// Test runner: parses body as `JobSpec` and routes on `job_id`
+    /// (when the `serve` feature is active), falling back to raw byte
+    /// matching for non-serve paths.
     struct FakeRunner;
     impl JobRunner for FakeRunner {
         fn run(&self, body: &[u8]) -> Result<String, JobRunError> {
+            #[cfg(feature = "serve")]
+            if let Ok(spec) = serde_json::from_slice::<vtessera_executor::JobSpec>(body) {
+                return match spec.job_id.as_str() {
+                    "boom" => Err(JobRunError::server("backend exploded")),
+                    _ => Ok(r#"{"status":"accepted","job_id":"j-1"}"#.into()),
+                };
+            }
+            // Non-serve fallback: try a lightweight JSON check for "boom"
+            // job_id (tests send valid JobSpec JSON in both feature modes).
+            #[cfg(not(feature = "serve"))]
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+                return match v.get("job_id").and_then(|j| j.as_str()) {
+                    Some("boom") => Err(JobRunError::server("backend exploded")),
+                    _ => Ok(r#"{"status":"accepted","job_id":"j-1"}"#.into()),
+                };
+            }
             match body {
                 b"boom" => Err(JobRunError::server("backend exploded")),
                 b"" => Err(JobRunError::bad_request("empty job body")),
@@ -555,7 +585,9 @@ mod tests {
     #[test]
     fn free_jobs_post_is_refused_with_501_until_execution_is_wired() {
         let s = state(PriceQuote::Free);
-        let r = dispatch(&s, req(HttpMethod::Post, "/jobs", vec![]));
+        let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+        r.body = valid_job_spec();
+        let r = dispatch(&s, r);
         assert_eq!(r.status, 501);
         let body = String::from_utf8(r.body).unwrap();
         assert!(body.contains("\"status\":\"not-implemented\""));
@@ -566,7 +598,7 @@ mod tests {
     fn free_jobs_post_runs_through_the_wired_runner() {
         let s = state_with_runner(PriceQuote::Free, FakeRunner);
         let mut r = req(HttpMethod::Post, "/jobs", vec![]);
-        r.body = br#"{"job_id":"x"}"#.to_vec();
+        r.body = valid_job_spec();
         let resp = dispatch(&s, r);
         assert_eq!(resp.status, 200);
         let body = String::from_utf8(resp.body).unwrap();
@@ -575,20 +607,20 @@ mod tests {
     }
 
     #[test]
-    fn free_jobs_post_with_bad_body_returns_400_from_runner() {
+    fn free_jobs_post_with_bad_body_returns_400() {
         let s = state_with_runner(PriceQuote::Free, FakeRunner);
         let resp = dispatch(&s, req(HttpMethod::Post, "/jobs", vec![]));
         assert_eq!(resp.status, 400);
-        let body = String::from_utf8(resp.body).unwrap();
-        assert!(body.contains("empty job body"));
-        assert!(!body.contains("\"status\":\"accepted\""));
+        assert!(!String::from_utf8(resp.body)
+            .unwrap()
+            .contains("\"status\":\"accepted\""));
     }
 
     #[test]
     fn free_jobs_post_with_backend_failure_returns_500_from_runner() {
         let s = state_with_runner(PriceQuote::Free, FakeRunner);
         let mut r = req(HttpMethod::Post, "/jobs", vec![]);
-        r.body = b"boom".to_vec();
+        r.body = valid_job_spec_with_id("boom");
         let resp = dispatch(&s, r);
         assert_eq!(resp.status, 500);
         let body = String::from_utf8(resp.body).unwrap();
@@ -738,7 +770,7 @@ mod tests {
 
         fn job_req(headers: Vec<(&str, &str)>) -> HttpRequest {
             let mut r = req(HttpMethod::Post, "/jobs", headers);
-            r.body = br#"{"job_id":"x"}"#.to_vec();
+            r.body = valid_job_spec();
             r
         }
 
