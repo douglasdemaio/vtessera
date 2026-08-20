@@ -1643,6 +1643,7 @@ dependencies = [
  "hex",
  "rand",
  "serde",
+ "serde_json",
  "toml 0.8.23",
  "vtessera-offer",
 ]
