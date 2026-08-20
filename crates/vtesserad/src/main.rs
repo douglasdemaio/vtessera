@@ -120,9 +120,10 @@ fn main() {
 
     let mut samples: Vec<metrics::ResourceSample> = Vec::new();
     let mut window_start: Option<u64> = None;
+    let mut cpu_state = metrics::CpuState::default();
 
     loop {
-        match metrics::sample(&state_dir_str) {
+        match metrics::sample(&state_dir_str, &mut cpu_state) {
             Ok(s) => {
                 if window_start.is_none() {
                     window_start = Some(s.ts_unix);
