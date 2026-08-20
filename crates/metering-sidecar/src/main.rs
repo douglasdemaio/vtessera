@@ -42,16 +42,15 @@ struct GuestResult {
 fn read_manifest(path: &Path) -> Result<JobManifest, String> {
     let data = fs::read_to_string(path)
         .map_err(|e| format!("failed to read manifest {}: {e}", path.display()))?;
-    serde_json::from_str(&data)
-        .map_err(|e| format!("failed to parse manifest: {e}"))
+    serde_json::from_str(&data).map_err(|e| format!("failed to parse manifest: {e}"))
 }
 
 fn get_cpu_usage(pid: u32) -> Result<(f64, u64), String> {
     let stat_path = format!("/proc/{pid}/stat");
     let status_path = format!("/proc/{pid}/status");
 
-    let stat = fs::read_to_string(&stat_path)
-        .map_err(|e| format!("failed to read {stat_path}: {e}"))?;
+    let stat =
+        fs::read_to_string(&stat_path).map_err(|e| format!("failed to read {stat_path}: {e}"))?;
 
     let fields: Vec<&str> = stat.split_whitespace().collect();
     if fields.len() < 22 {
@@ -137,22 +136,19 @@ fn wait_for_process(pid: u32, max_duration_secs: u64) -> (i32, Instant) {
 fn write_metering(path: &Path, metering: &GuestMetering) -> Result<(), String> {
     let json = serde_json::to_string_pretty(metering)
         .map_err(|e| format!("failed to serialize metering: {e}"))?;
-    fs::write(path, json)
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    fs::write(path, json).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
 fn write_result(path: &Path, result: &GuestResult) -> Result<(), String> {
     let json = serde_json::to_string_pretty(result)
         .map_err(|e| format!("failed to serialize result: {e}"))?;
-    fs::write(path, json)
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    fs::write(path, json).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
 fn main() {
-    let manifest_path = std::env::var("MANIFEST_PATH")
-        .unwrap_or_else(|_| "/mnt/vtessera/manifest.json".into());
-    let output_dir = std::env::var("OUTPUT_DIR")
-        .unwrap_or_else(|_| "/mnt/vtessera/out".into());
+    let manifest_path =
+        std::env::var("MANIFEST_PATH").unwrap_or_else(|_| "/mnt/vtessera/manifest.json".into());
+    let output_dir = std::env::var("OUTPUT_DIR").unwrap_or_else(|_| "/mnt/vtessera/out".into());
     let job_id = std::env::var("JOB_ID").unwrap_or_else(|_| "unknown".into());
 
     eprintln!("metering-sidecar: starting for job {job_id}");
@@ -203,10 +199,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    if let Err(e) = write_result(
-        &output_path.join("result.json"),
-        &GuestResult { exit_code },
-    ) {
+    if let Err(e) = write_result(&output_path.join("result.json"), &GuestResult { exit_code }) {
         eprintln!("metering-sidecar: failed to write result: {e}");
         std::process::exit(1);
     }
