@@ -78,8 +78,9 @@
 use std::env;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use borsh::BorshSerialize;
 use sha2::{Digest, Sha256};
@@ -136,6 +137,21 @@ const BUYER_SOL_LAMPORTS: u64 = 5_000_000;
 
 /// Stablecoin decimals for the test mint — matches the demo.
 const MINT_DECIMALS: u8 = 6;
+
+/// Max retries for transient RPC failures before marking an iteration as
+/// failed. Covers 429 rate-limits, network timeouts, and brief devnet
+/// outages.
+const MAX_RPC_RETRIES: u32 = 3;
+
+/// Base delay between RPC retries (exponential backoff).
+const RETRY_BASE_DELAY_MS: u64 = 2_000;
+
+/// Per-iteration timeout. If an iteration takes longer than this, it is
+/// aborted and counted as a failure.
+const ITER_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Print a progress line every PROGRESS_INTERVAL iterations per worker.
+const PROGRESS_INTERVAL: u64 = 10;
 
 #[derive(BorshSerialize)]
 struct PayForComputeArgs {
@@ -210,7 +226,49 @@ fn expected_earned(price: u64, f_micros: u32) -> u64 {
     (price as u128 * f_micros as u128 / 1_000_000) as u64
 }
 
-// ---------- RPC plumbing ----------------------------------------------------
+// ---------- RPC plumbing with retry -----------------------------------------
+
+/// Classify an RPC error as transient (retryable) or permanent.
+fn is_transient_error(e: &dyn std::error::Error) -> bool {
+    let msg = e.to_string().to_lowercase();
+    msg.contains("429")
+        || msg.contains("rate limit")
+        || msg.contains("timeout")
+        || msg.contains("deadline has elapsed")
+        || msg.contains("connection refused")
+        || msg.contains("network")
+        || msg.contains("503")
+        || msg.contains("502")
+        || msg.contains("reset")
+        || msg.contains("broken pipe")
+}
+
+fn send_tx_with_retry(
+    rpc: &RpcClient,
+    ixs: &[Instruction],
+    signers: &[&Keypair],
+    fee_payer: &Keypair,
+    label: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut last_err: Box<dyn std::error::Error> = "no attempts".into();
+    for attempt in 0..=MAX_RPC_RETRIES {
+        if attempt > 0 {
+            let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt - 1);
+            eprintln!("  [{label}] retry {attempt}/{MAX_RPC_RETRIES} after {delay}ms");
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+        match send_tx(rpc, ixs, signers, fee_payer, label) {
+            Ok(sig) => return Ok(sig),
+            Err(e) => {
+                if !is_transient_error(e.as_ref()) || attempt == MAX_RPC_RETRIES {
+                    return Err(e);
+                }
+                last_err = e;
+            }
+        }
+    }
+    Err(last_err)
+}
 
 fn send_tx(
     rpc: &RpcClient,
@@ -352,7 +410,7 @@ fn top_up(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ix =
         spl_token::instruction::mint_to(&spl_token::id(), mint, ata, &payer.pubkey(), &[], amount)?;
-    send_tx(rpc, &[ix], &[payer], payer, "mint_to buyer")?;
+    send_tx_with_retry(rpc, &[ix], &[payer], payer, "mint_to buyer")?;
     Ok(())
 }
 
@@ -364,6 +422,7 @@ struct IterOutcome {
     price: u64,
     ok: bool,
     detail: String,
+    elapsed_ms: u64,
 }
 
 fn run_iteration(
@@ -373,6 +432,24 @@ fn run_iteration(
     rng: &mut Rng,
     nonce: u64,
 ) -> IterOutcome {
+    let iter_start = Instant::now();
+
+    // Check timeout early.
+    let check_timeout = || -> Option<IterOutcome> {
+        if iter_start.elapsed() > ITER_TIMEOUT {
+            Some(IterOutcome {
+                iter,
+                action: "timeout".into(),
+                price: 0,
+                ok: false,
+                detail: format!("iteration exceeded {}s timeout", ITER_TIMEOUT.as_secs()),
+                elapsed_ms: iter_start.elapsed().as_millis() as u64,
+            })
+        } else {
+            None
+        }
+    };
+
     // §6.3 edge: force `price = 1` to find rounding edges.
     let price = if iter.is_multiple_of(EDGE_CADENCE) {
         1
@@ -389,7 +466,10 @@ fn run_iteration(
     let buyer_ata = get_associated_token_address(&buyer_pk, &env.mint);
 
     let fund_sol = system_instruction::transfer(&env.payer.pubkey(), &buyer_pk, BUYER_SOL_LAMPORTS);
-    if let Err(e) = send_tx(
+    if let Some(o) = check_timeout() {
+        return o;
+    }
+    if let Err(e) = send_tx_with_retry(
         rpc,
         &[fund_sol],
         &[&env.payer],
@@ -402,6 +482,7 @@ fn run_iteration(
             price,
             ok: false,
             detail: format!("fund buyer SOL failed: {e}"),
+            elapsed_ms: iter_start.elapsed().as_millis() as u64,
         };
     }
     let create_buyer_ata = create_associated_token_account(
@@ -410,7 +491,10 @@ fn run_iteration(
         &env.mint,
         &spl_token::id(),
     );
-    if let Err(e) = send_tx(
+    if let Some(o) = check_timeout() {
+        return o;
+    }
+    if let Err(e) = send_tx_with_retry(
         rpc,
         &[create_buyer_ata],
         &[&env.payer],
@@ -423,9 +507,13 @@ fn run_iteration(
             price,
             ok: false,
             detail: format!("create buyer ATA failed: {e}"),
+            elapsed_ms: iter_start.elapsed().as_millis() as u64,
         };
     }
     // Ensure buyer has enough stablecoin for this price.
+    if let Some(o) = check_timeout() {
+        return o;
+    }
     if let Err(e) = top_up(rpc, &env.payer, &env.mint, &buyer_ata, price) {
         return IterOutcome {
             iter,
@@ -433,6 +521,7 @@ fn run_iteration(
             price,
             ok: false,
             detail: format!("top_up failed: {e}"),
+            elapsed_ms: iter_start.elapsed().as_millis() as u64,
         };
     }
     let buyer_before = match token_balance(rpc, &buyer_ata) {
@@ -444,6 +533,7 @@ fn run_iteration(
                 price,
                 ok: false,
                 detail: format!("read buyer balance failed: {e}"),
+                elapsed_ms: iter_start.elapsed().as_millis() as u64,
             };
         }
     };
@@ -466,13 +556,16 @@ fn run_iteration(
 
     // Create the accounts the flow needs (escrow ATA always; seller ATA
     // only on the finalize path — cancel refunds the buyer, never the seller).
+    if let Some(o) = check_timeout() {
+        return o;
+    }
     let create_escrow = create_associated_token_account(
         &env.payer.pubkey(),
         &contract_pda,
         &env.mint,
         &spl_token::id(),
     );
-    if let Err(e) = send_tx(
+    if let Err(e) = send_tx_with_retry(
         rpc,
         &[create_escrow],
         &[&env.payer],
@@ -485,16 +578,20 @@ fn run_iteration(
             price,
             ok: false,
             detail: format!("create escrow ATA failed: {e}"),
+            elapsed_ms: iter_start.elapsed().as_millis() as u64,
         };
     }
     if !do_cancel {
+        if let Some(o) = check_timeout() {
+            return o;
+        }
         let create_seller = create_associated_token_account(
             &env.payer.pubkey(),
             &seller.pubkey(),
             &env.mint,
             &spl_token::id(),
         );
-        if let Err(e) = send_tx(
+        if let Err(e) = send_tx_with_retry(
             rpc,
             &[create_seller],
             &[&env.payer],
@@ -507,11 +604,15 @@ fn run_iteration(
                 price,
                 ok: false,
                 detail: format!("create seller ATA failed: {e}"),
+                elapsed_ms: iter_start.elapsed().as_millis() as u64,
             };
         }
     }
 
     // ---- pay_for_compute ----
+    if let Some(o) = check_timeout() {
+        return o;
+    }
     let pay_disc = anchor_disc("pay_for_compute");
     let pay_args = PayForComputeArgs {
         job_id,
@@ -528,6 +629,7 @@ fn run_iteration(
             price,
             ok: false,
             detail: format!("encode pay args failed: {e}"),
+            elapsed_ms: iter_start.elapsed().as_millis() as u64,
         };
     }
     let pay_ix = Instruction {
@@ -546,18 +648,22 @@ fn run_iteration(
         ],
         data: pay_data,
     };
-    if let Err(e) = send_tx(rpc, &[pay_ix], &[&buyer, &env.payer], &env.payer, "pay_for_compute") {
+    if let Err(e) = send_tx_with_retry(rpc, &[pay_ix], &[&buyer, &env.payer], &env.payer, "pay_for_compute") {
         return IterOutcome {
             iter,
             action: "pay".into(),
             price,
             ok: false,
             detail: format!("pay_for_compute failed: {e}"),
+            elapsed_ms: iter_start.elapsed().as_millis() as u64,
         };
     }
 
     if do_cancel {
         // ---- cancel_before_start: buyer gets everything back ----
+        if let Some(o) = check_timeout() {
+            return o;
+        }
         let cancel_disc = anchor_disc("cancel_before_start");
         let cancel_ix = Instruction {
             program_id: env.program_id,
@@ -573,7 +679,7 @@ fn run_iteration(
             ],
             data: cancel_disc.to_vec(),
         };
-        if let Err(e) = send_tx(
+        if let Err(e) = send_tx_with_retry(
             rpc,
             &[cancel_ix],
             &[&buyer, &env.payer],
@@ -586,6 +692,7 @@ fn run_iteration(
                 price,
                 ok: false,
                 detail: format!("cancel_before_start failed: {e}"),
+                elapsed_ms: iter_start.elapsed().as_millis() as u64,
             };
         }
         let escrow_after = match token_balance(rpc, &escrow_ata) {
@@ -597,6 +704,7 @@ fn run_iteration(
                     price,
                     ok: false,
                     detail: format!("read escrow after cancel failed: {e}"),
+                    elapsed_ms: iter_start.elapsed().as_millis() as u64,
                 };
             }
         };
@@ -607,9 +715,13 @@ fn run_iteration(
             price,
             ok,
             detail: format!("cancel refunded full {price}; escrow drained: {escrow_after}"),
+            elapsed_ms: iter_start.elapsed().as_millis() as u64,
         }
     } else {
         // ---- finalize_pro_rata ----
+        if let Some(o) = check_timeout() {
+            return o;
+        }
         // §6.3 edge: force `f_micros = 1_000_000` (buyer refund exactly 0).
         let f_edge = iter % EDGE_CADENCE == EDGE_CADENCE / 2;
         let f_micros = if f_edge {
@@ -630,6 +742,7 @@ fn run_iteration(
                 price,
                 ok: false,
                 detail: format!("encode finalize args failed: {e}"),
+                elapsed_ms: iter_start.elapsed().as_millis() as u64,
             };
         }
         let fin_ix = Instruction {
@@ -647,7 +760,7 @@ fn run_iteration(
             ],
             data: fin_data,
         };
-        if let Err(e) = send_tx(
+        if let Err(e) = send_tx_with_retry(
             rpc,
             &[fin_ix],
             &[&env.payer],
@@ -660,6 +773,7 @@ fn run_iteration(
                 price,
                 ok: false,
                 detail: format!("finalize_pro_rata failed: {e}"),
+                elapsed_ms: iter_start.elapsed().as_millis() as u64,
             };
         }
 
@@ -685,6 +799,7 @@ fn run_iteration(
                 "earned={earned} refund={refund} escrow_after={escrow_after} \
                  buyer_before={buyer_before} buyer_after={buyer_after} seller_after={seller_after}"
             ),
+            elapsed_ms: iter_start.elapsed().as_millis() as u64,
         }
     }
 }
@@ -786,22 +901,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("system clock before 1970")
         .as_nanos() as u64;
 
+    // Graceful shutdown flag.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let shutdown = shutdown.clone();
+        ctrlc::set_handler(move || {
+            eprintln!("\n[soak] SIGINT received — finishing current iterations...");
+            shutdown.store(true, Ordering::SeqCst);
+        })?;
+    }
+
     // Dispatch iterations round-robin across `parallel` workers. Each
     // worker owns an independent RpcClient + Rng (sub-seeded from the
     // global seed), so a run is fully reproducible for the same
     // (seed, --parallel, --iters).
     let outcomes: Arc<Mutex<Vec<IterOutcome>>> = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::with_capacity(parallel);
+    let wall_start = Instant::now();
     for w in 0..parallel {
         let rpc = rpc.clone();
         let env = env.clone();
         let out = outcomes.clone();
+        let shutdown = shutdown.clone();
         // Deterministic per-worker sub-seed, distinct from Rng's 0 guard.
         let worker_seed = seed ^ (w as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
         handles.push(std::thread::spawn(move || {
             let mut rng = Rng::from_seed(worker_seed);
             for iter in (w as u64 + 1..=iters).step_by(parallel) {
+                if shutdown.load(Ordering::SeqCst) {
+                    eprintln!("  [worker {w}] shutting down before iter {iter}");
+                    break;
+                }
                 let o = run_iteration(&rpc, &env, iter, &mut rng, nonce);
+                // Live progress every PROGRESS_INTERVAL iterations.
+                if o.iter % PROGRESS_INTERVAL == 0 || !o.ok {
+                    let mark = if o.ok { "OK" } else { "FAIL" };
+                    eprintln!(
+                        "  [{mark}] iter {:>4}  {:<24}  price={:<9}  {}ms  {}",
+                        o.iter, o.action, o.price, o.elapsed_ms, o.detail
+                    );
+                }
                 out.lock().unwrap().push(o);
             }
         }));
@@ -809,22 +948,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for h in handles {
         h.join().map_err(|_| "soak worker panicked")?;
     }
+    let wall_elapsed = wall_start.elapsed();
 
     let mut results = outcomes.lock().unwrap();
     results.sort_by_key(|o| o.iter);
+    let total = results.len();
     let failures = results.iter().filter(|o| !o.ok).count();
-    for out in results.iter() {
-        let mark = if out.ok { "OK  " } else { "FAIL" };
+    let successes = total - failures;
+
+    // Latency stats.
+    let mut latencies: Vec<u64> = results.iter().map(|o| o.elapsed_ms).collect();
+    latencies.sort();
+    let p50 = latencies.get(total / 2).copied().unwrap_or(0);
+    let p95 = latencies.get(total * 95 / 100).copied().unwrap_or(0);
+    let p99 = latencies.get(total * 99 / 100).copied().unwrap_or(0);
+    let avg = if total > 0 {
+        latencies.iter().sum::<u64>() / total as u64
+    } else {
+        0
+    };
+
+    // Print failures first.
+    for out in results.iter().filter(|o| !o.ok) {
         println!(
-            "[{mark}] iter {:>4}  {:<24}  price={:<9}  {}",
-            out.iter, out.action, out.price, out.detail
+            "[FAIL] iter {:>4}  {:<24}  price={:<9}  {}ms  {}",
+            out.iter, out.action, out.price, out.elapsed_ms, out.detail
         );
     }
 
-    println!(
-        "\nsoak complete: {iters} iterations, {failures} failures ({}%).",
-        failures as f64 / iters as f64 * 100.0
-    );
+    // Summary.
+    println!();
+    println!("=== soak summary ===");
+    println!("  iterations:  {total}");
+    println!("  successes:   {successes}");
+    println!("  failures:    {failures} ({:.1}%)", failures as f64 / total as f64 * 100.0);
+    println!("  wall time:   {:.1}s", wall_elapsed.as_secs_f64());
+    println!("  latency:     avg={avg}ms  p50={p50}ms  p95={p95}ms  p99={p99}ms");
+
+    // Action breakdown.
+    let cancels = results.iter().filter(|o| o.action == "cancel").count();
+    let finalizes = results.iter().filter(|o| o.action.starts_with("finalize")).count();
+    println!("  finalize:    {finalizes}");
+    println!("  cancel:      {cancels}");
+
     if failures > 0 {
         std::process::exit(1);
     }
