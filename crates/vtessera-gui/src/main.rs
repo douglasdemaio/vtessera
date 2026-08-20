@@ -57,15 +57,22 @@ struct Ui {
     /// `docs/CONSENT.md`). OFF by default; off until explicitly enabled.
     accept_switch: gtk4::Switch,
     error_label: gtk4::Label,
-    status_label: gtk4::Label,
-    node_id_label: gtk4::Label,
-    mode_label: gtk4::Label,
-    receipts_label: gtk4::Label,
     settlement_label: gtk4::Label,
-    jobs_view: gtk4::TextView,
     log_view: gtk4::TextView,
     start_btn: gtk4::Button,
     stop_btn: gtk4::Button,
+    // Dashboard cards
+    status_value: gtk4::Label,
+    nodeid_value: gtk4::Label,
+    cpu_value: gtk4::Label,
+    cpu_fill: gtk4::Box,
+    mem_value: gtk4::Label,
+    mem_fill: gtk4::Box,
+    // Jobs page
+    jobs_list: gtk4::Box,
+    total_val: gtk4::Label,
+    earnings_val: gtk4::Label,
+    avgcpu_val: gtk4::Label,
 }
 
 /// Mutable node runtime state.
@@ -192,16 +199,6 @@ fn current_node_id() -> Option<String> {
     ))
 }
 
-fn count_receipts() -> usize {
-    std::fs::read_dir(settings::state_dir())
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.file_name().to_string_lossy().starts_with("receipt_"))
-                .count()
-        })
-        .unwrap_or(0)
-}
-
 /// The three observable states (§2.3 of `docs/CONSENT.md`):
 /// **Off**, **Metering only** (vtesserad sampling; nothing accepts jobs),
 /// **Accepting jobs** (vtesserad + vtessera-node serving).
@@ -221,81 +218,185 @@ fn refresh_status(ui: &Ui, state: &NodeState) {
     let running = state.daemons.borrow().is_some();
     ui.start_btn.set_sensitive(!running);
     ui.stop_btn.set_sensitive(running);
-    ui.status_label.set_text(current_state(state));
 
+    // Update dashboard status card.
+    let state_text = current_state(state);
+    ui.status_value.set_text(state_text);
+    // Remove old status classes and add the correct one.
+    ui.status_value.remove_css_class("status-off");
+    ui.status_value.remove_css_class("status-metering");
+    ui.status_value.remove_css_class("status-active");
+    match state_text {
+        "Off" => ui.status_value.add_css_class("status-off"),
+        "Metering only" => ui.status_value.add_css_class("status-metering"),
+        "Accepting jobs" => ui.status_value.add_css_class("status-active"),
+        _ => {}
+    }
+
+    // Update dashboard node ID card.
     let node_id = current_node_id().unwrap_or_else(|| "—".into());
-    ui.node_id_label.set_text(&node_id);
-
-    let s = ui.settings.borrow();
-    let mode = if s.is_free() {
-        "free — donating compute".into()
-    } else {
-        format!(
-            "paid — {} {}/CPU-hour, → {}",
-            s.currency.to_uppercase(),
-            format_price(s.price_per_cpu_hour),
-            if s.payout_id.is_empty() {
-                "no payout address".to_string()
-            } else {
-                s.payout_id.clone()
-            }
-        )
-    };
-    ui.mode_label.set_text(&mode);
-
-    ui.receipts_label
-        .set_text(&format!("{} receipt files", count_receipts()));
-    refresh_jobs(ui);
+    ui.nodeid_value.set_text(&node_id);
 }
 
-/// Enumerate the signed per-job receipts the node has written under
-/// `<state-dir>/job-receipts/` (newest first) — the legible activity record
-/// the status page promises (§1.5 / §2.3).
-fn refresh_jobs(ui: &Ui) {
+/// Read the latest receipt file from state_dir and update dashboard CPU/memory cards.
+fn refresh_dashboard(ui: &Ui) {
+    let state_dir = settings::state_dir();
+    let mut latest_ts = 0u64;
+    let mut cpu_pct = 0.0f64;
+    let mut mem_kb = 0u64;
+
+    if let Ok(rd) = std::fs::read_dir(&state_dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.starts_with("receipt_") || !name_str.ends_with(".json") {
+                continue;
+            }
+            if let Ok(raw) = std::fs::read_to_string(entry.path()) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let ts = val["receipt"]["window_end"].as_u64().unwrap_or(0);
+                    if ts >= latest_ts {
+                        latest_ts = ts;
+                        cpu_pct = val["receipt"]["totals"]["cpu_pct_avg"]
+                            .as_f64()
+                            .unwrap_or(0.0);
+                        mem_kb = val["receipt"]["totals"]["mem_used_kb_avg"]
+                            .as_u64()
+                            .unwrap_or(0);
+                    }
+                }
+            }
+        }
+    }
+
+    if latest_ts > 0 {
+        ui.cpu_value.set_text(&format!("{:.1}%", cpu_pct));
+        let mem_gb = mem_kb as f64 / 1_048_576.0;
+        ui.mem_value.set_text(&format!("{:.1} GB", mem_gb));
+
+        // Update progress bars (cap at 100% for CPU, assume 8 GB total for mem).
+        let cpu_width = ((cpu_pct).min(100.0) / 100.0 * 200.0) as i32;
+        ui.cpu_fill.set_size_request(cpu_width, 4);
+        let mem_pct = (mem_gb / 8.0 * 100.0).min(100.0);
+        let mem_width = (mem_pct / 100.0 * 200.0) as i32;
+        ui.mem_fill.set_size_request(mem_width, 4);
+    }
+}
+
+/// Read job receipts and populate the jobs table + summary bar.
+fn refresh_jobs_table(ui: &Ui) {
     use std::time::SystemTime;
 
     let dir = settings::state_dir().join("job-receipts");
     let now = SystemTime::now();
-    let mut jobs: Vec<(u64, String)> = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "json"))
-            .filter_map(|p| {
-                let age = std::fs::metadata(&p)
+
+    #[derive(serde::Deserialize)]
+    struct ReceiptTotals {
+        cpu_pct_avg: f64,
+        mem_used_kb_avg: u64,
+    }
+    #[derive(serde::Deserialize)]
+    struct ReceiptInner {
+        totals: ReceiptTotals,
+    }
+    #[derive(serde::Deserialize)]
+    struct JobReceipt {
+        receipt: ReceiptInner,
+    }
+
+    let mut jobs: Vec<(u64, String, f64, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|x| x == "json") {
+                let age = std::fs::metadata(&path)
                     .and_then(|m| m.modified())
                     .ok()
                     .and_then(|t| now.duration_since(t).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(u64::MAX);
-                Some((age, p.file_name()?.to_string_lossy().into_owned()))
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    jobs.sort();
-    let body = if jobs.is_empty() {
-        "No jobs yet — per-job receipts appear here when the node completes work.".to_string()
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                if let Ok(raw) = std::fs::read_to_string(&path) {
+                    if let Ok(job) = serde_json::from_str::<JobReceipt>(&raw) {
+                        jobs.push((
+                            age,
+                            name,
+                            job.receipt.totals.cpu_pct_avg,
+                            job.receipt.totals.mem_used_kb_avg,
+                        ));
+                    } else {
+                        jobs.push((age, name, 0.0, 0));
+                    }
+                }
+            }
+        }
+    }
+    jobs.sort_by_key(|j| j.0);
+
+    // Summary metrics.
+    let total = jobs.len();
+    let avg_cpu = if total > 0 {
+        jobs.iter().map(|j| j.2).sum::<f64>() / total as f64
     } else {
-        jobs.into_iter()
-            .take(50)
-            .map(|(age, name)| {
-                let stamp = if age == u64::MAX {
-                    "unknown time".to_string()
-                } else if age < 60 {
-                    format!("{age}s ago")
-                } else if age < 3600 {
-                    format!("{}m ago", age / 60)
-                } else {
-                    format!("{}h ago", age / 3600)
-                };
-                format!("{stamp}  {name}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        0.0
     };
-    let buffer = ui.jobs_view.buffer();
-    buffer.set_text(&body);
+    ui.total_val.set_text(&format!("{}", total));
+    ui.avgcpu_val.set_text(&format!("{:.1}%", avg_cpu));
+    // Earnings — placeholder since v0 receipts don't carry price info.
+    ui.earnings_val.set_text("—");
+
+    // Clear old rows.
+    while let Some(child) = ui.jobs_list.first_child() {
+        ui.jobs_list.remove(&child);
+    }
+
+    // Add rows.
+    for (age, name, cpu, mem_kb) in jobs.into_iter().take(50) {
+        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        row.add_css_class("job-table-row");
+
+        let stamp = if age == u64::MAX {
+            "unknown".to_string()
+        } else if age < 60 {
+            format!("{}s ago", age)
+        } else if age < 3600 {
+            format!("{}m ago", age / 60)
+        } else {
+            format!("{}h ago", age / 3600)
+        };
+
+        let mem_gb = mem_kb as f64 / 1_048_576.0;
+        let short_id = name
+            .trim_end_matches(".json")
+            .chars()
+            .take(12)
+            .collect::<String>();
+
+        for text in [
+            "\u{25cf}".to_string(), // status dot
+            short_id,
+            format!("{:.1}%", cpu),
+            format!("{:.1} GB", mem_gb),
+            "\u{2014}".to_string(), // earnings placeholder
+            stamp,
+        ] {
+            let l = gtk4::Label::new(Some(&text));
+            l.set_xalign(0.0);
+            l.set_hexpand(true);
+            l.set_margin_start(8);
+            l.set_margin_end(8);
+            l.add_css_class("job-table-cell");
+            if text == "\u{25cf}" {
+                l.add_css_class("status-green");
+            }
+            row.append(&l);
+        }
+        ui.jobs_list.append(&row);
+    }
 }
 
 fn start_node(ui: &Ui, state: &NodeState) {
@@ -426,6 +527,70 @@ fn build_ui(app: &gtk4::Application) {
     let log_pending: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     let initial = Settings::load_or_default(&settings::settings_path());
+
+    // Create dashboard card widgets before Ui init so they can be stored.
+    fn make_card(title: &str) -> (gtk4::Box, gtk4::Label, gtk4::Label) {
+        let card = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        card.add_css_class("dashboard-card");
+        let title_label = gtk4::Label::new(Some(title));
+        title_label.set_xalign(0.0);
+        title_label.add_css_class("dashboard-card-title");
+        card.append(&title_label);
+        let value_label = gtk4::Label::new(Some("—"));
+        value_label.set_xalign(0.0);
+        value_label.add_css_class("dashboard-card-value");
+        card.append(&value_label);
+        (card, title_label, value_label)
+    }
+
+    fn make_card_with_bar(title: &str, accent: &str) -> (gtk4::Box, gtk4::Label, gtk4::Box) {
+        let card = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        card.add_css_class("dashboard-card");
+        let title_label = gtk4::Label::new(Some(title));
+        title_label.set_xalign(0.0);
+        title_label.add_css_class("dashboard-card-title");
+        card.append(&title_label);
+        let value_label = gtk4::Label::new(Some("—"));
+        value_label.set_xalign(0.0);
+        value_label.add_css_class("dashboard-card-value");
+        value_label.add_css_class(accent);
+        card.append(&value_label);
+        let track = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        track.add_css_class("progress-track");
+        track.set_size_request(-1, 4);
+        let fill = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        fill.add_css_class("progress-fill");
+        fill.add_css_class(&format!("progress-fill-{accent}"));
+        fill.set_size_request(0, 4);
+        track.append(&fill);
+        card.append(&track);
+        (card, value_label, fill)
+    }
+
+    let (status_card, _, status_value) = make_card("STATUS");
+    let (nodeid_card, _, nodeid_value) = make_card("NODE ID");
+    let (cpu_card, cpu_value, cpu_fill) = make_card_with_bar("CPU", "cpu-accent");
+    let (mem_card, mem_value, mem_fill) = make_card_with_bar("MEMORY", "mem-accent");
+
+    // Create jobs page widgets before Ui init.
+    fn make_summary(label: &str) -> (gtk4::Box, gtk4::Label) {
+        let col = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+        let val = gtk4::Label::new(Some("0"));
+        val.add_css_class("summary-metric-value");
+        val.set_xalign(0.0);
+        col.append(&val);
+        let lbl = gtk4::Label::new(Some(label));
+        lbl.add_css_class("summary-metric-label");
+        lbl.set_xalign(0.0);
+        col.append(&lbl);
+        (col, val)
+    }
+
+    let (total_box, total_val) = make_summary("Total Jobs");
+    let (earnings_box, earnings_val) = make_summary("Earnings");
+    let (avgcpu_box, avgcpu_val) = make_summary("Avg CPU");
+    let jobs_list = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+
     let ui = Rc::new(Ui {
         settings: Rc::new(RefCell::new(initial.clone())),
         free_btn: gtk4::ToggleButton::with_label("Donate (free)"),
@@ -452,15 +617,20 @@ fn build_ui(app: &gtk4::Application) {
         ]),
         accept_switch: gtk4::Switch::new(),
         error_label: gtk4::Label::new(None),
-        status_label: gtk4::Label::new(None),
-        node_id_label: gtk4::Label::new(None),
-        mode_label: gtk4::Label::new(None),
-        receipts_label: gtk4::Label::new(None),
         settlement_label: gtk4::Label::new(None),
-        jobs_view: gtk4::TextView::new(),
         log_view: gtk4::TextView::new(),
         start_btn: gtk4::Button::with_label("Start"),
         stop_btn: gtk4::Button::with_label("Stop"),
+        status_value,
+        nodeid_value,
+        cpu_value,
+        cpu_fill,
+        mem_value,
+        mem_fill,
+        jobs_list,
+        total_val,
+        earnings_val,
+        avgcpu_val,
     });
 
     // ---- Settings page ---------------------------------------------------
@@ -612,36 +782,25 @@ fn build_ui(app: &gtk4::Application) {
 
     settings_page.append(&grid);
 
-    // ---- Status page -----------------------------------------------------
-    let status_page = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    status_page.set_margin_top(24);
-    status_page.set_margin_bottom(24);
-    status_page.set_margin_start(24);
-    status_page.set_margin_end(24);
+    // ---- Dashboard page ---------------------------------------------------
+    let dashboard_page = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    dashboard_page.set_margin_top(24);
+    dashboard_page.set_margin_bottom(24);
+    dashboard_page.set_margin_start(24);
+    dashboard_page.set_margin_end(24);
 
-    let status_grid = gtk4::Grid::new();
-    status_grid.set_column_spacing(12);
-    status_grid.set_row_spacing(8);
-    status_grid.set_halign(gtk4::Align::Start);
+    // Dashboard grid cards — 2x2 layout.
+    let dashboard_grid = gtk4::Grid::new();
+    dashboard_grid.set_column_spacing(12);
+    dashboard_grid.set_row_spacing(12);
+    dashboard_grid.set_hexpand(true);
 
-    for (srow, (caption, value)) in [
-        ("Status", &ui.status_label),
-        ("Node ID", &ui.node_id_label),
-        ("Mode", &ui.mode_label),
-        ("Receipts", &ui.receipts_label),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let c = gtk4::Label::new(Some(caption));
-        c.set_xalign(0.0);
-        c.add_css_class("dim-label");
-        status_grid.attach(&c, 0, srow as i32, 1, 1);
-        value.set_xalign(0.0);
-        value.set_selectable(true);
-        status_grid.attach(value, 1, srow as i32, 1, 1);
-    }
-    status_page.append(&status_grid);
+    dashboard_grid.attach(&status_card, 0, 0, 1, 1);
+    dashboard_grid.attach(&nodeid_card, 1, 0, 1, 1);
+    dashboard_grid.attach(&cpu_card, 0, 1, 1, 1);
+    dashboard_grid.attach(&mem_card, 1, 1, 1, 1);
+
+    dashboard_page.append(&dashboard_grid);
 
     // Settlement honesty (§3 of docs/CONSENT.md): who picks f, and the hard
     // limit of that power. Static copy, no on-chain call needed for v0.
@@ -654,27 +813,12 @@ fn build_ui(app: &gtk4::Application) {
          authority can set f, but it cannot redirect escrowed funds to itself. v0 settles \
          off-chain; on-chain pro-rata settlement lands with Module 4.",
     );
-    status_page.append(&ui.settlement_label);
-
-    let jobs_caption = gtk4::Label::new(Some("Recent jobs"));
-    jobs_caption.set_xalign(0.0);
-    jobs_caption.add_css_class("dim-label");
-    status_page.append(&jobs_caption);
-
-    ui.jobs_view.set_editable(false);
-    ui.jobs_view.set_cursor_visible(false);
-    ui.jobs_view.set_wrap_mode(gtk4::WrapMode::None);
-    ui.jobs_view.set_monospace(true);
-    ui.jobs_view.set_height_request(90);
-    let jobs_scroller = gtk4::ScrolledWindow::new();
-    jobs_scroller.set_child(Some(&ui.jobs_view));
-    jobs_scroller.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
-    status_page.append(&jobs_scroller);
+    dashboard_page.append(&ui.settlement_label);
 
     let log_caption = gtk4::Label::new(Some("Live log"));
     log_caption.set_xalign(0.0);
     log_caption.add_css_class("dim-label");
-    status_page.append(&log_caption);
+    dashboard_page.append(&log_caption);
 
     ui.log_view.set_editable(false);
     ui.log_view.set_cursor_visible(false);
@@ -685,12 +829,47 @@ fn build_ui(app: &gtk4::Application) {
     scroller.set_child(Some(&ui.log_view));
     scroller.set_vexpand(true);
     scroller.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
-    status_page.append(&scroller);
+    dashboard_page.append(&scroller);
+
+    // ---- Jobs page --------------------------------------------------------
+    let jobs_page = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    jobs_page.set_margin_top(24);
+    jobs_page.set_margin_bottom(24);
+    jobs_page.set_margin_start(24);
+    jobs_page.set_margin_end(24);
+
+    // Summary bar — three metrics.
+    let summary_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 24);
+    summary_bar.set_halign(gtk4::Align::Start);
+    summary_bar.append(&total_box);
+    summary_bar.append(&earnings_box);
+    summary_bar.append(&avgcpu_box);
+    jobs_page.append(&summary_bar);
+
+    // Jobs table — header row + scrollable list.
+    let header_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    header_row.add_css_class("job-table-header");
+    for w in ["Status", "Job ID", "CPU", "Memory", "Earnings", "Time"] {
+        let l = gtk4::Label::new(Some(w));
+        l.set_xalign(0.0);
+        l.set_hexpand(true);
+        l.set_margin_start(8);
+        l.set_margin_end(8);
+        header_row.append(&l);
+    }
+    jobs_page.append(&header_row);
+
+    let jobs_scroller = gtk4::ScrolledWindow::new();
+    jobs_scroller.set_child(Some(&ui.jobs_list));
+    jobs_scroller.set_vexpand(true);
+    jobs_scroller.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
+    jobs_page.append(&jobs_scroller);
 
     // ---- Notebook + window ----------------------------------------------
     let notebook = gtk4::Notebook::new();
     notebook.append_page(&settings_page, Some(&gtk4::Label::new(Some("Settings"))));
-    notebook.append_page(&status_page, Some(&gtk4::Label::new(Some("Status"))));
+    notebook.append_page(&dashboard_page, Some(&gtk4::Label::new(Some("Dashboard"))));
+    notebook.append_page(&jobs_page, Some(&gtk4::Label::new(Some("Jobs"))));
 
     let title = gtk4::Label::new(Some("Vtessera"));
     let header = gtk4::HeaderBar::new();
@@ -700,7 +879,7 @@ fn build_ui(app: &gtk4::Application) {
 
     let window = gtk4::ApplicationWindow::new(app);
     window.set_title(Some("Vtessera — sell or donate your compute"));
-    window.set_default_size(780, 720);
+    window.set_default_size(860, 780);
     window.set_titlebar(Some(&header));
     window.set_child(Some(&notebook));
 
@@ -773,12 +952,14 @@ fn build_ui(app: &gtk4::Application) {
         }
     });
 
-    // Periodic status refresh (receipt count, running state).
+    // Periodic status refresh (receipt count, running state, dashboard metrics, jobs table).
     glib::timeout_add_local(Duration::from_secs(2), {
         let ui = ui.clone();
         let state = state.clone();
         move || {
             refresh_status(&ui, &state);
+            refresh_dashboard(&ui);
+            refresh_jobs_table(&ui);
             glib::ControlFlow::Continue
         }
     });
@@ -901,13 +1082,60 @@ fn show_consent_gate(app: &gtk4::Application, ui: &Rc<Ui>, main_window: &gtk4::A
 fn install_css() {
     let provider = gtk4::CssProvider::new();
     provider.load_from_string(
-        ".error { color: @error_color; } \
+        // --- Base ---
+        "window { background-color: #0d1117; } \
+         .error { color: @error_color; } \
          .dim-label { opacity: 0.7; } \
+         \
+         // --- Segmented mode buttons ---
          .mode-segmented button { border-radius: 0; } \
          .mode-segmented button:checked { background: @theme_selected_bg_color; \
              color: @theme_selected_fg_color; } \
          .mode-segmented button:first-child { border-radius: 8px 0 0 8px; } \
-         .mode-segmented button:last-child { border-radius: 0 8px 8px 0; }",
+         .mode-segmented button:last-child { border-radius: 0 8px 8px 0; } \
+         \
+         // --- Dashboard cards ---
+         .dashboard-card { background-color: #161b22; border-radius: 6px; \
+             border: 1px solid #30363d; padding: 16px; } \
+         .dashboard-card-title { color: #8b949e; font-size: 11px; \
+             font-weight: 600; } \
+         .dashboard-card-value { color: #e6edf3; font-size: 22px; \
+             font-weight: 700; } \
+         .dashboard-card-subtitle { color: #8b949e; font-size: 11px; } \
+         \
+         // --- Progress bars ---
+         .progress-track { background-color: #30363d; border-radius: 2px; \
+             min-height: 4px; } \
+         .progress-fill { border-radius: 2px; min-height: 4px; } \
+         .progress-fill-cpu { background-color: #58a6ff; } \
+         .progress-fill-mem { background-color: #d2a8ff; } \
+         \
+         // --- Status dots ---
+         .status-dot { font-size: 14px; } \
+         .status-off { color: #8b949e; } \
+         .status-metering { color: #fbbf24; } \
+         .status-active { color: #3fb950; } \
+         \
+         // --- Jobs table ---
+         .job-table-header { background-color: #161b22; color: #8b949e; \
+             font-size: 11px; font-weight: 600; } \
+         .job-table-row { border-bottom: 1px solid #30363d; } \
+         .job-table-row:hover { background-color: #1c2128; } \
+         .job-table-cell { color: #e6edf3; font-size: 12px; padding: 8px; } \
+         \
+         // --- Summary metrics ---
+         .summary-metric-value { color: #e6edf3; font-size: 18px; \
+             font-weight: 700; } \
+         .summary-metric-label { color: #8b949e; font-size: 11px; } \
+         \
+         // --- Accent colors ---
+         .cpu-accent { color: #58a6ff; } \
+         .mem-accent { color: #d2a8ff; } \
+         .status-green { color: #3fb950; } \
+         .earnings-gold { color: #fbbf24; } \
+         \
+         // --- Notebook tabs ---
+         .tab-label { color: #8b949e; }",
     );
     if let Some(display) = gtk4::gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
