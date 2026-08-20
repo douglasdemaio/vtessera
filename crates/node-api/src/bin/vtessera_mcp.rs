@@ -170,6 +170,8 @@ fn main() {
         escrow_account: args.escrow_account,
         network: args.network,
         runner: Some(runner),
+        verifier: None,
+        state_dir: None,
         index: None,
     });
 
