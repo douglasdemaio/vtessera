@@ -444,12 +444,38 @@ mod tests {
     struct FakeRunner;
     impl crate::JobRunner for FakeRunner {
         fn run(&self, body: &[u8]) -> Result<String, crate::JobRunError> {
+            #[cfg(feature = "serve")]
+            if let Ok(spec) = serde_json::from_slice::<vtessera_executor::JobSpec>(body) {
+                return match spec.job_id.as_str() {
+                    "boom" => Err(crate::JobRunError::server("backend exploded")),
+                    _ => Ok(r#"{"status":"accepted","job_id":"j-1"}"#.into()),
+                };
+            }
+            #[cfg(not(feature = "serve"))]
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+                return match v.get("job_id").and_then(|j| j.as_str()) {
+                    Some("boom") => Err(crate::JobRunError::server("backend exploded")),
+                    _ => Ok(r#"{"status":"accepted","job_id":"j-1"}"#.into()),
+                };
+            }
             match body {
                 b"boom" => Err(crate::JobRunError::server("backend exploded")),
                 b"" => Err(crate::JobRunError::bad_request("empty job body")),
                 _ => Ok(r#"{"status":"accepted","job_id":"j-1"}"#.into()),
             }
         }
+    }
+
+    /// Minimal valid `JobSpec` JSON for MCP job arguments.
+    fn valid_job_spec_str() -> String {
+        r#"{"job_id":"j-1","image":"ghcr.io/example/echo:latest","command":[],"env":[],"devices":{"class":{"kind":"cpu"},"vcpus":1,"mem_kb":1024,"min_vram_mb":0},"max_duration_secs":60}"#.into()
+    }
+
+    /// Valid `JobSpec` JSON with caller-specified `job_id`.
+    fn valid_job_spec_str_with_id(job_id: &str) -> String {
+        format!(
+            r#"{{"job_id":"{job_id}","image":"ghcr.io/example/echo:latest","command":[],"env":[],"devices":{{"class":{{"kind":"cpu"}},"vcpus":1,"mem_kb":1024,"min_vram_mb":0}},"max_duration_secs":60}}"#
+        )
     }
 
     fn paid() -> PriceQuote {
@@ -535,9 +561,13 @@ mod tests {
     #[test]
     fn tools_call_free_offer_is_honestly_not_implemented() {
         let srv = server(PriceQuote::Free);
+        let job = valid_job_spec_str();
         let r = call(
             &srv,
-            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"{}"}}}"#,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"submit_job","arguments":{{"job":"{}"}}}}}}"#,
+                job.replace('"', "\\\"")
+            ),
         );
         assert_eq!(r["result"]["isError"], json!(true));
         assert!(r["result"]["content"][0]["text"]
@@ -549,9 +579,13 @@ mod tests {
     #[test]
     fn tools_call_free_offer_runs_through_the_wired_runner() {
         let srv = server_with_runner(PriceQuote::Free, FakeRunner);
+        let job = valid_job_spec_str();
         let r = call(
             &srv,
-            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"{...}"}}}"#,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"submit_job","arguments":{{"job":"{}"}}}}}}"#,
+                job.replace('"', "\\\"")
+            ),
         );
         assert_eq!(r["result"]["isError"], json!(false));
         let text = r["result"]["content"][0]["text"].as_str().unwrap();
@@ -562,9 +596,13 @@ mod tests {
     #[test]
     fn tools_call_free_offer_surfaces_runner_errors() {
         let srv = server_with_runner(PriceQuote::Free, FakeRunner);
+        let job = valid_job_spec_str_with_id("boom");
         let r = call(
             &srv,
-            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"boom"}}}"#,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"submit_job","arguments":{{"job":"{}"}}}}}}"#,
+                job.replace('"', "\\\"")
+            ),
         );
         assert_eq!(r["result"]["isError"], json!(true));
         let text = r["result"]["content"][0]["text"].as_str().unwrap();
@@ -756,9 +794,13 @@ mod tests {
             let mut state = srv.state;
             state.runner = Some(Arc::new(FakeRunner));
             let srv = McpServer::new(state);
+            let job = valid_job_spec_str();
             let r = call(
                 &srv,
-                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"submit_job","arguments":{"job":"{...}","agent_id":"agent-demo"}}}"#,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"submit_job","arguments":{{"job":"{}","agent_id":"agent-demo"}}}}}}"#,
+                    job.replace('"', "\\\"")
+                ),
             );
             assert_eq!(r["result"]["isError"], json!(false));
             assert_eq!(index.calls.lock().unwrap()[0], "agent-demo");
