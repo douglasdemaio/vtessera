@@ -144,13 +144,16 @@ releases against. The receipt remains node-signed as in v0.
 
 ### 1e. Scheduling, admission, network
 
+> **Status: shipped** — capability-aware admission, per-network-policy
+> enforcement (guest iptables + host nftables), TAP/bridge networking.
+> See `docs/superpowers/specs/2026-08-18-network-policy-enforcement-design.md`.
+
 - **Capability-aware admission:** match on device class, GPU model,
   VRAM, MIG profile, driver/CUDA version.
-- **No host network by default:** deny guest egress unless a job
-  requests/pays for it (model downloads are the common explicit
-  exception).
-- **Caps enforced; minimal surface:** hold the executor to v0's
-  `systemd-analyze security` bar.
+- **Network policy enforcement:** three policies — `None` (default, no
+  NIC), `OutboundHttps` (TCP/443 + DNS only), `Egress` (full egress or
+  CIDR-restricted). Enforcement at guest (iptables in initramfs) and
+  optional host (nftables on TAP/bridge).
 - **Private / enterprise network mode** ([#52](https://github.com/douglasdemaio/vtessera/issues/52)):
   opt-in `mode = "private"` that restricts the daemon to internal
   CIDR ranges, with a `[marketplace]` target selector (`public` /

@@ -5,9 +5,12 @@
 //! Each job runs in a **disposable microVM** booted from the host kernel +
 //! a custom initramfs (built by `scripts/build-initramfs.sh`). The guest
 //! gets the job via a virtio-fs shared directory (`manifest.json`), runs it,
-//! writes `out/result.json` + `out/metering.json`, then powers off. There is
-//! **no guest network device** — `NetworkPolicy::None` is the only policy
-//! this backend accepts until §1e networking lands.
+//! writes `out/result.json` + `out/metering.json`, then powers off. Guest
+//! networking is policy-driven: `None` (default, no NIC), `OutboundHttps`
+//! (TCP/443 + DNS only), or `Egress` (full egress). Enforcement happens at
+//! guest-side (iptables in initramfs) and optionally host-side (nftables on
+//! a TAP/bridge). See the design spec
+//! `docs/superpowers/specs/2026-08-18-network-policy-enforcement-design.md`.
 //!
 //! Metering is guest-side (the runner reads `/proc`); the host is
 //! authoritative for the wall-clock timeout. See the design spec
@@ -57,6 +60,18 @@ pub struct CloudHypervisorConfig {
     /// Lower = more accurate but higher overhead. 0 = disable host-side
     /// GPU metering (guest self-reporting only). Default: 5.
     pub gpu_meter_poll_interval_secs: u64,
+    /// Network backend for CH when policy != None.
+    /// "tap" (default) creates a TAP device + bridge.
+    /// "macvtap" uses macvtap (better perf, harder to firewall).
+    pub net_backend: String,
+    /// Bridge name for tap backend.
+    pub net_bridge: String,
+    /// Host CIDR ranges allowed when network = Egress.
+    /// Empty = all egress allowed. Non-empty = only these CIDRs.
+    pub net_allowed_cidrs: Vec<String>,
+    /// Enforcement layer: "guest" (iptables in guest),
+    /// "host" (nftables on bridge), or "both".
+    pub net_enforcement: String,
 }
 
 impl Default for CloudHypervisorConfig {
@@ -74,6 +89,10 @@ impl Default for CloudHypervisorConfig {
             gpu_helper: PathBuf::from("/usr/bin/vtessera-gpu"),
             gpu_time_slice: false,
             gpu_meter_poll_interval_secs: 5,
+            net_backend: "tap".into(),
+            net_bridge: "virbr0".into(),
+            net_allowed_cidrs: Vec::new(),
+            net_enforcement: "guest".into(),
         }
     }
 }
@@ -93,6 +112,11 @@ pub struct JobManifest {
     pub vcpus: u32,
     pub mem_kb: u64,
     pub max_duration_secs: u64,
+    /// Network policy for this job ("none", "outbound_https", "egress").
+    pub network_policy: String,
+    /// CIDRs allowed for egress (only for "egress" policy).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_cidrs: Vec<String>,
 }
 
 /// Wire format the guest runner writes back.
@@ -127,7 +151,21 @@ pub struct GuestResult {
     pub exit_code: i32,
 }
 
-fn write_manifest(path: &Path, spec: &JobSpec) -> Result<(), ExecutorError> {
+fn write_manifest(
+    path: &Path,
+    spec: &JobSpec,
+    config: &CloudHypervisorConfig,
+) -> Result<(), ExecutorError> {
+    let network_policy = match spec.network {
+        NetworkPolicy::None => "none".to_string(),
+        NetworkPolicy::OutboundHttps => "outbound_https".to_string(),
+        NetworkPolicy::Egress => "egress".to_string(),
+    };
+    let allowed_cidrs = if spec.network == NetworkPolicy::Egress {
+        config.net_allowed_cidrs.clone()
+    } else {
+        Vec::new()
+    };
     let manifest = JobManifest {
         job_id: spec.job_id.clone(),
         command: spec.command.clone(),
@@ -135,6 +173,8 @@ fn write_manifest(path: &Path, spec: &JobSpec) -> Result<(), ExecutorError> {
         vcpus: spec.devices.vcpus,
         mem_kb: spec.devices.mem_kb,
         max_duration_secs: spec.max_duration_secs,
+        network_policy,
+        allowed_cidrs,
     };
     let json = serde_json::to_vec(&manifest)
         .map_err(|e| ExecutorError::Backend(format!("encode manifest: {e}")))?;
@@ -279,12 +319,9 @@ fn ch_admission(spec: &JobSpec, config: &CloudHypervisorConfig) -> Result<(), Ex
             // schedule time, not here.
         }
     }
-    if spec.network != NetworkPolicy::None {
-        return Err(ExecutorError::Admission(
-            "CloudHypervisorExecutor has no guest network yet; only NetworkPolicy::None is supported"
-                .into(),
-        ));
-    }
+    // Network policy: all policies accepted. Enforcement happens at
+    // guest-side (iptables in initramfs) and optionally host-side
+    // (nftables on bridge). See §1e network policy enforcement spec.
     Ok(())
 }
 
@@ -481,6 +518,135 @@ fn select_gpu(
     }
 }
 
+/// Apply host-side nftables rules for a VM's network policy.
+/// Uses a per-job chain under the `vtessera` table to avoid collisions.
+/// Returns Ok(true) if rules were applied, Ok(false) if nftables is unavailable.
+fn apply_host_net_policy(
+    job_id: &str,
+    tap_dev: &str,
+    policy: &NetworkPolicy,
+    cidrs: &[String],
+) -> Result<bool, ExecutorError> {
+    // Check nftables is available.
+    if Command::new("nft")
+        .args(["--version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
+        return Ok(false);
+    }
+
+    let chain = format!("job_{}", &job_id[..job_id.len().min(16)]);
+
+    // Ensure the table exists.
+    let _ = Command::new("nft")
+        .args(["add", "table", "inet", "vtessera"])
+        .status();
+
+    // Create the chain (type filter hook forward, policy accept).
+    let _ = Command::new("nft")
+        .args([
+            "add", "chain", "inet", "vtessera", &chain, "{", "type", "filter", "hook", "forward",
+            "priority", "0", ";", "policy", "accept", ";", "}",
+        ])
+        .status();
+
+    // Flush any previous rules for this chain.
+    let _ = Command::new("nft")
+        .args(["flush", "chain", "inet", "vtessera", &chain])
+        .status();
+
+    match policy {
+        NetworkPolicy::OutboundHttps => {
+            // Allow established/related.
+            let _ = Command::new("nft")
+                .args([
+                    "add",
+                    "rule",
+                    "inet",
+                    "vtessera",
+                    &chain,
+                    "iifname",
+                    tap_dev,
+                    "ct",
+                    "state",
+                    "established,related",
+                    "accept",
+                ])
+                .status();
+            // Allow DNS.
+            let _ = Command::new("nft")
+                .args([
+                    "add", "rule", "inet", "vtessera", &chain, "iifname", tap_dev, "udp", "dport",
+                    "53", "accept",
+                ])
+                .status();
+            let _ = Command::new("nft")
+                .args([
+                    "add", "rule", "inet", "vtessera", &chain, "iifname", tap_dev, "tcp", "dport",
+                    "53", "accept",
+                ])
+                .status();
+            // Allow HTTPS.
+            let _ = Command::new("nft")
+                .args([
+                    "add", "rule", "inet", "vtessera", &chain, "iifname", tap_dev, "tcp", "dport",
+                    "443", "accept",
+                ])
+                .status();
+            // Drop everything else from this TAP.
+            let _ = Command::new("nft")
+                .args([
+                    "add", "rule", "inet", "vtessera", &chain, "iifname", tap_dev, "drop",
+                ])
+                .status();
+        }
+        NetworkPolicy::Egress if !cidrs.is_empty() => {
+            let _ = Command::new("nft")
+                .args([
+                    "add",
+                    "rule",
+                    "inet",
+                    "vtessera",
+                    &chain,
+                    "iifname",
+                    tap_dev,
+                    "ct",
+                    "state",
+                    "established,related",
+                    "accept",
+                ])
+                .status();
+            for cidr in cidrs {
+                let _ = Command::new("nft")
+                    .args([
+                        "add", "rule", "inet", "vtessera", &chain, "iifname", tap_dev, "ip",
+                        "daddr", cidr, "accept",
+                    ])
+                    .status();
+            }
+            let _ = Command::new("nft")
+                .args([
+                    "add", "rule", "inet", "vtessera", &chain, "iifname", tap_dev, "drop",
+                ])
+                .status();
+        }
+        _ => {} // Egress without CIDRs or None: no host restrictions.
+    }
+
+    Ok(true)
+}
+
+/// Remove host-side nftables rules for a job.
+fn remove_host_net_policy(job_id: &str) {
+    let chain = format!("job_{}", &job_id[..job_id.len().min(16)]);
+    let _ = Command::new("nft")
+        .args(["delete", "chain", "inet", "vtessera", &chain])
+        .status();
+}
+
 impl Executor for CloudHypervisorExecutor {
     fn run(&self, spec: &JobSpec) -> Result<JobMetering, ExecutorError> {
         ch_admission(spec, &self.config)?;
@@ -531,7 +697,7 @@ impl Executor for CloudHypervisorExecutor {
             }
         };
 
-        if let Err(e) = write_manifest(&job_dir.join("manifest.json"), spec) {
+        if let Err(e) = write_manifest(&job_dir.join("manifest.json"), spec, &self.config) {
             cleanup(self.config.keep_jobs);
             return Err(e);
         }
@@ -627,6 +793,93 @@ impl Executor for CloudHypervisorExecutor {
             }
         }
 
+        // --- networking: create TAP + bridge when policy != None ---
+        let needs_net = spec.network != NetworkPolicy::None;
+        let tap_dev = if needs_net {
+            let job_hex = &spec.job_id[..spec.job_id.len().min(8)];
+            let dev = format!("vtap-{job_hex}");
+            let mac = format!(
+                "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                job_hex.as_bytes().first().copied().unwrap_or(0),
+                job_hex.as_bytes().get(1).copied().unwrap_or(0),
+                job_hex.as_bytes().get(2).copied().unwrap_or(0),
+                job_hex.as_bytes().get(3).copied().unwrap_or(0),
+                job_hex.as_bytes().get(4).copied().unwrap_or(0),
+            );
+
+            // Ensure bridge exists.
+            let bridge_exists = Command::new("ip")
+                .args(["link", "show", &self.config.net_bridge])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !bridge_exists {
+                let status = Command::new("ip")
+                    .args(["link", "add", &self.config.net_bridge, "type", "bridge"])
+                    .status()
+                    .map_err(|e| {
+                        ExecutorError::Backend(format!(
+                            "create bridge {}: {e}",
+                            self.config.net_bridge
+                        ))
+                    })?;
+                if !status.success() {
+                    return Err(ExecutorError::Backend(format!(
+                        "failed to create bridge {} (need CAP_NET_ADMIN?)",
+                        self.config.net_bridge
+                    )));
+                }
+                // Bring up the bridge.
+                let _ = Command::new("ip")
+                    .args(["link", "set", &self.config.net_bridge, "up"])
+                    .status();
+            }
+
+            // Create TAP device.
+            let status = Command::new("ip")
+                .args(["tuntap", "add", "dev", &dev, "mode", "tap"])
+                .status()
+                .map_err(|e| ExecutorError::Backend(format!("create TAP {dev}: {e}")))?;
+            if !status.success() {
+                return Err(ExecutorError::Backend(format!(
+                    "failed to create TAP {dev} (need CAP_NET_ADMIN?)"
+                )));
+            }
+
+            // Attach to bridge and bring up.
+            let _ = Command::new("ip")
+                .args(["link", "set", &dev, "master", &self.config.net_bridge])
+                .status();
+            let _ = Command::new("ip")
+                .args(["link", "set", &dev, "up"])
+                .status();
+
+            cmd.args(["--net", &format!("tap={dev},id={mac}")]);
+            Some(dev)
+        } else {
+            None
+        };
+
+        // Apply host-side nftables enforcement if configured.
+        let _host_nft = if let Some(ref dev) = tap_dev {
+            let enforce = &self.config.net_enforcement;
+            if enforce == "host" || enforce == "both" {
+                match apply_host_net_policy(
+                    &spec.job_id,
+                    dev,
+                    &spec.network,
+                    &self.config.net_allowed_cidrs,
+                ) {
+                    Ok(true) => Some(()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
@@ -637,6 +890,13 @@ impl Executor for CloudHypervisorExecutor {
                 ExecutorError::Backend(format!("spawn {}: {e}", self.config.ch_binary.display()));
             let _ = vfsd_child.kill();
             let _ = vfsd_child.wait();
+            if let Some(ref dev) = tap_dev {
+                let _ = Command::new("ip")
+                    .args(["link", "set", dev, "down"])
+                    .status();
+                let _ = Command::new("ip").args(["link", "delete", dev]).status();
+                remove_host_net_policy(&spec.job_id);
+            }
             cleanup(self.config.keep_jobs);
             err
         })?;
@@ -657,6 +917,13 @@ impl Executor for CloudHypervisorExecutor {
                     let err = ExecutorError::Backend(format!("wait: {e}"));
                     let _ = vfsd_child.kill();
                     let _ = vfsd_child.wait();
+                    if let Some(ref dev) = tap_dev {
+                        let _ = Command::new("ip")
+                            .args(["link", "set", dev, "down"])
+                            .status();
+                        let _ = Command::new("ip").args(["link", "delete", dev]).status();
+                        remove_host_net_policy(&spec.job_id);
+                    }
                     cleanup(self.config.keep_jobs);
                     return Err(err);
                 }
@@ -666,6 +933,16 @@ impl Executor for CloudHypervisorExecutor {
         // Tear down virtiofsd after the VM is gone.
         let _ = vfsd_child.kill();
         let _ = vfsd_child.wait();
+
+        // Tear down TAP device.
+        if let Some(ref dev) = tap_dev {
+            let _ = Command::new("ip")
+                .args(["link", "set", dev, "down"])
+                .status();
+            let _ = Command::new("ip").args(["link", "delete", dev]).status();
+            // Remove host nftables rules for this job.
+            remove_host_net_policy(&spec.job_id);
+        }
 
         // Stop GPU metering and capture the sample.
         #[cfg(feature = "gpu")]
@@ -729,9 +1006,10 @@ mod tests {
     #[test]
     fn manifest_roundtrips_through_json() {
         let spec = cpu_spec("roundtrip");
+        let config = CloudHypervisorConfig::default();
         let dir = std::env::temp_dir().join(format!("vt-rt-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        write_manifest(&dir.join("manifest.json"), &spec).expect("write");
+        write_manifest(&dir.join("manifest.json"), &spec, &config).expect("write");
         let bytes = fs::read(dir.join("manifest.json")).expect("read");
         let m: JobManifest = serde_json::from_slice(&bytes).expect("parse");
         assert_eq!(m.job_id, "roundtrip");
@@ -740,6 +1018,8 @@ mod tests {
         assert_eq!(m.vcpus, 1);
         assert_eq!(m.mem_kb, 64 * 1024);
         assert_eq!(m.max_duration_secs, 10);
+        assert_eq!(m.network_policy, "none");
+        assert!(m.allowed_cidrs.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -820,14 +1100,19 @@ mod tests {
     }
 
     #[test]
-    fn admission_rejects_network() {
+    fn admission_accepts_outbound_https() {
         let mut spec = cpu_spec("net");
         spec.network = NetworkPolicy::OutboundHttps;
         let config = CloudHypervisorConfig::default();
-        assert!(matches!(
-            ch_admission(&spec, &config),
-            Err(ExecutorError::Admission(_))
-        ));
+        assert!(ch_admission(&spec, &config).is_ok());
+    }
+
+    #[test]
+    fn admission_accepts_egress() {
+        let mut spec = cpu_spec("net");
+        spec.network = NetworkPolicy::Egress;
+        let config = CloudHypervisorConfig::default();
+        assert!(ch_admission(&spec, &config).is_ok());
     }
 
     #[test]
@@ -974,5 +1259,46 @@ mod tests {
             ch_admission(&spec, &config),
             Err(ExecutorError::Admission(_))
         ));
+    }
+
+    #[test]
+    fn config_defaults_have_net_fields() {
+        let config = CloudHypervisorConfig::default();
+        assert_eq!(config.net_backend, "tap");
+        assert_eq!(config.net_bridge, "virbr0");
+        assert!(config.net_allowed_cidrs.is_empty());
+        assert_eq!(config.net_enforcement, "guest");
+    }
+
+    #[test]
+    fn manifest_includes_network_policy() {
+        let mut spec = cpu_spec("manifest-net");
+        spec.network = NetworkPolicy::OutboundHttps;
+        let config = CloudHypervisorConfig::default();
+        let dir = std::env::temp_dir().join(format!("vt-manifest-net-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        write_manifest(&dir.join("manifest.json"), &spec, &config).expect("write");
+        let bytes = fs::read(dir.join("manifest.json")).expect("read");
+        let m: JobManifest = serde_json::from_slice(&bytes).expect("parse");
+        assert_eq!(m.network_policy, "outbound_https");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_egress_with_cidrs() {
+        let mut spec = cpu_spec("manifest-egress");
+        spec.network = NetworkPolicy::Egress;
+        let config = CloudHypervisorConfig {
+            net_allowed_cidrs: vec!["10.0.0.0/8".into(), "172.16.0.0/12".into()],
+            ..Default::default()
+        };
+        let dir = std::env::temp_dir().join(format!("vt-manifest-egress-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        write_manifest(&dir.join("manifest.json"), &spec, &config).expect("write");
+        let bytes = fs::read(dir.join("manifest.json")).expect("read");
+        let m: JobManifest = serde_json::from_slice(&bytes).expect("parse");
+        assert_eq!(m.network_policy, "egress");
+        assert_eq!(m.allowed_cidrs, vec!["10.0.0.0/8", "172.16.0.0/12"]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

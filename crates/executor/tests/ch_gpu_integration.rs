@@ -70,6 +70,10 @@ fn test_config() -> CloudHypervisorConfig {
         gpu_helper: PathBuf::from("/usr/bin/vtessera-gpu"),
         gpu_time_slice: false,
         gpu_meter_poll_interval_secs: 5,
+        net_backend: "tap".into(),
+        net_bridge: "virbr0".into(),
+        net_allowed_cidrs: Vec::new(),
+        net_enforcement: "guest".into(),
     }
 }
 

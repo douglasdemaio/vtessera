@@ -21,6 +21,7 @@ OUT="${VTESSERA_OUT:-/var/lib/vtessera/initramfs.cpio.gz}"
 BUSYBOX="${VTESSERA_BUSYBOX:-/usr/bin/busybox-static}"
 KVER="$(uname -r)"
 MODULES_DIR="/usr/lib/modules/${KVER}/kernel/fs/fuse"
+VIRTIO_NET_DIR="/usr/lib/modules/${KVER}/kernel/drivers/net"
 
 if [ ! -x "$BUSYBOX" ]; then
     echo "error: static busybox not found at $BUSYBOX (install busybox-static)" >&2
@@ -46,8 +47,13 @@ cp "$BUSYBOX" "$WORK/bin/busybox"
 zstd -q -d -o "$WORK/lib/modules/fuse.ko" "$MODULES_DIR/fuse.ko.zst"
 zstd -q -d -o "$WORK/lib/modules/virtiofs.ko" "$MODULES_DIR/virtiofs.ko.zst"
 
+# virtio_net is optional — included if available for network policy support.
+if [ -f "$VIRTIO_NET_DIR/virtio_net.ko.zst" ]; then
+    zstd -q -d -o "$WORK/lib/modules/virtio_net.ko" "$VIRTIO_NET_DIR/virtio_net.ko.zst"
+fi
+
 # Busybox dispatches by argv[0]: symlink the applets the runner + jobs need.
-for applet in sh mount umount insmod poweroff awk grep sed sleep kill date cat ls mkdir touch cut wc true false echo printf sync; do
+for applet in sh mount umount insmod poweroff awk grep sed sleep kill date cat ls mkdir touch cut wc true false echo printf sync iptables ip udhcpc; do
     ln -sf busybox "$WORK/bin/$applet"
 done
 
@@ -111,6 +117,42 @@ for _cls in /sys/bus/pci/devices/*/class; do
             ;;
     esac
 done
+
+# --- network policy enforcement (§1e) --------------------------------------
+# Read network_policy from the manifest. If not "none", bring up the NIC
+# and apply iptables rules to enforce the policy.
+NETWORK_POLICY="$(sed -n 's/^.*"network_policy":"\([^"]*\)".*$/\1/p' manifest.json)"
+[ -n "$NETWORK_POLICY" ] || NETWORK_POLICY="none"
+
+if [ "$NETWORK_POLICY" != "none" ]; then
+    insmod /lib/modules/virtio_net.ko 2>/dev/null || true
+    ip link set eth0 up 2>/dev/null || true
+    # Busybox udhcpc for DHCP; ignore failure (static IP may be configured).
+    udhcpc -i eth0 -n -q 2>/dev/null || true
+
+    case "$NETWORK_POLICY" in
+        outbound_https)
+            # Allow DNS (UDP+TCP/53) and HTTPS (TCP/443), drop everything else.
+            iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+            iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+            iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
+            iptables -A OUTPUT -j DROP
+            ;;
+        egress)
+            # Check for CIDR restrictions in the manifest.
+            CIDRS="$(sed -n 's/^.*"allowed_cidrs":\[\(.*\)\].*$/\1/p' manifest.json)"
+            if [ -n "$CIDRS" ]; then
+                # Parse CIDRs from JSON array (e.g. "10.0.0.0/8","172.16.0.0/12")
+                echo "$CIDRS" | tr ',' '\n' | sed 's/"//g' | while IFS= read -r _cidr; do
+                    [ -n "$_cidr" ] && iptables -A OUTPUT -d "$_cidr" -j ACCEPT
+                done
+                iptables -A OUTPUT -j DROP
+            fi
+            # No CIDRs = no restrictions (all egress allowed).
+            ;;
+    esac
+    echo "network: policy=$NETWORK_POLICY" >> out/job.log
+fi
 
 # --- parse manifest.json (JSON → raw lines) --------------------------------
 # awk extracts command args and env pairs as raw strings (one per line).
