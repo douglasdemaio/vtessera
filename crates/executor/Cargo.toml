@@ -36,6 +36,10 @@ cloud-hypervisor = ["dep:serde_json"]
 # --device host=... for whole-GPU passthrough. Adds the vtessera-gpu helper
 # binary for PCI bind/unbind lifecycle.
 gpu = ["cloud-hypervisor"]
+# Kata Containers on Cloud Hypervisor (ROADMAP.md §1a). Production isolation
+# via containerd + kata-shimv2. Pulls gRPC deps for containerd communication.
+# Depends on cloud-hypervisor for shared GPU selection and network policy functions.
+kata = ["cloud-hypervisor", "dep:tonic", "dep:prost"]
 
 [dependencies]
 # Pinned via the workspace. The executor crate's threat model is documented in
@@ -44,3 +48,5 @@ gpu = ["cloud-hypervisor"]
 serde = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true, optional = true }
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
