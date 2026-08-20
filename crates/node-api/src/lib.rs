@@ -38,6 +38,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use vtessera_offer::{PriceQuote, SignedOffer};
@@ -142,6 +143,65 @@ pub trait JobRunner: Send + Sync {
     fn run(&self, body: &[u8]) -> Result<String, JobRunError>;
 }
 
+/// Errors from off-chain payment verification (Solana RPC checks).
+#[derive(Debug)]
+pub enum PaymentVerifyError {
+    /// Proof JSON is malformed or missing required fields.
+    MalformedProof(String),
+    /// Transaction not found or not confirmed.
+    TransactionNotFound(String),
+    /// Transaction doesn't involve the expected escrow account.
+    EscrowMismatch {
+        expected: String,
+        found: Vec<String>,
+    },
+    /// Token transfer amount is less than the offer price.
+    InsufficientAmount { expected: u64, found: u64 },
+    /// The on-chain job_id doesn't match the submitted job_id.
+    JobIdMismatch { expected: String, found: String },
+    /// RPC endpoint unreachable.
+    RpcUnavailable(String),
+}
+
+impl std::fmt::Display for PaymentVerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedProof(e) => write!(f, "malformed payment proof: {e}"),
+            Self::TransactionNotFound(e) => write!(f, "transaction not found: {e}"),
+            Self::EscrowMismatch { expected, found } => {
+                write!(f, "escrow mismatch: expected {expected}, found {found:?}")
+            }
+            Self::InsufficientAmount { expected, found } => {
+                write!(f, "insufficient amount: expected {expected}, got {found}")
+            }
+            Self::JobIdMismatch { expected, found } => {
+                write!(f, "job_id mismatch: expected {expected}, got {found}")
+            }
+            Self::RpcUnavailable(e) => write!(f, "RPC unavailable: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PaymentVerifyError {}
+
+/// Off-chain payment verifier. The real implementation wraps a Solana RPC
+/// client; the lib crate only depends on the trait.
+pub trait PaymentVerifier: Send + Sync {
+    /// Verify an x402 payment proof against the chain.
+    ///
+    /// `proof` — the raw `x-payment` header value (JSON string).
+    /// `escrow_account` — the expected escrow PDA (from the 402 challenge).
+    /// `network` — Solana network (e.g. "solana-devnet").
+    ///
+    /// Returns `Ok((mint_pubkey, amount_micros))` on success.
+    fn verify(
+        &self,
+        proof: &str,
+        escrow_account: &str,
+        network: &str,
+    ) -> Result<(String, u64), PaymentVerifyError>;
+}
+
 /// State a request handler reads. Owned by the node binary and passed
 /// into [`dispatch`] for each request.
 #[derive(Clone)]
@@ -159,6 +219,13 @@ pub struct NodeState {
     /// Optional job runner supplied by the binary. `None` means free
     /// submissions are refused with 501 (execution not wired).
     pub runner: Option<Arc<dyn JobRunner>>,
+    /// Optional payment verifier. `Some` means paid jobs verify the x402
+    /// proof on-chain before execution; `None` means paid jobs return 501
+    /// (honest refusal — payment verification not wired).
+    pub verifier: Option<Arc<dyn PaymentVerifier>>,
+    /// State directory for contracts and receipts. `None` means contracts
+    /// are not persisted (e.g. standalone mode).
+    pub state_dir: Option<PathBuf>,
     /// Optional offer-index client (Module 2a wiring). `Some` means the
     /// node publishes its offer and enforces first-come-first-served claims
     /// via the index; `None` (and builds without the `serve` feature)
@@ -257,7 +324,7 @@ fn handle_agent_card(state: &NodeState) -> HttpResponse {
         "skills": [{
             "id": "submit_job",
             "name": "Submit compute job",
-            "description": "Submit an OCI workload to this node. Paid offers return 402 (x402) until a signed payment is attached; job execution is not yet wired in v0.",
+            "description": "Submit an OCI workload to this node. Free offers execute directly; paid offers return 402 (x402) until a signed payment is attached.",
             "tags": ["compute"],
         }],
     });
@@ -295,25 +362,117 @@ fn handle_jobs(state: &NodeState, req: HttpRequest) -> HttpResponse {
             resp.headers.push(("x-payment-required".into(), "1".into()));
             resp
         }
-        JobDecision::VerifyAndRun { .. } => {
-            // The x402 payment proof isn't verified on-chain yet: the host
-            // workspace has no Solana client (the verifier lives with the
-            // escrow work, Module 4, in the excluded crates). Accepting here
-            // would claim a payment was verified when it wasn't. Honest
-            // response: refuse.
-            HttpResponse::json(
-                501,
-                r#"{"status":"not-implemented","reason":"payment proof was not verified; on-chain verification is not wired"}"#.into(),
-            )
-        }
+        JobDecision::VerifyAndRun {
+            payment_proof,
+            body,
+        } => handle_paid_job(state, &payment_proof, &body),
         JobDecision::RunFree { body } => run_free(state, &body, header(&req.headers, "x-agent-id")),
     }
+}
+
+/// Handle a paid job submission with an x402 payment proof.
+///
+/// Without a verifier this is the honest 501 — the lib never claims
+/// a payment was verified when it wasn't.
+#[cfg(feature = "serve")]
+pub fn handle_paid_job(state: &NodeState, payment_proof: &str, body: &[u8]) -> HttpResponse {
+    let Some(verifier) = &state.verifier else {
+        return HttpResponse::json(
+            501,
+            r#"{"status":"not-implemented","reason":"payment verification not wired"}"#.into(),
+        );
+    };
+
+    // Parse the job spec to get job_id.
+    let spec: vtessera_executor::JobSpec = match serde_json::from_slice(body) {
+        Ok(s) => s,
+        Err(e) => return HttpResponse::json(400, format!("bad job spec: {e}")),
+    };
+
+    // Verify payment on-chain.
+    match verifier.verify(payment_proof, &state.escrow_account, &state.network) {
+        Ok((_mint, _amount)) => { /* proceed */ }
+        Err(PaymentVerifyError::MalformedProof(e)) => {
+            return HttpResponse::json(400, format!("bad payment proof: {e}"));
+        }
+        Err(PaymentVerifyError::JobIdMismatch { expected, found }) => {
+            return HttpResponse::json(
+                400,
+                format!("payment job_id mismatch: expected {expected}, got {found}"),
+            );
+        }
+        Err(PaymentVerifyError::RpcUnavailable(e)) => {
+            return HttpResponse::json(503, format!("RPC unavailable: {e}"));
+        }
+        Err(e) => {
+            // Re-challenge with a fresh 402 so the agent can retry.
+            let challenge = PaymentChallenge {
+                offer: &state.offer,
+                escrow_account: &state.escrow_account,
+                network: &state.network,
+            };
+            let mut resp = HttpResponse::json(402, payment_required_body(&challenge));
+            resp.headers.push(("x-payment-required".into(), "1".into()));
+            resp.headers.push((
+                "x-payment-error".into(),
+                format!("verification failed: {e}"),
+            ));
+            return resp;
+        }
+    }
+
+    // Create contract and write to disk.
+    create_and_write_contract(state, &spec);
+
+    // Run through executor.
+    match &state.runner {
+        Some(runner) => match runner.run(body) {
+            Ok(json) => HttpResponse::json(200, json),
+            Err(e) => HttpResponse::json(e.status, e.message),
+        },
+        None => HttpResponse::json(
+            501,
+            r#"{"status":"not-implemented","reason":"job execution not wired"}"#.into(),
+        ),
+    }
+}
+
+#[cfg(not(feature = "serve"))]
+fn handle_paid_job(_state: &NodeState, _payment_proof: &str, _body: &[u8]) -> HttpResponse {
+    HttpResponse::json(
+        501,
+        r#"{"status":"not-implemented","reason":"payment verification not wired"}"#.into(),
+    )
 }
 
 /// Run a free job through the binary-supplied runner.
 ///
 /// Without a runner this is the honest 501 — the lib never fakes
 /// acceptance of a job nothing is executing.
+#[cfg(feature = "serve")]
+pub fn run_free(state: &NodeState, body: &[u8], agent_id: Option<String>) -> HttpResponse {
+    if let Err(resp) = check_claim_gate(state, agent_id.as_deref()) {
+        return resp;
+    }
+    // Parse the job spec to create a contract before execution.
+    let spec: vtessera_executor::JobSpec = match serde_json::from_slice(body) {
+        Ok(s) => s,
+        Err(e) => return HttpResponse::json(400, format!("bad job spec: {e}")),
+    };
+    create_and_write_contract(state, &spec);
+    match &state.runner {
+        Some(runner) => match runner.run(body) {
+            Ok(json) => HttpResponse::json(200, json),
+            Err(e) => HttpResponse::json(e.status, e.message),
+        },
+        None => HttpResponse::json(
+            501,
+            r#"{"status":"not-implemented","reason":"job execution is not wired; start the node with an executor backend"}"#.into(),
+        ),
+    }
+}
+
+#[cfg(not(feature = "serve"))]
 fn run_free(state: &NodeState, body: &[u8], agent_id: Option<String>) -> HttpResponse {
     if let Err(resp) = check_claim_gate(state, agent_id.as_deref()) {
         return resp;
@@ -327,6 +486,58 @@ fn run_free(state: &NodeState, body: &[u8], agent_id: Option<String>) -> HttpRes
             501,
             r#"{"status":"not-implemented","reason":"job execution is not wired; start the node with an executor backend"}"#.into(),
         ),
+    }
+}
+
+/// Create a `JobContract` from the offer and job spec, and write it to disk.
+/// Logs but does not fail on I/O errors — the job proceeds regardless.
+#[cfg(feature = "serve")]
+fn create_and_write_contract(state: &NodeState, spec: &vtessera_executor::JobSpec) {
+    let device_class = device_class_from_offer(&state.offer.body.device);
+    let contract = vtessera_settlement::create_contract(
+        spec.job_id.clone(),
+        state.offer.body.node_id.clone(),
+        device_class,
+        spec.max_duration_secs,
+    );
+    if let Some(dir) = &state.state_dir {
+        if let Err(e) = vtessera_settlement::write_contract(&contract, dir) {
+            eprintln!("failed to write contract for {}: {e}", spec.job_id);
+        }
+    }
+}
+
+/// Derive a [`DeviceClass`] from the offer's advertised device.
+#[cfg(feature = "serve")]
+fn device_class_from_offer(
+    device: &vtessera_offer::AdvertisedDevice,
+) -> vtessera_executor::DeviceClass {
+    use vtessera_executor::DeviceClass;
+    use vtessera_offer::AdvertisedDevice;
+    match device {
+        AdvertisedDevice::Cpu { .. } => DeviceClass::Cpu,
+        AdvertisedDevice::NvidiaGpu { model, .. } => DeviceClass::NvidiaGpu {
+            model: model.clone(),
+        },
+        AdvertisedDevice::NvidiaMig {
+            parent_model,
+            profile,
+            ..
+        } => DeviceClass::NvidiaMig {
+            parent_model: parent_model.clone(),
+            profile: profile.clone(),
+        },
+        AdvertisedDevice::NvidiaVgpu {
+            parent_model,
+            profile,
+            ..
+        } => DeviceClass::NvidiaVgpu {
+            parent_model: parent_model.clone(),
+            profile: profile.clone(),
+        },
+        AdvertisedDevice::AmdGpu { model, .. } => DeviceClass::AmdGpu {
+            model: model.clone(),
+        },
     }
 }
 
@@ -422,8 +633,8 @@ pub fn mcp_manifest(state: &NodeState) -> String {
     s.push_str("\"tools\":[{");
     s.push_str("\"name\":\"submit_job\",");
     s.push_str("\"description\":\"Submit an OCI workload to this node. ");
-    s.push_str("Returns 402 (x402 challenge) for paid offers; submission is ");
-    s.push_str("currently refused with 501 while execution is not wired (v0).\",");
+    s.push_str("Free offers execute directly; paid offers return 402 (x402) ");
+    s.push_str("until a signed payment is attached.\",");
     s.push_str("\"endpoint\":");
     json_string(&state.offer.body.endpoint, &mut s);
     s.push_str("}]}");
@@ -483,6 +694,8 @@ mod tests {
             escrow_account: "Esc1111111111111111111111111111111111111111".into(),
             network: "solana-devnet".into(),
             runner: None,
+            verifier: None,
+            state_dir: None,
             #[cfg(feature = "serve")]
             index: None,
         }
@@ -627,7 +840,7 @@ mod tests {
         );
         assert_eq!(r.status, 501);
         let body = String::from_utf8(r.body).unwrap();
-        assert!(body.contains("payment proof was not verified"));
+        assert!(body.contains("payment verification not wired"));
         assert!(!body.contains("\"status\":\"accepted\""));
     }
 

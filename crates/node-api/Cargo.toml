@@ -59,6 +59,7 @@ vtessera-mini-http = { path = "../mini-http", optional = true }
 # (serve only — the default library build stays socket-free).
 ureq = { workspace = true, optional = true }
 hex = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

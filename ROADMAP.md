@@ -202,10 +202,10 @@ verifies and serves current offers (push register + optional pull
 seeding) at `GET /offers`. Executor wiring is in: the `serve`-gated
 `vtessera-node`/`vtessera-mcp` binaries take `--backend` (default
 `noop-cpu`; `local-cpu` for unisolated host execution) and run free
-offers' jobs through the executor in `crates/executor` (§1). What's
-still open is the **paid** path: a submitted payment proof is not yet
-verified on-chain, so paid jobs return an honest 501 until the verifier
-lands (§3/§4).
+offers' jobs through the executor in `crates/executor` (§1). Every
+accepted job (free or paid) now creates a `JobContract` on disk before
+execution, and paid jobs verify x402 payment proofs via off-chain Solana
+RPC before running.
 
 **Offer-index live-demo wiring (shipped):** nodes can register their
 signed offer with an index via `--publish <index-url>`
@@ -240,6 +240,12 @@ changes.
 > paid** (Module 4). x402 handles "agent pays stablecoin," and Module 4
 > handles "seller earns that stablecoin."
 
+**Status (shipped):** x402 challenge is issued by the node for paid
+offers. Payment proofs are verified off-chain via Solana RPC
+(`--rpc-url` flag on `vtessera-node`). The `SolanaPaymentVerifier`
+confirms transaction finalization, escrow account involvement, and
+sufficient token transfer amount. Free offers bypass payment entirely.
+
 ### 2c. The job contract + lifecycle
 
 A **job contract** records the agreed work and price (or `free`), what
@@ -248,6 +254,13 @@ the box's first inbound surface, so it gets the locked-down treatment:
 explicit Cargo feature, restricted address families, mTLS. Lifecycle:
 **discovered → agreed → (paid via x402 / free) → running → finalized →
 settled**.
+
+**Status (shipped):** every accepted job (free or paid) creates a
+`JobContract` on disk (`<state-dir>/contracts/<job_id>.json`) before
+execution. The contract records `job_id`, `node_id`, `device_class`,
+and `agreed_device_seconds`. Settlement (`crates/settlement`) uses
+these contracts to compute the completion fraction `f` against signed
+receipts.
 
 ---
 

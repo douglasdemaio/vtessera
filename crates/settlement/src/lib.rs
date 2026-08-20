@@ -522,6 +522,47 @@ pub fn settle(contract: &JobContract, usage: &JobUsage) -> Result<Settlement, Se
     })
 }
 
+// ---------- Contract creation (called by node-api on job acceptance) ------
+
+/// Construct a [`JobContract`] from the offer and job request.
+///
+/// `agreed_device_seconds` is the buyer's `max_duration_secs` — the ceiling
+/// on how long the job may run. Settlement clamps `f` to `[0, 1]` against
+/// this value.
+///
+/// # Panics
+///
+/// Panics if `job_id` is empty. The caller must validate before calling.
+pub fn create_contract(
+    job_id: String,
+    node_id: String,
+    device_class: DeviceClass,
+    agreed_device_seconds: u64,
+) -> JobContract {
+    assert!(!job_id.is_empty(), "job_id must not be empty");
+    JobContract {
+        job_id,
+        node_id,
+        device_class,
+        agreed_device_seconds,
+        milestones: Vec::new(),
+    }
+}
+
+/// Write a [`JobContract`] to `<state_dir>/contracts/<job_id>.json`.
+///
+/// Creates the `contracts/` directory if it doesn't exist. Returns an `Err`
+/// on I/O failure (disk full, permissions) — the caller should log and
+/// continue rather than blocking the job.
+pub fn write_contract(contract: &JobContract, state_dir: &Path) -> io::Result<()> {
+    let dir = state_dir.join("contracts");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.json", contract.job_id));
+    let json = serde_json::to_string_pretty(contract)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(path, json)
+}
+
 fn validate_milestones(ms: &[f64]) -> Result<(), SettleError> {
     let mut prev = 0.0_f64;
     for &m in ms {
@@ -1109,5 +1150,47 @@ mod tests {
         let json = serde_json::to_string(&c).expect("serialize contract");
         let back: JobContract = serde_json::from_str(&json).expect("deserialize contract");
         assert_eq!(back, c);
+    }
+
+    // ---------- create_contract / write_contract tests ---------------------
+
+    #[test]
+    fn create_contract_populates_fields() {
+        let c = create_contract(
+            "job-abc".into(),
+            "node-1".into(),
+            DeviceClass::NvidiaGpu {
+                model: "H100-80GB".into(),
+            },
+            300,
+        );
+        assert_eq!(c.job_id, "job-abc");
+        assert_eq!(c.node_id, "node-1");
+        assert_eq!(c.agreed_device_seconds, 300);
+        assert!(c.milestones.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "job_id must not be empty")]
+    fn create_contract_panics_on_empty_job_id() {
+        create_contract("".into(), "node-1".into(), DeviceClass::Cpu, 60);
+    }
+
+    #[test]
+    fn write_contract_creates_file_on_disk() {
+        let dir = std::env::temp_dir().join("vtessera_write_contract_test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let c = create_contract("test-job-99".into(), "node-x".into(), DeviceClass::Cpu, 120);
+        write_contract(&c, &dir).expect("write_contract failed");
+
+        let path = dir.join("contracts/test-job-99.json");
+        assert!(path.exists(), "contract file should exist");
+        let data = fs::read_to_string(&path).unwrap();
+        let back: JobContract = serde_json::from_str(&data).unwrap();
+        assert_eq!(back, c);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -256,7 +256,7 @@ impl McpServer {
 
         // Same decision the HTTP surface makes: 402 for unpaid paid
         // offers; free offers run through the binary-supplied runner;
-        // paid-with-proof stays an honest refusal until the verifier lands.
+        // paid-with-proof routes through the verifier (501 if not wired).
         match classify_job_request(&self.state, &req) {
             JobDecision::PaymentRequired(challenge) => Ok(json!({
                 "content": [{
@@ -265,13 +265,17 @@ impl McpServer {
                 }],
                 "isError": false,
             })),
-            JobDecision::VerifyAndRun { .. } => Ok(json!({
-                "content": [{
-                    "type": "text",
-                    "text": r#"{"status":"not-implemented","reason":"payment proof was not verified; on-chain verification is not wired"}"#,
-                }],
-                "isError": true,
-            })),
+            JobDecision::VerifyAndRun {
+                payment_proof,
+                body,
+            } => {
+                let resp = crate::handle_paid_job(&self.state, &payment_proof, &body);
+                let text = String::from_utf8_lossy(&resp.body).to_string();
+                Ok(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "isError": resp.status != 200,
+                }))
+            }
             JobDecision::RunFree { body } => {
                 // Same claim gate and runner path as the HTTP surface —
                 // one enforcement point for both.
@@ -422,6 +426,8 @@ mod tests {
             escrow_account: "Esc1111111111111111111111111111111111111111".into(),
             network: "solana-devnet".into(),
             runner: None,
+            verifier: None,
+            state_dir: None,
             #[cfg(feature = "serve")]
             index: None,
         })
