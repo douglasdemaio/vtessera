@@ -1648,6 +1648,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vtessera-metering-sidecar"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "vtessera-mini-http"
 version = "0.1.0"
 
