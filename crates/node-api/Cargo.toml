@@ -42,6 +42,9 @@ serve = [
     # helper binary and GPU admission path in the CH executor.
     "vtessera-executor/gpu",
 ]
+# Kata Containers on Cloud Hypervisor (ROADMAP.md §1a). Adds the kata backend
+# to the node/MCP binaries behind a feature gate.
+kata = ["vtessera-executor/kata"]
 
 [dependencies]
 # Pure dispatch only. No socket layer here — that lives in a thin binary

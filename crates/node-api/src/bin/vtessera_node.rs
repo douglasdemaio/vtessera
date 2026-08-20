@@ -81,7 +81,7 @@ fn usage_and_exit() -> ! {
         "usage: vtessera-node --bind <host:port> --offer <path.json> \
         --escrow <pda> --network <id> \
         --key <identity.key> --state-dir <dir> \
-        [--backend noop-cpu|local-cpu|cloud-hypervisor] \
+        [--backend noop-cpu|local-cpu|cloud-hypervisor|kata-cloud-hypervisor] \
         [--vfio-devices <pci,pci,...>] \
         [--gpu-time-slice] \
         [--net-backend tap|macvtap] [--net-bridge <name>] \
@@ -115,6 +115,8 @@ enum BackendChoice {
     NoopCpu,
     LocalCpu,
     CloudHypervisor,
+    #[cfg(feature = "kata")]
+    KataCloudHypervisor,
 }
 
 impl BackendChoice {
@@ -123,6 +125,8 @@ impl BackendChoice {
             "noop-cpu" => Some(BackendChoice::NoopCpu),
             "local-cpu" => Some(BackendChoice::LocalCpu),
             "cloud-hypervisor" => Some(BackendChoice::CloudHypervisor),
+            #[cfg(feature = "kata")]
+            "kata-cloud-hypervisor" => Some(BackendChoice::KataCloudHypervisor),
             _ => None,
         }
     }
@@ -171,6 +175,22 @@ impl BackendChoice {
                     executor: Box::new(
                         vtessera_executor::cloud_hypervisor::CloudHypervisorExecutor { config },
                     ),
+                    node_id: id.node_id.clone(),
+                    payout_id: id.payout_id.clone(),
+                    signing_key: id.signing_key.clone(),
+                    receipts_dir: id.receipts_dir.clone(),
+                })
+            }
+            #[cfg(feature = "kata")]
+            BackendChoice::KataCloudHypervisor => {
+                let config = vtessera_executor::kata::KataConfig {
+                    vfio_devices: vfio_devices.to_vec(),
+                    gpu_time_slice,
+                    net_enforcement: net_enforcement.to_string(),
+                    ..Default::default()
+                };
+                Arc::new(ExecutorRunner {
+                    executor: Box::new(vtessera_executor::kata::KataExecutor { config }),
                     node_id: id.node_id.clone(),
                     payout_id: id.payout_id.clone(),
                     signing_key: id.signing_key.clone(),
