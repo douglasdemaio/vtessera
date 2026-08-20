@@ -34,7 +34,7 @@ use vtessera_node_api::{mcp::McpServer, parse_signed_offer, JobRunError, JobRunn
 fn usage_and_exit() -> ! {
     eprintln!(
         "usage: vtessera-mcp --offer <path.json> --escrow <pda> --network <id> \
-        [--backend noop-cpu|local-cpu]"
+        [--backend noop-cpu|local-cpu|kata-cloud-hypervisor]"
     );
     process::exit(2);
 }
@@ -43,6 +43,8 @@ fn usage_and_exit() -> ! {
 enum BackendChoice {
     NoopCpu,
     LocalCpu,
+    #[cfg(feature = "kata")]
+    KataCloudHypervisor,
 }
 
 impl BackendChoice {
@@ -50,6 +52,8 @@ impl BackendChoice {
         match s {
             "noop-cpu" => Some(BackendChoice::NoopCpu),
             "local-cpu" => Some(BackendChoice::LocalCpu),
+            #[cfg(feature = "kata")]
+            "kata-cloud-hypervisor" => Some(BackendChoice::KataCloudHypervisor),
             _ => None,
         }
     }
@@ -67,6 +71,14 @@ impl BackendChoice {
                 );
                 Arc::new(ExecutorRunner {
                     executor: Box::new(vtessera_executor::LocalCpuExecutor),
+                    node_id: node_id.to_string(),
+                })
+            }
+            #[cfg(feature = "kata")]
+            BackendChoice::KataCloudHypervisor => {
+                let config = vtessera_executor::kata::KataConfig::default();
+                Arc::new(ExecutorRunner {
+                    executor: Box::new(vtessera_executor::kata::KataExecutor { config }),
                     node_id: node_id.to_string(),
                 })
             }

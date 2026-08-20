@@ -46,6 +46,17 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "cloud-hypervisor")]
 pub mod cloud_hypervisor;
 
+/// Containerd gRPC client for Kata Containers (ROADMAP.md §1a).
+/// Feature-gated: the default build never compiles this surface.
+#[cfg(feature = "kata")]
+pub mod containerd;
+
+/// Kata Containers on Cloud Hypervisor backend (ROADMAP.md §1a).
+/// Feature-gated: the default build never compiles this surface.
+/// See `docs/superpowers/specs/2026-08-20-kata-isolation-design.md`.
+#[cfg(feature = "kata")]
+pub mod kata;
+
 /// Host-side GPU metering via nvidia-smi polling (ROADMAP.md §1d).
 /// GpuSample (data) is always compiled; GpuMeter (polling) is feature-gated.
 pub mod gpu_meter;
@@ -432,8 +443,10 @@ pub(crate) fn admission_check(spec: &JobSpec) -> Result<(), ExecutorError> {
 /// system and downstream code can branch on it; the real implementation
 /// lives behind a cargo feature once Kata + Cloud Hypervisor + VFIO are
 /// wired.
+#[cfg(not(feature = "kata"))]
 pub struct KataCloudHypervisorExecutor;
 
+#[cfg(not(feature = "kata"))]
 impl Executor for KataCloudHypervisorExecutor {
     fn run(&self, _spec: &JobSpec) -> Result<JobMetering, ExecutorError> {
         Err(ExecutorError::BackendUnimplemented(
@@ -505,6 +518,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "kata"))]
     fn kata_backend_is_unimplemented() {
         let spec = sample_spec();
         let err = KataCloudHypervisorExecutor.run(&spec).unwrap_err();

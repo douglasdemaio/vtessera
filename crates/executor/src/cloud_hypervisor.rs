@@ -151,7 +151,7 @@ pub struct GuestResult {
     pub exit_code: i32,
 }
 
-fn write_manifest(
+pub(crate) fn write_manifest(
     path: &Path,
     spec: &JobSpec,
     config: &CloudHypervisorConfig,
@@ -184,7 +184,7 @@ fn write_manifest(
 
 /// Parse the guest's metering and fold in host-side facts the guest can't
 /// know (backend, device class, exit status from `result.json`).
-fn parse_metering(
+pub(crate) fn parse_metering(
     dir: &Path,
     spec: &JobSpec,
     backend: crate::Backend,
@@ -327,7 +327,8 @@ fn ch_admission(spec: &JobSpec, config: &CloudHypervisorConfig) -> Result<(), Ex
 
 /// GPU state entry read from the helper's state file.
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct GpuDevice {
+#[allow(dead_code)]
+pub(crate) struct GpuDevice {
     pub pci_address: String,
     pub vendor: String,
     pub model: String,
@@ -349,7 +350,8 @@ pub struct GpuDevice {
 
 /// A single MIG instance created on a parent GPU.
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct MigInstance {
+#[allow(dead_code)]
+pub(crate) struct MigInstance {
     pub uuid: String,
     pub profile: String,
     pub pci_address: String,
@@ -358,7 +360,8 @@ pub struct MigInstance {
 
 /// A single mediated device (vGPU) instance created on a parent GPU.
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct MdevInstance {
+#[allow(dead_code)]
+pub(crate) struct MdevInstance {
     pub uuid: String,
     pub vgpu_type: String,
     pub pci_address: String,
@@ -366,7 +369,7 @@ pub struct MdevInstance {
 }
 
 /// Match a GPU job's DeviceRequirements against available VFIO-bound GPUs.
-fn select_gpu(
+pub(crate) fn select_gpu(
     spec: &JobSpec,
     config: &CloudHypervisorConfig,
 ) -> Result<Vec<String>, ExecutorError> {
@@ -521,7 +524,7 @@ fn select_gpu(
 /// Apply host-side nftables rules for a VM's network policy.
 /// Uses a per-job chain under the `vtessera` table to avoid collisions.
 /// Returns Ok(true) if rules were applied, Ok(false) if nftables is unavailable.
-fn apply_host_net_policy(
+pub(crate) fn apply_host_net_policy(
     job_id: &str,
     tap_dev: &str,
     policy: &NetworkPolicy,
@@ -640,7 +643,7 @@ fn apply_host_net_policy(
 }
 
 /// Remove host-side nftables rules for a job.
-fn remove_host_net_policy(job_id: &str) {
+pub(crate) fn remove_host_net_policy(job_id: &str) {
     let chain = format!("job_{}", &job_id[..job_id.len().min(16)]);
     let _ = Command::new("nft")
         .args(["delete", "chain", "inet", "vtessera", &chain])
@@ -772,7 +775,7 @@ impl Executor for CloudHypervisorExecutor {
         #[cfg(feature = "gpu")]
         let mut gpu_meter: Option<crate::gpu_meter::GpuMeter> = None;
         #[cfg(not(feature = "gpu"))]
-        let mut gpu_meter: Option<()> = None;
+        let _gpu_meter: Option<()> = None;
         if !self.config.vfio_devices.is_empty() {
             // Validate that requested GPUs are actually bound.
             let _matched = select_gpu(spec, &self.config)?;
