@@ -90,7 +90,19 @@ cloud-hypervisor` wires it. `scripts/build-initramfs.sh` builds the
 guest. GPU, networking, CPU pinning, and the Kata/OCI path remain
 follow-ups below.
 
+**Shipped: Kata Containers backend.** Production isolation via
+containerd + kata-shim-v2 + Cloud Hypervisor. Accepts standard OCI
+images, supports VFIO GPU passthrough, includes metering sidecar for
+guest metrics. Feature-gated behind `kata` in the executor crate;
+`vtessera-node --backend kata-cloud-hypervisor` wires it.
+`scripts/kata-setup.sh` provisions fresh nodes. See
+`docs/superpowers/specs/2026-08-20-kata-isolation-design.md`.
+
 ### 1a. Pick a VMM that can pass through accelerators
+
+> **Status: shipped** — Kata Containers on Cloud Hypervisor is the
+> recommended production path and is now implemented. See
+> `docs/superpowers/specs/2026-08-20-kata-isolation-design.md`.
 
 - **Kata Containers on a Cloud Hypervisor backend** — *recommended.*
   Accepts standard **OCI images** (what AI users ship), gives VM-grade
@@ -579,9 +591,9 @@ intervention) is asymmetric versus the benefit of an earlier demo.
 
 ## Suggested milestones
 
-1. **M1 — CPU compute proof:** Kata + Cloud Hypervisor running OCI
-   workloads, CPU-only, with per-job metering into signed receipts. No
-   money.
+1. **M1 — CPU compute proof:** ✅ **SHIPPED.** Kata + Cloud Hypervisor
+   running OCI workloads, CPU-only, with per-job metering into signed
+   receipts. No money. See `docs/superpowers/specs/2026-08-20-kata-isolation-design.md`.
 2. **M2 — GPU tier:** VFIO passthrough (whole-GPU, then MIG), CUDA/ROCm
    images, GPU-second + VRAM metering. The AI demand.
 3. **M3 — Agent discovery + free compute:** signed machine-readable
@@ -594,7 +606,9 @@ intervention) is asymmetric versus the benefit of an earlier demo.
    live-demo wiring (node `--publish`, FCFS claims with node
    enforcement, MCP `discover`; `scripts/offer-index-demo.sh`) is
    shipped. What M3 still wants is the Kata/Cloud Hypervisor CPU
-   isolation from §1.
+   isolation from §1. **UPDATE:** Kata isolation is now available via
+   `--backend kata-cloud-hypervisor`, completing the CPU isolation
+   requirement for M3.
 4. **M4 — Paid go-live:** Module 0 cleared; x402 payment + escrow
    program live — agent pays EURC/USDC (escrow for committed jobs,
    pay-as-you-go for short ones) + flat SOL fee, pro-rata release
