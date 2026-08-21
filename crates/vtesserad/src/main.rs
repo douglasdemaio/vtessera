@@ -255,7 +255,7 @@ fn finalize_window(
     }
 
     #[cfg(feature = "submit")]
-    route_submission(&cfg, &signed);
+    route_submission(cfg, &signed);
 
     Ok(())
 }
