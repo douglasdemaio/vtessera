@@ -1045,3 +1045,113 @@ fn cancel_before_start_rejects_non_buyer() {
     );
     expect_custom(h.svm.send_transaction(tx), EscrowError::WrongOwner);
 }
+
+// ---------- Fuzz: randomized finalize + cancel paths -----------------------
+
+/// Deterministic xorshift64* PRNG — no external deps. Seeds from
+/// `test::black_box` to avoid optimizer folding the loop.
+struct FuzzRng(u64);
+
+impl FuzzRng {
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn range(&mut self, lo: u64, hi: u64) -> u64 {
+        if lo >= hi {
+            return lo;
+        }
+        lo + self.next_u64() % (hi - lo + 1)
+    }
+}
+
+/// Run 1000 iterations with random `(price, f_micros)` through finalize
+/// and verify the on-chain split matches the expected math. Every 10th
+/// iteration forces an edge: `price = 1` (rounding) or
+/// `f_micros = 1_000_000` (zero refund).
+#[test]
+fn fuzz_finalize_random_split() {
+    let mut rng = FuzzRng(0xDEAD_BEEF_CAFE_1234);
+    let iterations = std::hint::black_box(1000);
+
+    for i in 0..iterations {
+        // Edge cadence: force rounding / zero-refund edges.
+        let price = if i % 10 == 0 {
+            1
+        } else {
+            rng.range(1, 10_000_000)
+        };
+        let f_micros: u32 = if i % 10 == 5 {
+            1_000_000
+        } else if i % 10 == 0 {
+            1
+        } else {
+            rng.range(0, 1_000_000) as u32
+        };
+
+        // Each iteration needs a fresh harness (unique contract PDA).
+        let mut h = Harness::new_with(price, BUYER_MINT_AMOUNT);
+        h.svm
+            .send_transaction(h.finalize_tx(&h.payer, f_micros))
+            .unwrap();
+
+        // Verify the math: earned = price * f_micros / 1_000_000
+        let earned = (price as u128)
+            .checked_mul(f_micros as u128)
+            .unwrap()
+            .checked_div(1_000_000)
+            .unwrap() as u64;
+        let refund = price - earned;
+
+        assert_eq!(
+            h.token_balance(&h.escrow_stable),
+            0,
+            "iter {i}: escrow not drained (price={price} f={f_micros})"
+        );
+        assert_eq!(
+            h.token_balance(&h.seller_stable),
+            earned,
+            "iter {i}: seller balance wrong (price={price} f={f_micros} earned={earned})"
+        );
+        assert_eq!(
+            h.token_balance(&h.buyer_stable),
+            BUYER_MINT_AMOUNT - earned,
+            "iter {i}: buyer balance wrong (price={price} f={f_micros} refund={refund})"
+        );
+    }
+}
+
+/// Run 1000 iterations with random prices through cancel and verify
+/// the full refund. Every 10th iteration uses `price = 1` (minimum).
+#[test]
+fn fuzz_cancel_random_price() {
+    let mut rng = FuzzRng(0x1234_5678_9ABC_DEF0);
+    let iterations = std::hint::black_box(1000);
+
+    for i in 0..iterations {
+        let price = if i % 10 == 0 {
+            1
+        } else {
+            rng.range(1, 10_000_000)
+        };
+
+        let mut h = Harness::new_with(price, BUYER_MINT_AMOUNT);
+        h.svm.send_transaction(h.cancel_tx()).unwrap();
+
+        assert_eq!(
+            h.token_balance(&h.escrow_stable),
+            0,
+            "iter {i}: escrow not drained (price={price})"
+        );
+        assert_eq!(
+            h.token_balance(&h.buyer_stable),
+            BUYER_MINT_AMOUNT,
+            "iter {i}: buyer not fully refunded (price={price})"
+        );
+    }
+}

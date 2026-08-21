@@ -7,3 +7,4 @@
 # The deploy keypair authorises program upgrades on whichever cluster
 # the program is deployed to. Treat as a credential — never commit.
 programs/target/deploy/*-keypair.json
+.superpowers/

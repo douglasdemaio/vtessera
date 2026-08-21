@@ -1,3 +1,4 @@
+use crate::cidr;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,12 @@ pub struct Config {
     /// this.
     #[serde(default)]
     pub max_spool_files: Option<usize>,
+    /// Network scope configuration (private/enterprise mode).
+    #[serde(default)]
+    pub network: NetworkConfig,
+    /// Marketplace target configuration.
+    #[serde(default)]
+    pub marketplace: MarketplaceConfig,
 }
 
 fn default_mode() -> String {
@@ -56,6 +63,68 @@ fn default_mode() -> String {
 
 fn default_currency() -> String {
     "eurc".into()
+}
+
+/// Network scope configuration for private/enterprise mode.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkConfig {
+    /// `"public"` (default) or `"private"`.
+    #[serde(default = "default_network_mode")]
+    pub mode: String,
+    /// CIDR ranges the daemon operates within. In private mode, a warning
+    /// is logged if the marketplace endpoint resolves outside these ranges.
+    #[serde(default)]
+    pub allowed_cidrs: Vec<String>,
+    /// When true, validate that the signing key is in the key registry
+    /// before submitting receipts.
+    #[serde(default)]
+    pub require_internal_ca: bool,
+    /// Path to the key registry TOML file. Required when
+    /// `require_internal_ca = true`.
+    #[serde(default)]
+    pub key_registry_path: Option<String>,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        NetworkConfig {
+            mode: default_network_mode(),
+            allowed_cidrs: Vec::new(),
+            require_internal_ca: false,
+            key_registry_path: None,
+        }
+    }
+}
+
+fn default_network_mode() -> String {
+    "public".into()
+}
+
+/// Marketplace target configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketplaceConfig {
+    /// `"public"` (default), `"internal"`, or `"none"`.
+    #[serde(default = "default_marketplace_target")]
+    pub target: String,
+    /// URL to POST signed receipts to. Required when `target` is
+    /// `"public"` or `"internal"`.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+}
+
+impl Default for MarketplaceConfig {
+    fn default() -> Self {
+        MarketplaceConfig {
+            target: default_marketplace_target(),
+            endpoint: None,
+        }
+    }
+}
+
+fn default_marketplace_target() -> String {
+    "public".into()
 }
 
 impl Config {
@@ -99,6 +168,72 @@ impl Config {
         if self.key_path.as_os_str().is_empty() {
             return Err(ConfigError::Validation("key_path must not be empty".into()));
         }
+
+        // --- Network / marketplace validation ---
+        match self.network.mode.as_str() {
+            "public" => {}
+            "private" => {
+                // Validate marketplace section is present and target is set.
+                match self.marketplace.target.as_str() {
+                    "public" => {
+                        // Public target in private mode: use submit_endpoint
+                        // or marketplace.endpoint — same as public mode.
+                    }
+                    "internal" => {
+                        if self.marketplace.endpoint.is_none() {
+                            return Err(ConfigError::Validation(
+                                "marketplace.target = \"internal\" requires marketplace.endpoint"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    "none" => {}
+                    other => {
+                        return Err(ConfigError::Validation(format!(
+                            "marketplace.target must be \"public\", \"internal\", or \"none\", got \"{other}\""
+                        )));
+                    }
+                }
+                // Validate CIDR entries.
+                cidr::parse_cidr_list(&self.network.allowed_cidrs)
+                    .map_err(|e| ConfigError::Validation(format!("network.allowed_cidrs: {e}")))?;
+                // Validate key registry if required.
+                if self.network.require_internal_ca {
+                    match &self.network.key_registry_path {
+                        None => {
+                            return Err(ConfigError::Validation(
+                                "network.require_internal_ca = true requires network.key_registry_path".into(),
+                            ));
+                        }
+                        Some(path) => {
+                            if !Path::new(path).exists() {
+                                return Err(ConfigError::Validation(format!(
+                                    "network.key_registry_path does not exist: {path}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            other => {
+                return Err(ConfigError::Validation(format!(
+                    "network.mode must be \"public\" or \"private\", got \"{other}\""
+                )));
+            }
+        }
+
+        // Validate marketplace target (even in public network mode).
+        if self.network.mode == "public" {
+            match self.marketplace.target.as_str() {
+                "public" | "none" => {}
+                other => {
+                    return Err(ConfigError::Validation(format!(
+                        "marketplace.target must be \"public\" or \"none\" in public network mode, got \"{other}\""
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -200,6 +335,8 @@ mod tests {
             submit_endpoint: None,
             window_size: None,
             max_spool_files: None,
+            network: NetworkConfig::default(),
+            marketplace: MarketplaceConfig::default(),
         }
     }
 

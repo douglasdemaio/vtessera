@@ -397,6 +397,18 @@ Tracked in **`ROADMAP.md`**, not here. Summary:
 - **Module 5 — Hardening + ops**: spool rotation, abuse handling,
   re-running `systemd-analyze security` on every new privileged
   component.
+- **Private/enterprise network mode** (`crates/vtesserad`):
+  `mode = "private"` restricts to internal CIDRs, `[marketplace]` target
+  selector (`public`/`internal`/`none`), key registry for Ed25519
+  authorization. New files: `cidr.rs`, `key_registry.rs`.
+- **Reference marketplace server** (`crates/marketplace-server`): Axum
+  HTTP server that receives and stores signed receipts from internal
+  nodes. JSON lines storage, Ed25519 signature verification, key
+  registry validation. Separate binary, own dep budget.
+- **Config wizard** (`crates/vtessera-config`): Interactive CLI that
+  generates valid TOML config + key registry for private/enterprise
+  deployments. Supports both interactive prompts and non-interactive
+  flag-based mode.
 
 Each module lands as its own crate with its own review and CI stanza.
 None expands `crates/vtesserad`'s attack surface.

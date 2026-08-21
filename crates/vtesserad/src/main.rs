@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
+mod cidr;
 mod config;
+mod key_registry;
 mod metrics;
 mod receipt;
 mod sign;
@@ -253,14 +255,71 @@ fn finalize_window(
     }
 
     #[cfg(feature = "submit")]
-    if let Some(ref endpoint) = cfg.submit_endpoint {
-        match submit::submit_receipt(endpoint, &signed) {
-            Ok(_) => eprintln!("receipt submitted to {endpoint}"),
-            Err(e) => eprintln!("warning: failed to submit receipt: {e}"),
-        }
-    }
+    route_submission(cfg, &signed);
 
     Ok(())
+}
+
+/// Route signed receipt submission based on marketplace target.
+#[cfg(feature = "submit")]
+fn route_submission(cfg: &config::Config, signed: &receipt::SignedReceipt) {
+    let endpoint = match cfg.marketplace.target.as_str() {
+        "none" => {
+            eprintln!("marketplace.target=none, receipt spooled locally");
+            return;
+        }
+        "internal" => {
+            // Check key registry if required.
+            if cfg.network.require_internal_ca {
+                if let Some(ref registry_path) = cfg.network.key_registry_path {
+                    match key_registry::KeyRegistry::load(registry_path) {
+                        Ok(registry) => {
+                            let pubkey_bytes = signed.pubkey;
+                            if !registry.contains(&pubkey_bytes) {
+                                eprintln!(
+                                    "warning: signing key not in key registry, skipping submission"
+                                );
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("warning: failed to load key registry: {e}");
+                            return;
+                        }
+                    }
+                }
+            }
+            match cfg.marketplace.endpoint {
+                Some(ref ep) => ep.clone(),
+                None => {
+                    eprintln!("warning: marketplace.target=internal but no endpoint configured");
+                    return;
+                }
+            }
+        }
+        "public" => {
+            // Use marketplace.endpoint if set, fall back to submit_endpoint.
+            match cfg.marketplace.endpoint {
+                Some(ref ep) => ep.clone(),
+                None => match cfg.submit_endpoint {
+                    Some(ref ep) => ep.clone(),
+                    None => {
+                        eprintln!("warning: no submission endpoint configured");
+                        return;
+                    }
+                },
+            }
+        }
+        other => {
+            eprintln!("warning: unknown marketplace.target \"{other}\"");
+            return;
+        }
+    };
+
+    match submit::submit_receipt(&endpoint, signed) {
+        Ok(_) => eprintln!("receipt submitted to {endpoint}"),
+        Err(e) => eprintln!("warning: failed to submit receipt: {e}"),
+    }
 }
 
 #[cfg(test)]
