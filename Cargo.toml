@@ -28,6 +28,8 @@ members = [
     "crates/settlement",
     "crates/vtessera-gui",
     "crates/metering-sidecar",
+    "crates/marketplace-server",
+    "crates/vtessera-config",
 ]
 # Crates that live outside the host workspace because they pin Solana SDK
 # versions (1.18.x ecosystem) whose crypto dep tree (curve25519-dalek 3,

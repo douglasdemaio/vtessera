@@ -1,0 +1,15 @@
+[package]
+name = "vtessera-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interactive config wizard for vtesserad"
+
+[[bin]]
+name = "vtessera-config"
+path = "src/main.rs"
+
+[dependencies]
+dialoguer = "0.11"
+toml = { workspace = true }
+serde = { workspace = true }
