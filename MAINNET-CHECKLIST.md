@@ -262,7 +262,7 @@ fast enough to fix it, or (b) accept the loss.
 
 ### Steps
 
-- [ ] **4.1** Decide tier. Default: community review first, paid audit
+- [x] **4.1** Decide tier. **Decided:** community review first, paid audit
       gated on revenue / TVL.
 - [x] **4.2** Prepare for review:
       - Write `programs/vtessera-escrow/SECURITY.md` with:
@@ -382,7 +382,11 @@ ATA-creation collisions; RPC failures mid-transaction.
       on-chain split/refund after each iteration and exits non-zero on
       any unexpected failure. Idempotent `init_config`. Run via
       `cargo run --bin soak -- --iters N` (`SOAK_RPC` to point at a
-      local validator). Each iteration:
+      local validator). Features added post-merge: retry with exponential
+      backoff on transient RPC errors (blockhash, 429, 503), per-worker
+      timeout (120s), SIGINT shutdown (Ctrl-C prints summary), live
+      progress with latency stats (avg/p50/p95/p99), and `--parallel`
+      for concurrent workers. Each iteration:
       - Pick random `price_micros` (1 to 10_000_000)
       - Pick random `f_micros` (0, 1, 500_000, 990_000, 1_000_000,
         uniform random)
@@ -395,8 +399,9 @@ ATA-creation collisions; RPC failures mid-transaction.
       runs the soak hourly via a GitHub Actions scheduled workflow (fires
       on `main` once merged; manual `workflow_dispatch` supported; payer
       top-up via devnet airdrop; soak log uploaded as an artifact). The
-      payer keypair is the throwaway CI key in the `DEVNET_PAYER_KEYPAIR`
-      repo secret — deliberately *not* the operator's key.
+      payer keypair is read from the `VTESSERA_PAYER` environment variable
+      (locally) or `DEVNET_PAYER_KEYPAIR` (CI) — deliberately *not* the
+      operator's key.
 - [x] **6.3** Vary specifically:
       - Concurrent jobs (2-3 in flight at once) to catch any
         non-serializable race — **done:** the runner takes `--parallel`
@@ -413,17 +418,21 @@ ATA-creation collisions; RPC failures mid-transaction.
         reruns never collide with leftover contract PDAs on the same
         devnet program (`Allocate: already in use` was the failure mode).
 - [x] **6.4** Watch the log file. Any non-zero error rate gets
-      investigated **before** mainnet. **Done:** the two failure modes seen
+      investigated **before** mainnet. **Done:** the three failure modes seen
       so far were root-caused, fixed, and validated on devnet — (a) devnet
       airdrop 429 / dry faucet → payer funding + 1.5 SOL fail-fast floor
       (#43); (b) `custom program error: 0x1` on every iteration after the
       buyer SOL budget cut → the buyer pays the contract-PDA rent + fee in
       `pay_for_compute`, needs ≥ 2.9M lamports; 5M restored a 0-failure run
-      (#45). Monitoring continues via the hourly soak log artifact.
+      (#45); (c) `ctrlc` crate missing from `devnet-demo/Cargo.toml` →
+      soak binary fails to link on CI (PR #62, fixed). Monitoring continues
+      via the hourly soak log artifact.
 - [ ] **6.5** Run for at least **one week** of continuous green
       operation after #1-#3 are all merged and re-deployed. **Status:** the
       workflow on `main` is green and self-funding (100 iters, 0 failures on
-      2026-08-16); the one-week wall-clock window is pending.
+      2026-08-16); manual soak with 20 iterations, 0 failures on 2026-08-21
+      (fresh escrow program deployed, full pay→settle→split exercised);
+      the one-week wall-clock window is pending.
 
 **Who.**
 - **Me:** write the soak runner, document the failure-investigation

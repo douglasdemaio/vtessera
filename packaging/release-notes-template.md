@@ -8,7 +8,7 @@ Vtessera is an opt-in compute node for AI agents, settled in EURC/USDC —
 
 ## Artifacts
 
-- `vtessera.flatpak` — GUI + metering daemon + agent-facing node server
+- `vtessera.flatpak` — GUI + metering daemon + agent-facing node server + MCP server
 - `SHA256SUMS`
 
 ## Verify the download

@@ -17,11 +17,12 @@ packaging/flatpak/
 └── .gitignore
 ```
 
-The manifest builds three binaries and installs them to `/app/bin`:
+The manifest builds four binaries and installs them to `/app/bin`:
 
 - `vtessera-gui` — the GTK4 front-end (the app users launch)
 - `vtesserad` — the v0 metering daemon (spawned by the GUI)
 - `vtessera-node` — the agent-facing HTTP server (spawned by the GUI)
+- `vtessera-mcp` — the stdio MCP server (for agent tool discovery)
 
 ## Build
 
@@ -80,8 +81,10 @@ done
 - The app only ever writes inside the Flatpak's own dirs
   (`~/.var/app/io.github.douglasdemaio.Vtessera/`); no `--filesystem`
   overrides are needed.
-- v0 settlement is off-chain; the Solana escrow (module 4) settles
-  sellers directly in the same stablecoin the buyer paid (EURC/USDC).
+- Settlement is split: the settlement service (`vtessera-settle`) computes
+  the completion fraction `f` off-chain from signed receipts; the Solana
+  escrow program (Module 4) splits the buyer's stablecoin by `f` on-chain,
+  paying the seller in the same stablecoin the buyer paid (EURC/USDC).
   See the repo `ROADMAP.md`.
 
 ## Permission rationale (docs/CONSENT.md §4)

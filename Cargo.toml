@@ -2,15 +2,23 @@
 #
 # Layout (see ROADMAP.md for module semantics):
 #
-#   crates/vtesserad   v0 metering daemon (the original, unchanged audit surface)
-#   crates/receipt     receipt types + canonical serialization + Ed25519 sign/verify
-#   crates/executor    Module 1 — job execution + accelerator passthrough
-#   crates/offer       Module 2 — signed machine-readable offers (MCP-shaped)
-#   crates/node-api    Module 2 — node HTTP surface (x402 / MCP), feature-gated
-#   crates/mini-http   Module 2 — shared hand-rolled HTTP/1.1 server primitives
-#   crates/offer-index Module 2a — central offer index (verify + serve offers)
-#   crates/settlement  Module 3 — receipt verification + completion-fraction
-#   programs/vtessera-escrow  Module 4 — Solana Anchor escrow program
+#   crates/vtesserad       v0 metering daemon (the original, unchanged audit surface)
+#   crates/executor        Module 1 — job execution + accelerator passthrough
+#   crates/offer           Module 2 — signed machine-readable offers (MCP-shaped)
+#   crates/node-api        Module 2 — node HTTP surface (x402 / MCP), feature-gated
+#   crates/mini-http       Module 2 — shared hand-rolled HTTP/1.1 server primitives
+#   crates/offer-index     Module 2a — central offer index (verify + serve offers)
+#   crates/settlement      Module 3 — receipt verification + completion-fraction
+#   crates/vtessera-gui    GTK4 desktop app (Flatpak-packaged)
+#   crates/marketplace-server  Reference marketplace server (Axum, private/enterprise)
+#   crates/vtessera-config Config wizard for private/enterprise deployments
+#   crates/metering-sidecar    Kata container guest-side metering
+#   programs/vtessera-escrow   Module 4 — Solana Anchor escrow program (excluded)
+#
+# Excluded (own toolchain):
+#   crates/devnet-demo     Devnet escrow end-to-end + soak runner
+#   crates/x402-client     Agent that pays the escrow and submits a job
+#   tests/adversarial      Fuzz + adversarial test suite for escrow
 #
 # The v0 daemon's tight dependency budget (BUILD.md §1.3) is enforced per-crate,
 # not workspace-wide. New crates carry their own deps. The RPM build only ships
