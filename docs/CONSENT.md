@@ -82,7 +82,7 @@ next to it says, honestly:
 > receive.
 
 Rationale for the honesty: the `LocalCpuExecutor`
-(`crates/vtessera-executor`) is a skeleton, not a sandbox. The GUI's default
+(`crates/executor`) is a skeleton, not a sandbox. The GUI's default
 backend is `noop-cpu`. Both facts are stated in the UI rather than hidden.
 
 Effects of the switch (persisted immediately, applied on Start):

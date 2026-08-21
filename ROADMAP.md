@@ -238,18 +238,19 @@ distribution channel. An agent installing it should be able to discover
 the node, submit a job, and get results. Tested end-to-end on 2026-08-21;
 the following gaps prevent agents from using the Flatpak out of the box:
 
-| Gap | Impact | Fix |
-| --- | --- | --- |
-| `vtessera-mcp` not installed in Flatpak | Agents speaking MCP can't use the Flatpak's MCP server; they must discover the HTTP API and speak raw JSON-RPC | Add `vtessera-mcp` to the Flatpak manifest's install step |
-| Default mode is `paid` | First-time agent immediately hits HTTP 402 with no guidance on how to pay; no free fallback for smoke tests | Default to `free` on first run, or add a first-run wizard in the GUI that asks |
-| No agent CLI entry point | Agent must manually `curl` with hand-crafted JSON; no `flatpak run ... --agent-submit job.json` | Add a CLI flag or a `vtessera-agent` helper that wraps the HTTP API |
-| Config changes require kill/restart | Editing `settings.toml` doesn't propagate to the running node; GUI doesn't restart the node | GUI should restart the node when settings change, or the node should watch the config file |
-| No localhost discovery | Agent must know the port (8402); no mDNS, no `/well-known` auto-discovery | Add mDNS registration or a well-known endpoint on localhost |
-| No "For Agents" documentation | README has no section telling agents how to interact with the Flatpak | Add a section with the curl recipe and MCP instructions |
+| Gap | Impact | Fix | Status |
+| --- | --- | --- | --- |
+| `vtessera-mcp` not installed in Flatpak | Agents speaking MCP can't use the Flatpak's MCP server; they must discover the HTTP API and speak raw JSON-RPC | Add `vtessera-mcp` to the Flatpak manifest's install step | **Fixed** (80467b8) |
+| Default mode is `paid` | First-time agent immediately hits HTTP 402 with no guidance on how to pay; no free fallback for smoke tests | Default to `free` on first run, or add a first-run wizard in the GUI that asks | **Fixed** (80467b8) |
+| No agent CLI entry point | Agent must manually `curl` with hand-crafted JSON; no `flatpak run ... --agent-submit job.json` | Add a CLI flag or a `vtessera-agent` helper that wraps the HTTP API | Open |
+| Config changes require kill/restart | Editing `settings.toml` doesn't propagate to the running node; GUI doesn't restart the node | GUI should restart the node when settings change, or the node should watch the config file | **Fixed** (d695fc5) — GUI auto-restarts node on mode/accept_workloads toggle |
+| No localhost discovery | Agent must know the port (8402); no mDNS, no `/well-known` auto-discovery | Add mDNS registration or a well-known endpoint on localhost | Open |
+| No "For Agents" documentation | README has no section telling agents how to interact with the Flatpak | Add a section with the curl recipe and MCP instructions | **Fixed** (80467b8) — "For agents" section in README |
 
-**Priority:** these are UX gaps, not security or correctness issues. The
-node works; the agent just can't find it or talk to it without
-hand-rolling HTTP requests. Fix before any agent-facing demo or launch.
+**Remaining:** agent CLI entry point (nice-to-have, not blocking) and
+localhost discovery (mDNS or well-known endpoint). These are UX gaps, not
+security or correctness issues. The node works; the agent just can't find
+it without knowing the port.
 
 ### 2b. Paying (or not) — x402
 
@@ -566,8 +567,11 @@ demonstration. Sample transactions on devnet:
 
 Nothing — the devnet program ships the **production** path. The earned
 slice is paid to the seller in the same stablecoin the buyer deposited;
-there is no swap. The old devnet stub is deleted, and the devnet
-redeploy of this build is pending.
+there is no swap. The old devnet stub is deleted. Full end-to-end
+pay→run→settle→split flow exercised via the soak runner (20+ successful
+finalizations, 0% failure rate on 2026-08-21). See `crates/devnet-demo`
+for the runnable demonstration and `tests/adversarial/` for the fuzz +
+adversarial test suite.
 
 ## Mainnet criteria (DEFERRED — do not deploy until met)
 
@@ -579,25 +583,26 @@ authoritative tracker (this section is the summary).
 Before the program is deployed to mainnet-beta, **all** of the
 following must hold:
 
-- [ ] **Direct stablecoin settlement implemented and tested.** The
+- [x] **Direct stablecoin settlement implemented and tested.** The
   program pays the seller in the same stablecoin mint the buyer
   deposited — no swap, no oracle, no burn. The production path is
   exercised in unit and adversarial tests.
-- [ ] **Settlement authority pinned at deploy.** The operator's key, set
+- [x] **Settlement authority pinned at deploy.** The operator's key, set
   in `Config` by `init_config`, signs `finalize_pro_rata` so no
   arbitrary caller can finalize an escrow with a fabricated `f`.
   `Config` is immutable after `init_config` — no governance
   instructions.
-- [ ] **Fee config confirmed.** `fee_wallet` =
+- [x] **Fee config confirmed.** `fee_wallet` =
   `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh` and `fee_lamports` =
   100,000, set at `init_config` and reviewed publicly.
 - [ ] **Upgrade authority handled.** A single dev keypair as upgrade
   authority is an implicit custodian (ROADMAP §4d). Either set the
   upgrade authority to a multisig or make the program immutable
   (`solana program set-upgrade-authority --final`).
-- [ ] **Third-party audit** of the escrow program. The program is
-  small (~300 LoC) but touches custody — reviewable in an afternoon,
-  but ship the review.
+- [ ] **Third-party review** of the escrow program. **Decided:**
+  community review first (Solana Discord, Anchor Discord, r/solana);
+  paid audit gated on revenue / TVL. The program is small (~300 LoC)
+  but touches custody — reviewable in an afternoon.
 - [ ] **Reproducible BPF build** with documented `cargo build-sbf`
   inputs and `sha256` of the .so committed.
 

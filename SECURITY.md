@@ -47,16 +47,20 @@ needs longer.
 - RPM packaging issues: unsafe scriptlets, wrong ownership or modes
 - Supply-chain issues in pinned dependencies not already flagged by
   `cargo audit` / `cargo deny`
+- Escrow program vulnerabilities: unauthorized fund withdrawal,
+  double-spend, settlement authority bypass, integer overflow in
+  `f` calculation, ATA manipulation, or any path that could drain
+  buyer or seller funds (see `programs/vtessera-escrow/SECURITY.md`)
 
 ### Out of scope
 
 - Metering inaccuracy or resource-accounting disputes that have no
   security impact
 - Attacks requiring existing root on the host
-- Anything in the unimplemented phases (workload execution, payment
-  settlement, network listeners) — `v0` has no inbound listener and
-  executes no third-party code
 - Denial of service against your own machine by misconfiguring your own daemon
+- Solana validator censorship or front-end/RPC vectors (network-level trust)
+- Stablecoin issuer freeze powers (Circle can freeze USDC/EURC addresses —
+  that risk sits with the individual buyer or seller)
 
 ## Security Design
 

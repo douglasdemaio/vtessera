@@ -14,7 +14,12 @@ the protocol is technology, not a token.
 > (`HTTP 402 Payment Required`), demonstrated end-to-end by
 > `crates/x402-client` + `scripts/x402-demo.sh`. **Module 1 shipped:**
 > `--backend cloud-hypervisor` runs each job in a disposable Cloud
-> Hypervisor microVM (CPU-only, no guest network). See `ROADMAP.md`.
+> Hypervisor microVM (CPU-only, no guest network). **Module 2 shipped:**
+> MCP offer discovery, offer index with FCFS claims, HTTP + x402 job
+> submission, off-chain Solana payment verification. **Module 3 shipped:**
+> per-job signed receipts and settlement service computing completion
+> fraction `f`. **Module 4 shipped:** escrow program live on devnet, full
+> pay→run→settle→split flow exercised end-to-end. See `ROADMAP.md`.
 
 ## What Vtessera is
 
@@ -64,28 +69,41 @@ vtessera/
 ├── ROADMAP.md                      # modules 1–5, build order, milestones
 ├── BUILD.md                        # v0 daemon's authoritative build spec
 ├── MAINNET-CHECKLIST.md            # pre-flight items before mainnet deploy
+├── SECURITY.md                     # security policy + vulnerability reporting
 ├── LICENSE                         # Apache-2.0
 ├── Cargo.toml                      # workspace root (host crates)
 ├── rust-toolchain.toml             # pinned Rust toolchain + musl target
 ├── deny.toml                       # cargo-deny policy
 ├── crates/
 │   ├── vtesserad/                  # v0 metering daemon (this README's quickstart)
-│   ├── vtessera-offer/             # signed-offer types (canonical bytes + Ed25519)
-│   ├── vtessera-node-api/          # agent-facing HTTP server: offer, jobs, 402/x402
-│   ├── vtessera-executor/          # job execution backends (Module 1: noop-cpu, local-cpu, cloud-hypervisor)
-│   ├── vtessera-settlement/        # receipt verification + settlement (Module 3, skeleton)
+│   ├── offer/                      # signed-offer types (canonical bytes + Ed25519)
+│   ├── node-api/                   # agent-facing HTTP server: offer, jobs, 402/x402
+│   ├── executor/                   # job execution backends (Module 1: noop-cpu, local-cpu, cloud-hypervisor)
+│   ├── settlement/                 # receipt verification + settlement (Module 3)
+│   ├── offer-index/                # Module 2a: central offer index (verify + serve)
+│   ├── mini-http/                  # Module 2: shared HTTP/1.1 server primitives
 │   ├── vtessera-gui/               # GTK4 desktop app (Flatpak-packaged)
+│   ├── marketplace-server/         # reference marketplace server (Axum)
+│   ├── vtessera-config/            # config wizard for private/enterprise deployments
+│   ├── metering-sidecar/           # Kata container guest-side metering
 │   ├── devnet-demo/                # excluded: exercises the devnet escrow end-to-end
 │   └── x402-client/                # excluded: agent that pays the escrow and submits a job
 ├── programs/
 │   └── vtessera-escrow/            # Anchor escrow program — live on Solana devnet
+├── tests/
+│   └── adversarial/                # excluded: fuzz + adversarial test suite for escrow
 ├── packaging/                      # RPM spec, systemd unit, AppArmor, example config, Flatpak
 ├── scripts/
 │   ├── x402-demo.sh                # one-command agent demo against devnet
-│   └── build-initramfs.sh          # builds the CH executor's guest initramfs
+│   ├── build-initramfs.sh          # builds the CH executor's guest initramfs
+│   ├── offer-index-demo.sh         # end-to-end: two nodes, claims, MCP discover
+│   ├── settlement-demo.sh          # end-to-end: node → signed receipt → settle
+│   ├── agent-smoke-test.sh         # Flatpak agent smoke test (7 checks)
+│   └── kata-setup.sh               # provisions fresh nodes for Kata backend
 ├── docs/
 │   ├── DESIGN.md                   # design index
-│   └── CONSENT.md                  # consent & disclosure spec (UI + copy rules)
+│   ├── CONSENT.md                  # consent & disclosure spec (UI + copy rules)
+│   └── superpowers/                # specs + plans (historical; specs are canonical)
 └── .github/workflows/ci.yml
 ```
 
@@ -292,10 +310,11 @@ It builds the agent (`crates/x402-client`), points a node at
 `http://127.0.0.1:8402` (reusing one already running there), submits a
 job, and pays the x402 challenge into the escrow. Free jobs run through
 the node's wired executor (`--backend noop-cpu` by default, or
-`local-cpu` for unisolated host execution). A paid job's proof is still
-**not verified** — that path stays an honest 501 until the on-chain
-payment verifier lands (Module 4) — so the demo finalizes the split
-without running the job, proving the escrow money path end to end.
+`local-cpu` for unisolated host execution). Paid jobs verify the x402
+payment proof via off-chain Solana RPC (`--rpc-url` on `vtessera-node`)
+before running — confirming transaction finalization, escrow account
+involvement, and sufficient token transfer amount. The demo finalizes
+the split after the job runs, proving the escrow money path end to end.
 `crates/devnet-demo` is the lower-level variant that exercises
 `pay_for_compute` → `finalize_pro_rata` directly.
 
@@ -377,7 +396,7 @@ toggle "Accept workloads from others" in the GUI.
 | `GET` | `/healthz` | Returns `ok` if the node is alive |
 | `GET` | `/offer` | Returns the signed machine-readable offer (JSON) |
 | `GET` | `/.well-known/agent.json` | A2A agent card |
-| `POST` | `/mcp` | MCP 2.24-11-05 JSON-RPC (tools: `discover`, `submit_job`) |
+| `POST` | `/mcp` | MCP 2024-11-05 JSON-RPC (tools: `discover`, `submit_job`) |
 | `POST` | `/jobs` | Submit a job (HTTP API) |
 | `GET` | `/jobs/<job_id>` | Get job status |
 
@@ -500,6 +519,14 @@ flatpak uninstall io.github.douglasdemaio.Vtessera
 rm -rf ~/.var/app/io.github.douglasdemaio.Vtessera
 ```
 
+**Flatpak (CLI — node + MCP):**
+
+```bash
+flatpak run --command=vtessera-node io.github.douglasdemaio.Vtessera \
+  --bind 127.0.0.1:8402 --offer offer.json --key key.bin \
+  --state-dir ~/.local/share/vtessera --backend cloud-hypervisor
+```
+
 **RPM (daemon, if installed):**
 
 ```bash
@@ -563,6 +590,8 @@ value.
 - **`BUILD.md`** — Authoritative v0 build specification (scope, hard
   rules, module contracts, systemd hardening, CI, definition of done).
   v0 must not widen beyond this; new modules live in separate crates.
+- **`SECURITY.md`** — Security policy, vulnerability reporting, and
+  security design references.
 - **`docs/DESIGN.md`** — Design index pointing at the documents above.
 - **`docs/CONSENT.md`** — The consent & disclosure spec: behavioural
   invariants, the GUI consent flow, copy rules, the claims-precision

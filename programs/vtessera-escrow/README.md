@@ -141,10 +141,13 @@ stays close to forkit.
 ## Status
 
 The program compiles under Anchor 0.30 and is **live on Solana devnet**
-(a devnet redeploy of the direct-stablecoin build is pending). The
-production path is `finalize_pro_rata`: the seller is paid in the
-contract's stablecoin mint, the buyer is refunded in the same mint, and
-the SOL fee is charged from the settlement authority. The old devnet stub
-is deleted — there is no swap and no burn. `Config` is immutable after
+at `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`. The production
+path is `finalize_pro_rata`: the seller is paid in the contract's
+stablecoin mint, the buyer is refunded in the same mint, and the SOL
+fee is charged from the settlement authority. The old devnet stub is
+deleted — there is no swap and no burn. `Config` is immutable after
 `init_config`, and the settlement authority is the operator's key pinned
-at deploy — see `ROADMAP.md` §4d.
+at deploy — see `ROADMAP.md` §4d. Full end-to-end pay→run→settle→split
+flow exercised via `crates/devnet-demo` soak runner (20+ successful
+finalizations, 0% failure rate). See `tests/adversarial/` for the fuzz +
+adversarial test suite.

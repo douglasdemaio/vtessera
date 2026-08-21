@@ -95,32 +95,69 @@ systemd unit and an AppArmor profile.
 vtessera/
 ├── README.md                       # what it is + build/run quickstart
 ├── ROADMAP.md                      # modules 1–5 (Solana stablecoin / AI-agent direction)
-├── LICENSE                         # Apache-2.0 (recommended) or MIT
+├── LICENSE                         # Apache-2.0
 ├── rust-toolchain.toml             # pin stable + musl target
 ├── Cargo.toml                      # workspace root (members = crates/vtesserad, ...)
 ├── Cargo.lock                      # COMMITTED
 ├── deny.toml                       # cargo-deny policy (licenses, advisories, bans)
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                  # fmt, clippy, test, audit, deny, build, rpm
+│       ├── ci.yml                  # fmt, clippy, test, audit, deny, build, rpm
+│       ├── soak-devnet.yml         # hourly devnet soak (100 iters, parallel 3)
+│       ├── reproducible-build.yml  # solana-verify reproducible build gate
+│       └── release.yml             # Flatpak build, SHA256SUMS, release draft
 ├── crates/
-│   └── vtesserad/
-│       ├── Cargo.toml              # crate metadata; [features] submit = [...]
-│       └── src/
-│           ├── main.rs             # #![forbid(unsafe_code)]; args, config, run loop
-│           ├── config.rs           # load + validate TOML; typed Config struct
-│           ├── metrics.rs          # read /proc, /sys; ResourceSample struct
-│           ├── receipt.rs          # Receipt struct + canonical serialization
-│           ├── sign.rs             # Ed25519 keygen/load + sign(receipt) -> sig
-│           ├── spool.rs            # write signed receipt JSON to state dir
-│           └── submit.rs           # feature="submit" ONLY: outbound POST (ureq+rustls)
+│   ├── vtesserad/
+│   │   ├── Cargo.toml              # crate metadata; [features] submit = [...]
+│   │   └── src/
+│   │       ├── main.rs             # #![forbid(unsafe_code)]; args, config, run loop
+│   │       ├── config.rs           # load + validate TOML; typed Config struct
+│   │       ├── metrics.rs          # read /proc, /sys; ResourceSample struct
+│   │       ├── receipt.rs          # Receipt struct + canonical serialization
+│   │       ├── sign.rs             # Ed25519 keygen/load + sign(receipt) -> sig
+│   │       ├── spool.rs            # write signed receipt JSON to state dir
+│   │       ├── submit.rs           # feature="submit" ONLY: outbound POST (ureq+rustls)
+│   │       ├── cidr.rs             # CIDR parser for private/enterprise mode
+│   │       └── key_registry.rs     # TOML key registry for Ed25519 authorization
+│   ├── executor/                   # Module 1 — job execution + accelerator passthrough
+│   ├── offer/                      # Module 2 — signed-offer types + Ed25519
+│   ├── node-api/                   # Module 2 — agent-facing HTTP server (feature-gated)
+│   ├── mini-http/                  # Module 2 — shared HTTP/1.1 server primitives
+│   ├── offer-index/                # Module 2a — central offer index (verify + serve)
+│   ├── settlement/                 # Module 3 — receipt verification + vtessera-settle
+│   ├── vtessera-gui/               # GTK4 desktop app (Flatpak-packaged)
+│   ├── marketplace-server/         # Reference marketplace server (Axum)
+│   ├── vtessera-config/            # Config wizard for private/enterprise deployments
+│   ├── metering-sidecar/           # Kata container guest-side metering
+│   ├── devnet-demo/                # excluded: devnet escrow end-to-end + soak runner
+│   └── x402-client/                # excluded: agent that pays the escrow and submits a job
+├── programs/
+│   └── vtessera-escrow/            # Anchor escrow program — live on Solana devnet
+├── tests/
+│   └── adversarial/                # excluded: fuzz + adversarial test suite
 ├── packaging/
 │   ├── vtessera.spec               # RPM spec (BuildRequires: rust, cargo)
 │   ├── vtesserad.service           # hardened systemd unit (see §5)
 │   ├── vtessera.apparmor           # AppArmor profile
-│   └── vtessera.toml.example       # documented example config
-└── docs/
-    └── DESIGN.md                   # link back to ROADMAP.md / SECURITY.md
+│   ├── vtessera.toml.example       # documented example config
+│   └── flatpak/                    # Flatpak manifest + vendored cargo sources
+├── scripts/
+│   ├── x402-demo.sh                # one-command agent demo against devnet
+│   ├── build-initramfs.sh          # builds the CH executor's guest initramfs
+│   ├── offer-index-demo.sh         # end-to-end: two nodes, claims, MCP discover
+│   ├── settlement-demo.sh          # end-to-end: node → signed receipt → settle
+│   ├── agent-smoke-test.sh         # Flatpak agent smoke test (7 checks)
+│   └── kata-setup.sh               # provisions fresh nodes for Kata backend
+├── docs/
+│   ├── DESIGN.md                   # link back to ROADMAP.md / SECURITY.md
+│   ├── CONSENT.md                  # consent & disclosure spec
+│   └── superpowers/                # specs + plans (historical; specs are canonical)
+└── .github/
+    └── workflows/
+        ├── ci.yml                  # fmt, clippy, test, audit, deny, build, rpm
+        ├── soak-devnet.yml         # hourly devnet soak (100 iters, parallel 3)
+        ├── reproducible-build.yml  # solana-verify reproducible build gate
+        └── release.yml             # Flatpak build, SHA256SUMS, release draft
 ```
 
 The workspace also hosts the post-v0 modules (`crates/executor`,
@@ -379,11 +416,22 @@ Tracked in **`ROADMAP.md`**, not here. Summary:
 - **Module 1 — Job isolation + accelerators** (`crates/executor`): Kata
   Containers on Cloud Hypervisor, VFIO GPU passthrough, MIG/vGPU, DCGM
   per-job metering. Extends v0's receipt with GPU-seconds, VRAM-GB-hours,
-  MIG profile.
+  MIG profile. Kata backend feature-gated behind `kata`; `scripts/kata-setup.sh`
+  provisions fresh nodes.
 - **Module 2 — Discovery + node API** (`crates/offer`, `crates/node-api`):
   signed machine-readable offers exposed via MCP; x402 `HTTP 402` payment
   flow for paid jobs; direct `HTTP 200` for `free` jobs. Inbound network
-  is feature-gated and stays off in v0's RPM.
+  is feature-gated and stays off in v0's RPM. Off-chain Solana payment
+  verification (`--rpc-url`) confirms transaction finalization, escrow
+  account involvement, and sufficient token transfer amount before running
+  paid jobs.
+- **Module 2a — Offer index** (`crates/offer-index`): central index of
+  signed offers with FCFS claims; node-enforced agent identity; MCP
+  `discover` tool with claim state. `scripts/offer-index-demo.sh` exercises
+  the full flow.
+- **Module 2d — Flatpak agent experience** (`crates/vtessera-gui`): dark
+  theme, auto-restart on settings toggle, `vtessera-mcp` installed in
+  Flatpak, agent smoke test (`scripts/agent-smoke-test.sh`).
 - **Module 3 — Settlement + attestation** (`crates/settlement`): verify
   Ed25519 receipts, aggregate per-device usage, compute completion
   fraction `f`. Non-TEE first; SEV-SNP/TDX after.
@@ -393,22 +441,22 @@ Tracked in **`ROADMAP.md`**, not here. Summary:
   transaction, on finalize the program splits by `f`: earned slice paid
   to the seller in the same stablecoin mint; unearned slice refunded to
   the buyer in the original stablecoin. **Sellers earn EURC/USDC — there
-  is no Vtessera token.**
+  is no Vtessera token.** Deployed on devnet; `tests/adversarial/`
+  provides fuzz + adversarial test coverage.
 - **Module 5 — Hardening + ops**: spool rotation, abuse handling,
   re-running `systemd-analyze security` on every new privileged
   component.
-- **Private/enterprise network mode** (`crates/vtesserad`):
+- **Private/enterprise network mode** (`crates/vtesserad`,
+  `crates/marketplace-server`, `crates/vtessera-config`):
   `mode = "private"` restricts to internal CIDRs, `[marketplace]` target
   selector (`public`/`internal`/`none`), key registry for Ed25519
-  authorization. New files: `cidr.rs`, `key_registry.rs`.
-- **Reference marketplace server** (`crates/marketplace-server`): Axum
-  HTTP server that receives and stores signed receipts from internal
-  nodes. JSON lines storage, Ed25519 signature verification, key
-  registry validation. Separate binary, own dep budget.
-- **Config wizard** (`crates/vtessera-config`): Interactive CLI that
-  generates valid TOML config + key registry for private/enterprise
-  deployments. Supports both interactive prompts and non-interactive
-  flag-based mode.
+  authorization. Files: `cidr.rs`, `key_registry.rs` in vtesserad;
+  `crates/marketplace-server` (Axum HTTP server for receipt store);
+  `crates/vtessera-config` (interactive config wizard).
+- **Soak testing** (`crates/devnet-demo`): `soak.rs` binary runs
+  end-to-end pay→settle→split flows against devnet with random parameters,
+  parallel workers, retry with exponential backoff, and summary statistics.
+  Uses `VTESSERA_PAYER` env var (locally) or `DEVNET_PAYER_KEYPAIR` (CI).
 
 Each module lands as its own crate with its own review and CI stanza.
 None expands `crates/vtesserad`'s attack surface.
