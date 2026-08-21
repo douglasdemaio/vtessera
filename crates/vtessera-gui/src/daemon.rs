@@ -52,6 +52,9 @@ pub struct StartOptions<'a> {
     /// `vtesserad` runs (metering only), and an already-serving node is
     /// neither spawned nor reused.
     pub spawn_node: bool,
+    /// `vtessera-node --publish <index-url>`: optional marketplace index
+    /// URL to register the node's offer with. None = no publishing.
+    pub publish: Option<String>,
 }
 
 /// Directory holding the built binaries, when set (local runs). In the
@@ -143,6 +146,9 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
             .args(["--backend", opts.backend])
             .args(["--key", opts.key_path.to_str().unwrap_or_default()])
             .args(["--state-dir", opts.state_dir.to_str().unwrap_or_default()]);
+        if let Some(url) = &opts.publish {
+            node_cmd.args(["--publish", url]);
+        }
         Some(
             node_cmd
                 .spawn()

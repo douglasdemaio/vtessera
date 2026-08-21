@@ -201,6 +201,72 @@ fn current_node_id() -> Option<String> {
     ))
 }
 
+/// Base58-encode a byte slice (Bitcoin alphabet).  Matches the
+/// implementation in `vtesserad::key_registry`.
+fn base58_encode(input: &[u8]) -> String {
+    assert!(
+        input.len() <= 32,
+        "base58_encode supports at most 32 bytes, got {}",
+        input.len()
+    );
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let headroom = 4;
+    let mut digits = vec![0u8; headroom + input.len() * 2];
+    let mut start = headroom;
+
+    for &byte in input {
+        let mut carry = byte as u16;
+        let mut j = digits.len() - 1;
+        while j >= start {
+            carry += (digits[j] as u16) << 8;
+            digits[j] = (carry % 58) as u8;
+            carry /= 58;
+            j -= 1;
+        }
+        while carry > 0 {
+            start -= 1;
+            digits[start] = (carry % 58) as u8;
+            carry /= 58;
+        }
+    }
+
+    while start < digits.len() && digits[start] == 0 {
+        start += 1;
+    }
+
+    let leading_ones = input.iter().take_while(|&&b| b == 0).count();
+    let mut result = String::with_capacity(leading_ones + digits.len() - start);
+    for _ in 0..leading_ones {
+        result.push(ALPHABET[0] as char);
+    }
+    for &d in &digits[start..] {
+        result.push(ALPHABET[d as usize] as char);
+    }
+    result
+}
+
+/// Auto-register the node's pubkey in the marketplace keys.toml so
+/// vtessera-node can publish its offer without manual key setup.
+fn register_node_in_marketplace(pubkey: &[u8; 32], node_id: &str) {
+    let keys_path = settings::state_dir().join("marketplace").join("keys.toml");
+    if let Err(e) = std::fs::create_dir_all(keys_path.parent().unwrap()) {
+        eprintln!("marketplace dir create: {e}");
+        return;
+    }
+    let b58 = base58_encode(pubkey);
+    if let Ok(existing) = std::fs::read_to_string(&keys_path) {
+        if existing.contains(&b58) {
+            return;
+        }
+    }
+    let entry = format!("\n[[keys]]\nname = \"{node_id}\"\npubkey = \"{b58}\"\n");
+    let mut content = std::fs::read_to_string(&keys_path).unwrap_or_default();
+    content.push_str(&entry);
+    if let Err(e) = std::fs::write(&keys_path, &content) {
+        eprintln!("marketplace keys write: {e}");
+    }
+}
+
 /// The three observable states (§2.3 of `docs/CONSENT.md`):
 /// **Off**, **Metering only** (vtesserad sampling; nothing accepts jobs),
 /// **Accepting jobs** (vtesserad + vtessera-node serving).
@@ -476,6 +542,11 @@ fn start_node(ui: &Ui, state: &NodeState) {
     }
 
     let node_id = vtessera_offer::derive_node_id(&key.verifying_key().to_bytes());
+
+    // Auto-register this node's pubkey in the marketplace key registry
+    // so vtessera-node can publish without manual keys.toml setup.
+    register_node_in_marketplace(&key.verifying_key().to_bytes(), &node_id);
+
     // Bind loopback to match the advertised endpoint (default
     // http://127.0.0.1:8402): the node has no TLS/auth and must not sit on
     // a routable interface. The node binary's `--bind` stays configurable.
@@ -493,6 +564,7 @@ fn start_node(ui: &Ui, state: &NodeState) {
         key_path: settings::key_path(),
         state_dir: settings::state_dir(),
         spawn_node: accepting,
+        publish: Some("http://127.0.0.1:8443".into()),
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,
