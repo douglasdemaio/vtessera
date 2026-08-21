@@ -4,7 +4,6 @@
 /// within any of a set of CIDR ranges. The executor crate has similar
 /// machinery for guest VM network policy; this is the same pattern without
 /// pulling in the `ipnet` crate.
-
 use std::fmt;
 
 /// A parsed IPv4 CIDR range: base address + prefix length.
@@ -30,10 +29,7 @@ impl IpNet {
             return Err(CidrError::InvalidPrefix(s.to_string()));
         }
 
-        Ok(IpNet {
-            addr,
-            prefix_len,
-        })
+        Ok(IpNet { addr, prefix_len })
     }
 
     /// Check whether an IPv4 address (as u32) falls within this CIDR.
@@ -96,7 +92,9 @@ pub enum CidrError {
 impl fmt::Display for CidrError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CidrError::InvalidFormat(s) => write!(f, "invalid CIDR format (expected x.x.x.x/N): {s}"),
+            CidrError::InvalidFormat(s) => {
+                write!(f, "invalid CIDR format (expected x.x.x.x/N): {s}")
+            }
             CidrError::InvalidAddress(s) => write!(f, "invalid IPv4 address: {s}"),
             CidrError::InvalidPrefix(s) => write!(f, "invalid prefix length: {s}"),
         }

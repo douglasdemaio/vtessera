@@ -45,10 +45,7 @@ storage_path = "/var/lib/vtessera/receipts.jsonl"
         let config = ServerConfig::load(f.path().to_str().unwrap()).unwrap();
         assert_eq!(config.listen_addr, "0.0.0.0:8443");
         assert_eq!(config.key_registry_path, "/etc/vtessera/keys.toml");
-        assert_eq!(
-            config.storage_path,
-            "/var/lib/vtessera/receipts.jsonl"
-        );
+        assert_eq!(config.storage_path, "/var/lib/vtessera/receipts.jsonl");
     }
 
     #[test]

@@ -3,7 +3,6 @@
 /// Used in private/enterprise mode (`require_internal_ca = true`) to
 /// validate that only known signing keys can submit receipts. The file
 /// format is simple: one `[[keys]]` entry per allowed key.
-
 use std::fs;
 use std::path::Path;
 
@@ -47,10 +46,7 @@ impl KeyRegistry {
         // Validate each key is a valid base58 string of the right length.
         for key in &file.keys {
             validate_pubkey(&key.pubkey).map_err(|e| {
-                ConfigError::Validation(format!(
-                    "key registry entry '{}': {e}",
-                    key.name
-                ))
+                ConfigError::Validation(format!("key registry entry '{}': {e}", key.name))
             })?;
         }
 
@@ -200,11 +196,7 @@ pubkey = "DjPi1hDRXJLkZajm2VVxSCvnN6hBZNQMLcHREGfVDqTj"
         let dir = std::env::temp_dir().join("vtessera_key_registry_test_short");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("keys.toml");
-        std::fs::write(
-            &path,
-            "[[keys]]\nname = \"bad\"\npubkey = \"short\"\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "[[keys]]\nname = \"bad\"\npubkey = \"short\"\n").unwrap();
 
         let result = KeyRegistry::load(&path);
         assert!(result.is_err());

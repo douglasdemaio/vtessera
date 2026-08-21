@@ -67,7 +67,10 @@ async fn health() -> Json<serde_json::Value> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let config_path = args.get(1).map(|s| s.as_str()).unwrap_or("marketplace-server.toml");
+    let config_path = args
+        .get(1)
+        .map(|s| s.as_str())
+        .unwrap_or("marketplace-server.toml");
 
     let config = ServerConfig::load(config_path)?;
     let registry = KeyRegistry::load(&config.key_registry_path)?;

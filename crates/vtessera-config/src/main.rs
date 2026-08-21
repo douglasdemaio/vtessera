@@ -5,13 +5,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Non-interactive mode: if all flags are provided, skip prompts.
-    let mode = get_arg(&args, "--mode").unwrap_or_else(|| prompt("Mode (public/private)", "public"));
-    let cidrs = get_arg(&args, "--cidrs").unwrap_or_else(|| {
-        prompt(
-            "Allowed CIDRs (comma-separated, e.g. 10.0.0.0/8)",
-            "",
-        )
-    });
+    let mode =
+        get_arg(&args, "--mode").unwrap_or_else(|| prompt("Mode (public/private)", "public"));
+    let cidrs = get_arg(&args, "--cidrs")
+        .unwrap_or_else(|| prompt("Allowed CIDRs (comma-separated, e.g. 10.0.0.0/8)", ""));
     let require_ca = get_arg(&args, "--require-ca").is_some()
         || prompt_yes_no("Require internal CA key registry?", false);
     let marketplace_target = get_arg(&args, "--marketplace-target")
@@ -126,10 +123,7 @@ fn validate_config(toml_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Validate marketplace target.
-    if let Some(target) = parsed
-        .get("marketplace")
-        .and_then(|m| m.get("target"))
-    {
+    if let Some(target) = parsed.get("marketplace").and_then(|m| m.get("target")) {
         let target_str = target.as_str().unwrap_or("");
         if target_str != "public" && target_str != "internal" && target_str != "none" {
             return Err(format!("invalid marketplace target: {target_str}").into());

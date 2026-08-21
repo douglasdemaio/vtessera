@@ -263,7 +263,6 @@ fn finalize_window(
 /// Route signed receipt submission based on marketplace target.
 #[cfg(feature = "submit")]
 fn route_submission(cfg: &config::Config, signed: &receipt::SignedReceipt) {
-
     let endpoint = match cfg.marketplace.target.as_str() {
         "none" => {
             eprintln!("marketplace.target=none, receipt spooled locally");

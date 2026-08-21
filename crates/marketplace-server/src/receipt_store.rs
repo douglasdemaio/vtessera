@@ -185,15 +185,10 @@ impl ReceiptStore {
     ///
     /// Validates the signature against the key registry, checks for
     /// duplicates, and appends to the JSON lines file.
-    pub fn store(
-        &self,
-        sr: &SignedReceipt,
-        registry: &KeyRegistry,
-    ) -> Result<String, StoreError> {
+    pub fn store(&self, sr: &SignedReceipt, registry: &KeyRegistry) -> Result<String, StoreError> {
         // Validate signature.
-        let pubkey_bytes = hex::decode(&sr.pubkey).map_err(|e| {
-            StoreError::Io(io::Error::new(io::ErrorKind::InvalidData, e))
-        })?;
+        let pubkey_bytes = hex::decode(&sr.pubkey)
+            .map_err(|e| StoreError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
         if pubkey_bytes.len() != 32 {
             return Err(StoreError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -208,13 +203,11 @@ impl ReceiptStore {
         // Verify Ed25519 signature.
         let mut pubkey_arr = [0u8; 32];
         pubkey_arr.copy_from_slice(&pubkey_bytes);
-        let verifying_key = VerifyingKey::from_bytes(&pubkey_arr).map_err(|e| {
-            StoreError::Io(io::Error::new(io::ErrorKind::InvalidData, e))
-        })?;
+        let verifying_key = VerifyingKey::from_bytes(&pubkey_arr)
+            .map_err(|e| StoreError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
 
-        let sig_bytes = hex::decode(&sr.sig).map_err(|e| {
-            StoreError::Io(io::Error::new(io::ErrorKind::InvalidData, e))
-        })?;
+        let sig_bytes = hex::decode(&sr.sig)
+            .map_err(|e| StoreError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
         if sig_bytes.len() != 64 {
             return Err(StoreError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -244,9 +237,8 @@ impl ReceiptStore {
 
         // Append to file.
         let id = Uuid::new_v4().to_string();
-        let line = serde_json::to_string(sr).map_err(|e| {
-            StoreError::Io(io::Error::new(io::ErrorKind::InvalidData, e))
-        })?;
+        let line = serde_json::to_string(sr)
+            .map_err(|e| StoreError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
 
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -372,7 +364,7 @@ mod tests {
                 },
             },
             pubkey: "aabbccdd".repeat(8), // dummy hex
-            sig: "11223344".repeat(16),    // dummy hex
+            sig: "11223344".repeat(16),   // dummy hex
         }
     }
 

@@ -182,7 +182,8 @@ impl Config {
                     "internal" => {
                         if self.marketplace.endpoint.is_none() {
                             return Err(ConfigError::Validation(
-                                "marketplace.target = \"internal\" requires marketplace.endpoint".into(),
+                                "marketplace.target = \"internal\" requires marketplace.endpoint"
+                                    .into(),
                             ));
                         }
                     }
@@ -194,9 +195,8 @@ impl Config {
                     }
                 }
                 // Validate CIDR entries.
-                cidr::parse_cidr_list(&self.network.allowed_cidrs).map_err(|e| {
-                    ConfigError::Validation(format!("network.allowed_cidrs: {e}"))
-                })?;
+                cidr::parse_cidr_list(&self.network.allowed_cidrs)
+                    .map_err(|e| ConfigError::Validation(format!("network.allowed_cidrs: {e}")))?;
                 // Validate key registry if required.
                 if self.network.require_internal_ca {
                     match &self.network.key_registry_path {
