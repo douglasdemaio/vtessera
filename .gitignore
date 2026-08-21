@@ -8,3 +8,8 @@
 # the program is deployed to. Treat as a credential — never commit.
 programs/target/deploy/*-keypair.json
 .superpowers/
+
+# Flatpak build artifacts
+repo/
+builddir/
+.flatpak-builder/
