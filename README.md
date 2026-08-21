@@ -364,6 +364,86 @@ missing receipt is transient and retried next sweep. The escrow program
 scripts/settlement-demo.sh   # end-to-end: node → signed receipt → settle
 ```
 
+## For agents
+
+The node serves an HTTP API on `127.0.0.1:8402` (default). An agent
+installing the Flatpak gets a running node with no extra setup — just
+toggle "Accept workloads from others" in the GUI.
+
+### Endpoints
+
+| Method | Path | What it does |
+| ------ | ---- | ------------ |
+| `GET` | `/healthz` | Returns `ok` if the node is alive |
+| `GET` | `/offer` | Returns the signed machine-readable offer (JSON) |
+| `GET` | `/.well-known/agent.json` | A2A agent card |
+| `POST` | `/mcp` | MCP 2.24-11-05 JSON-RPC (tools: `discover`, `submit_job`) |
+| `POST` | `/jobs` | Submit a job (HTTP API) |
+| `GET` | `/jobs/<job_id>` | Get job status |
+
+### Submit a free job (curl)
+
+```bash
+curl -X POST http://127.0.0.1:8402/jobs \
+  -H 'Content-Type: application/json' \
+  -H 'x-agent-id: my-agent' \
+  -d '{
+    "job_id": "test-001",
+    "image": "busybox",
+    "command": ["echo", "hello from agent"],
+    "env": [],
+    "devices": {"class": {"kind": "cpu"}, "vcpus": 1, "mem_kb": 65536, "min_vram_mb": 0},
+    "network": "none",
+    "max_duration_secs": 60
+  }'
+```
+
+On a free node, this returns `200` with the job result. On a paid node,
+it returns `402` with x402 payment terms.
+
+### Submit a job via MCP
+
+```bash
+# Discover available nodes
+curl -X POST http://127.0.0.1:8402/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"discover","arguments":{}}}'
+
+# Submit a job
+curl -X POST http://127.0.0.1:8402/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"submit_job","arguments":{"job_id":"test-002","image":"busybox","command":["echo","hello"],"vcpus":1,"mem_kb":65536}}}'
+```
+
+Or use the stdio MCP binary directly (from the Flatpak or a local build):
+
+```bash
+flatpak run --command=vtessera-mcp io.github.douglasdemaio.Vtessera
+```
+
+### Node discovery
+
+The node publishes to a central index when started with `--publish`:
+
+```bash
+# Agent: find available nodes
+curl http://127.0.0.1:8403/offers?available=1
+
+# Agent: claim a node (FCFS, 60s lease)
+curl -X POST http://127.0.0.1:8403/offers/<node_id>/claim \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id":"my-agent"}'
+```
+
+See `scripts/offer-index-demo.sh` for a full end-to-end demo with
+two nodes, claims, and MCP discovery.
+
+### Paid jobs (x402)
+
+For paid nodes, the agent must pay via x402 — the node returns `402`
+with payment terms, the agent signs a stablecoin transfer, and retries.
+See `scripts/x402-demo.sh` for a working example against devnet.
+
 ## Install as a systemd service
 
 The shipped unit is hardened (DynamicUser, ProtectSystem=strict, no

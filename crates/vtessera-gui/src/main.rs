@@ -888,18 +888,36 @@ fn build_ui(app: &gtk4::Application) {
     window.set_child(Some(&notebook));
 
     // ---- Wiring ----------------------------------------------------------
-    ui.free_btn.connect_toggled({
-        let ui = ui.clone();
-        move |_| ui.sync_mode_sensitivity()
-    });
-    ui.paid_btn.connect_toggled({
-        let ui = ui.clone();
-        move |_| ui.sync_mode_sensitivity()
-    });
-
     let state = Rc::new(NodeState {
         daemons: Rc::new(RefCell::new(None)),
         log_pending: log_pending.clone(),
+    });
+
+    ui.free_btn.connect_toggled({
+        let ui = ui.clone();
+        let state = state.clone();
+        move |_| {
+            ui.sync_mode_sensitivity();
+            let running = state.daemons.borrow().is_some();
+            if running {
+                ui.log_line("Mode changed — restarting node to apply...");
+                stop_node(&ui, &state);
+                start_node(&ui, &state);
+            }
+        }
+    });
+    ui.paid_btn.connect_toggled({
+        let ui = ui.clone();
+        let state = state.clone();
+        move |_| {
+            ui.sync_mode_sensitivity();
+            let running = state.daemons.borrow().is_some();
+            if running {
+                ui.log_line("Mode changed — restarting node to apply...");
+                stop_node(&ui, &state);
+                start_node(&ui, &state);
+            }
+        }
     });
 
     // The second consent gate (§2.2) is a persisted, explicit switch. OFF by
@@ -912,11 +930,6 @@ fn build_ui(app: &gtk4::Application) {
             let prev = ui.settings.borrow().accept_workloads;
             if on != prev {
                 let running = state.daemons.borrow().is_some();
-                if running {
-                    ui.log_line(
-                        "Accept workloads: change takes effect on the next Start (Stop then Start)",
-                    );
-                }
                 ui.log_line(if on {
                     "Accept workloads from others: ON — jobs run on this machine without a sandbox"
                 } else {
@@ -924,6 +937,11 @@ fn build_ui(app: &gtk4::Application) {
                 });
                 ui.settings.borrow_mut().accept_workloads = on;
                 let _ = ui.settings.borrow().save(&settings::settings_path());
+                if running {
+                    ui.log_line("Restarting node to apply change...");
+                    stop_node(&ui, &state);
+                    start_node(&ui, &state);
+                }
             }
         }
     });

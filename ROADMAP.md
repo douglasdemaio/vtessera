@@ -231,6 +231,26 @@ claimed by someone else (409), and fails closed (503) if its index is
 unreachable. The MCP `discover` tool lists current offers with claim
 state. `scripts/offer-index-demo.sh` exercises the whole flow end to end.
 
+### 2d. Flatpak agent experience *(gaps — found 2026-08-21)*
+
+The Flatpak (`io.github.douglasdemaio.Vtessera`) is the primary
+distribution channel. An agent installing it should be able to discover
+the node, submit a job, and get results. Tested end-to-end on 2026-08-21;
+the following gaps prevent agents from using the Flatpak out of the box:
+
+| Gap | Impact | Fix |
+| --- | --- | --- |
+| `vtessera-mcp` not installed in Flatpak | Agents speaking MCP can't use the Flatpak's MCP server; they must discover the HTTP API and speak raw JSON-RPC | Add `vtessera-mcp` to the Flatpak manifest's install step |
+| Default mode is `paid` | First-time agent immediately hits HTTP 402 with no guidance on how to pay; no free fallback for smoke tests | Default to `free` on first run, or add a first-run wizard in the GUI that asks |
+| No agent CLI entry point | Agent must manually `curl` with hand-crafted JSON; no `flatpak run ... --agent-submit job.json` | Add a CLI flag or a `vtessera-agent` helper that wraps the HTTP API |
+| Config changes require kill/restart | Editing `settings.toml` doesn't propagate to the running node; GUI doesn't restart the node | GUI should restart the node when settings change, or the node should watch the config file |
+| No localhost discovery | Agent must know the port (8402); no mDNS, no `/well-known` auto-discovery | Add mDNS registration or a well-known endpoint on localhost |
+| No "For Agents" documentation | README has no section telling agents how to interact with the Flatpak | Add a section with the curl recipe and MCP instructions |
+
+**Priority:** these are UX gaps, not security or correctness issues. The
+node works; the agent just can't find it or talk to it without
+hand-rolling HTTP requests. Fix before any agent-facing demo or launch.
+
 ### 2b. Paying (or not) — x402
 
 For **paid** compute, use **x402**, the open HTTP-native standard for

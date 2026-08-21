@@ -72,7 +72,7 @@ fn default_backend() -> String {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            mode: "paid".into(),
+            mode: "free".into(),
             currency: "eurc".into(),
             price_per_cpu_hour: 0.05,
             payout_id: String::new(),
@@ -289,7 +289,7 @@ mod tests {
         let dir = std::env::temp_dir().join("vtessera_gui_settings_missing");
         let _ = std::fs::remove_dir_all(&dir);
         let s = Settings::load_or_default(&dir.join("nope.toml"));
-        assert_eq!(s.mode, "paid");
+        assert_eq!(s.mode, "free");
         assert_eq!(s.port, DEFAULT_PORT);
         assert_eq!(s.backend, DEFAULT_BACKEND);
         // Fresh installs start without consent and with workloads off.
