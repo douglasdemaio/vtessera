@@ -501,8 +501,37 @@ struct TransactionData {
 
 #[derive(serde::Deserialize)]
 struct TransactionMessage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_account_keys", rename = "accountKeys")]
     account_keys: Vec<String>,
+}
+
+fn deserialize_account_keys<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum AccountKey {
+        Simple(String),
+        Detailed {
+            pubkey: String,
+            #[serde(default)]
+            signer: bool,
+            #[serde(default)]
+            writable: bool,
+        },
+    }
+
+    let keys: Vec<AccountKey> = de::Deserialize::deserialize(deserializer)?;
+    Ok(keys
+        .into_iter()
+        .map(|k| match k {
+            AccountKey::Simple(s) => s,
+            AccountKey::Detailed { pubkey, .. } => pubkey,
+        })
+        .collect())
 }
 
 #[derive(serde::Deserialize)]

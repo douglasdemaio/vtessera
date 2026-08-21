@@ -85,6 +85,7 @@ struct FinalizeProRataArgs {
 
 struct HttpResponse {
     status: u16,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -206,7 +207,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 2. POST /jobs → 402 x402 challenge -----------------------------
     println!("\n--- 2. POST {}/jobs (no payment proof) ---", args.node);
-    let chall_resp = http_request(&args.node, "POST", "/jobs", &[], b"")?;
+    // Build a minimal job spec so the node can parse the body.
+    let job_id_hex = {
+        let mut h = Sha256::new();
+        h.update(payer.pubkey().as_ref());
+        h.update(format!("{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()));
+        hex_string(h.finalize().as_slice())
+    };
+    let job_spec = format!(
+        "{{\"job_id\":\"{}\",\"image\":\"busybox\",\"command\":[\"echo\",\"x402 test\"],\
+         \"env\":[],\"devices\":{{\"class\":{{\"kind\":\"cpu\"}},\"vcpus\":1,\"mem_kb\":65536,\"min_vram_mb\":0}},\
+         \"network\":\"none\",\"max_duration_secs\":{}}}",
+        job_id_hex, args.seconds
+    );
+    let chall_resp = http_request(&args.node, "POST", "/jobs", &[], job_spec.as_bytes())?;
     if chall_resp.status != 402 {
         return Err(format!("expected 402, got {}", chall_resp.status).into());
     }
@@ -429,6 +446,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    // Wait for the transaction to finalize (devnet can take 30+ seconds).
+    println!("waiting for transaction to finalize...");
+    let pay_sig_parsed = solana_sdk::signature::Signature::from_str(&pay_sig)?;
+    for attempt in 1..=30 {
+        let statuses = rpc.get_signature_statuses(&[pay_sig_parsed])?;
+        if let Some(Some(status)) = statuses.value.first() {
+            if status.err.is_some() {
+                return Err("pay_for_compute tx failed on-chain".into());
+            }
+            let confirmed = format!("{:?}", status.confirmation_status);
+            if confirmed.contains("Finalized") {
+                println!("  finalized after {attempt} attempts");
+                break;
+            } else if attempt == 30 {
+                return Err(format!("transaction did not finalize in time, status: {confirmed}").into());
+            } else {
+                if attempt % 5 == 0 {
+                    println!("  status: {confirmed} (waiting...)");
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        } else {
+            if attempt == 30 {
+                return Err("transaction signature not found".into());
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+
     // --- 4. Retry POST /jobs with the x-payment proof -------------------
     println!("\n--- 4. POST {}/jobs with x-payment proof ---", args.node);
     let proof = format!(
@@ -443,24 +489,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "POST",
         "/jobs",
         &[("x-payment", &proof)],
-        b"",
+        job_spec.as_bytes(),
     )?;
     println!("POST /jobs → {} (proof submitted)", accept_resp.status);
     let accept_body = String::from_utf8(accept_resp.body)?;
     if !accept_body.is_empty() {
         println!("  body: {accept_body}");
     }
+    if let Some((_, err)) = accept_resp.headers.iter().find(|(k, _)| k == "x-payment-error") {
+        println!("  payment error: {err}");
+    }
     match accept_resp.status {
-        // v0 is honest: no executor/verifier is wired, so the node refuses
-        // rather than claim a job is running. The payment is still safely
-        // in the escrow — step 5 releases it.
+        200 => println!(
+            "  (paid job accepted and executed — full x402 flow succeeded)"
+        ),
         501 => println!(
             "  (expected in v0: execution is not wired, so the node refuses. \
              The payment is in the escrow; finalize releases it.)"
         ),
         other => {
             return Err(format!(
-                "expected the node to refuse with 501, got {other} — is vtessera-node up to date?"
+                "expected 200 or 501, got {other} — is vtessera-node up to date?"
             )
             .into());
         }
@@ -566,6 +615,7 @@ fn http_request(
         .map_err(|e: std::num::ParseIntError| format!("bad status: {e}"))?;
 
     let mut content_length: usize = 0;
+    let mut resp_headers: Vec<(String, String)> = Vec::new();
     loop {
         let mut line = String::new();
         let n = reader
@@ -580,8 +630,12 @@ fn http_request(
         }
         if let Some(idx) = trimmed.find(':') {
             let (k, v) = trimmed.split_at(idx);
-            if k.trim().eq_ignore_ascii_case("content-length") {
-                content_length = v[1..].trim().parse().unwrap_or(0);
+            let k = k.trim().to_string();
+            let v = v[1..].trim().to_string();
+            if k.eq_ignore_ascii_case("content-length") {
+                content_length = v.parse().unwrap_or(0);
+            } else {
+                resp_headers.push((k, v));
             }
         }
     }
@@ -594,6 +648,7 @@ fn http_request(
     }
     Ok(HttpResponse {
         status,
+        headers: resp_headers,
         body: body_out,
     })
 }
