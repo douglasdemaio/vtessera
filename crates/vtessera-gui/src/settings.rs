@@ -72,7 +72,7 @@ fn default_backend() -> String {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            mode: "paid".into(),
+            mode: "free".into(),
             currency: "eurc".into(),
             price_per_cpu_hour: 0.05,
             payout_id: String::new(),
