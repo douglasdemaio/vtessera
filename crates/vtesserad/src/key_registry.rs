@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 /// Key registry — TOML file listing allowed Ed25519 public keys.
 ///
 /// Used in private/enterprise mode (`require_internal_ca = true`) to

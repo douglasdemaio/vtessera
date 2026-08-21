@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 /// Hand-rolled CIDR parser — no new dependencies (BUILD.md §1.3).
 ///
 /// Parses `x.x.x.x/N` notation and checks whether an IPv4 address falls
@@ -83,6 +84,7 @@ pub fn parse_cidr_list(ss: &[String]) -> Result<Vec<IpNet>, CidrError> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum CidrError {
     InvalidFormat(String),
     InvalidAddress(String),
@@ -158,7 +160,7 @@ mod tests {
 
     #[test]
     fn ip_in_cidrs_match() {
-        let cidrs = parse_cidr_list(&vec!["10.0.0.0/8".into(), "172.16.0.0/12".into()]).unwrap();
+        let cidrs = parse_cidr_list(&["10.0.0.0/8".into(), "172.16.0.0/12".into()]).unwrap();
         assert!(ip_in_cidrs("10.1.2.3", &cidrs));
         assert!(ip_in_cidrs("172.16.0.1", &cidrs));
         assert!(!ip_in_cidrs("192.168.1.1", &cidrs));
@@ -166,13 +168,13 @@ mod tests {
 
     #[test]
     fn parse_multiple_cidrs() {
-        let cidrs = parse_cidr_list(&vec!["10.0.0.0/8".into(), "192.168.0.0/16".into()]).unwrap();
+        let cidrs = parse_cidr_list(&["10.0.0.0/8".into(), "192.168.0.0/16".into()]).unwrap();
         assert_eq!(cidrs.len(), 2);
     }
 
     #[test]
     fn parse_rejects_invalid_in_list() {
-        let err = parse_cidr_list(&vec!["10.0.0.0/8".into(), "bad".into()]).unwrap_err();
+        let err = parse_cidr_list(&["10.0.0.0/8".into(), "bad".into()]).unwrap_err();
         assert!(matches!(err, CidrError::InvalidFormat(_)));
     }
 }
