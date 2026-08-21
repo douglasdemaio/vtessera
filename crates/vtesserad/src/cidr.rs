@@ -30,6 +30,14 @@ impl IpNet {
             return Err(CidrError::InvalidPrefix(s.to_string()));
         }
 
+        // Mask the address to the prefix length so stored addr is the network address.
+        let mask = if prefix_len == 0 {
+            0u32
+        } else {
+            !0u32 << (32 - prefix_len)
+        };
+        let addr = addr & mask;
+
         Ok(IpNet { addr, prefix_len })
     }
 

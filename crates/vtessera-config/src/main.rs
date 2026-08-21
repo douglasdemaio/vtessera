@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cidrs = get_arg(&args, "--cidrs")
         .unwrap_or_else(|| prompt("Allowed CIDRs (comma-separated, e.g. 10.0.0.0/8)", ""));
     let require_ca = get_arg(&args, "--require-ca").is_some()
-        || prompt_yes_no("Require internal CA key registry?", false);
+        || prompt_yes_no("Require internal CA key registry?", false)?;
     let marketplace_target = get_arg(&args, "--marketplace-target")
         .unwrap_or_else(|| prompt("Marketplace target (public/internal/none)", "public"));
     let marketplace_endpoint = if marketplace_target == "none" {
@@ -98,17 +98,16 @@ fn prompt(message: &str, default: &str) -> String {
         .default(default.to_string())
         .allow_empty(default.is_empty())
         .interact_text()
-        .unwrap_or_default()
+        .unwrap_or(default.to_string())
 }
 
-fn prompt_yes_no(message: &str, default: bool) -> bool {
+fn prompt_yes_no(message: &str, default: bool) -> Result<bool, Box<dyn std::error::Error>> {
     let default_str = if default { "y" } else { "n" };
     let input: String = Input::new()
         .with_prompt(message)
         .default(default_str.to_string())
-        .interact_text()
-        .unwrap_or(default_str.to_string());
-    input.to_lowercase().starts_with('y')
+        .interact_text()?;
+    Ok(input.to_lowercase().starts_with('y'))
 }
 
 fn validate_config(toml_str: &str) -> Result<(), Box<dyn std::error::Error>> {

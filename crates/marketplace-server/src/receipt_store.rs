@@ -219,7 +219,7 @@ impl ReceiptStore {
         let signature = Signature::from_bytes(&sig_arr);
 
         // Canonical bytes for verification (must match vtesserad's format).
-        let canonical = canonical_bytes(&sr.receipt);
+        let canonical = canonical_bytes(&sr.receipt)?;
         verifying_key
             .verify_strict(&canonical, &signature)
             .map_err(|e| {
@@ -316,7 +316,7 @@ impl ReceiptStore {
 }
 
 /// Canonical serialization of a receipt for signing (must match vtesserad's format).
-fn canonical_bytes(r: &Receipt) -> Vec<u8> {
+fn canonical_bytes(r: &Receipt) -> Result<Vec<u8>, StoreError> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&r.schema_ver.to_le_bytes());
 
@@ -332,14 +332,19 @@ fn canonical_bytes(r: &Receipt) -> Vec<u8> {
     buf.extend_from_slice(&r.window_end.to_le_bytes());
 
     // samples_digest is hex-encoded; decode to bytes.
-    let digest_bytes = hex::decode(&r.samples_digest).unwrap_or_default();
+    let digest_bytes = hex::decode(&r.samples_digest).map_err(|e| {
+        StoreError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid samples_digest hex: {e}"),
+        ))
+    })?;
     buf.extend_from_slice(&digest_bytes);
 
     buf.extend_from_slice(&r.totals.cpu_pct_avg.to_le_bytes());
     buf.extend_from_slice(&r.totals.mem_used_kb_avg.to_le_bytes());
     buf.extend_from_slice(&r.totals.disk_free_kb_avg.to_le_bytes());
     buf.extend_from_slice(&r.totals.sample_count.to_le_bytes());
-    buf
+    Ok(buf)
 }
 
 #[cfg(test)]
