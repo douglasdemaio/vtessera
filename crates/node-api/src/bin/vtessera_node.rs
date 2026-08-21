@@ -521,10 +521,10 @@ where
         Simple(String),
         Detailed {
             pubkey: String,
-            #[serde(default)]
-            signer: bool,
-            #[serde(default)]
-            writable: bool,
+            #[serde(default, rename = "signer")]
+            _signer: bool,
+            #[serde(default, rename = "writable")]
+            _writable: bool,
         },
     }
 
