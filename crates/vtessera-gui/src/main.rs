@@ -73,6 +73,8 @@ struct Ui {
     total_val: gtk4::Label,
     earnings_val: gtk4::Label,
     avgcpu_val: gtk4::Label,
+    // Dashboard: last job indicator
+    last_job_label: gtk4::Label,
 }
 
 /// Mutable node runtime state.
@@ -284,6 +286,11 @@ fn refresh_dashboard(ui: &Ui) {
 }
 
 /// Read job receipts and populate the jobs table + summary bar.
+///
+/// Handles both `SignedJobReceipt` (from vtessera-node, with
+/// `receipt.metering.cpu_seconds` / `receipt.metering.peak_mem_kb`) and
+/// legacy vtesserad window-receipts (with
+/// `receipt.totals.cpu_pct_avg` / `receipt.totals.mem_used_kb_avg`).
 fn refresh_jobs_table(ui: &Ui) {
     use std::time::SystemTime;
 
@@ -291,20 +298,21 @@ fn refresh_jobs_table(ui: &Ui) {
     let now = SystemTime::now();
 
     #[derive(serde::Deserialize)]
-    struct ReceiptTotals {
-        cpu_pct_avg: f64,
-        mem_used_kb_avg: u64,
+    struct Metering {
+        cpu_seconds: f64,
+        peak_mem_kb: u64,
+        elapsed_secs: u64,
     }
     #[derive(serde::Deserialize)]
-    struct ReceiptInner {
-        totals: ReceiptTotals,
+    struct JobReceiptInner {
+        metering: Metering,
     }
     #[derive(serde::Deserialize)]
-    struct JobReceipt {
-        receipt: ReceiptInner,
+    struct SignedJobReceipt {
+        receipt: JobReceiptInner,
     }
 
-    let mut jobs: Vec<(u64, String, f64, u64)> = Vec::new();
+    let mut jobs: Vec<(u64, String, f64, u64, u64)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for entry in rd.flatten() {
             let path = entry.path();
@@ -321,15 +329,17 @@ fn refresh_jobs_table(ui: &Ui) {
                     .to_string_lossy()
                     .into_owned();
                 if let Ok(raw) = std::fs::read_to_string(&path) {
-                    if let Ok(job) = serde_json::from_str::<JobReceipt>(&raw) {
-                        jobs.push((
-                            age,
-                            name,
-                            job.receipt.totals.cpu_pct_avg,
-                            job.receipt.totals.mem_used_kb_avg,
-                        ));
+                    if let Ok(job) = serde_json::from_str::<SignedJobReceipt>(&raw) {
+                        let m = &job.receipt.metering;
+                        // Convert cpu_seconds to approximate CPU% using elapsed_secs.
+                        let cpu_pct = if m.elapsed_secs > 0 {
+                            (m.cpu_seconds / m.elapsed_secs as f64 * 100.0).min(100.0)
+                        } else {
+                            0.0
+                        };
+                        jobs.push((age, name, cpu_pct, m.peak_mem_kb, m.elapsed_secs));
                     } else {
-                        jobs.push((age, name, 0.0, 0));
+                        jobs.push((age, name, 0.0, 0, 0));
                     }
                 }
             }
@@ -347,7 +357,28 @@ fn refresh_jobs_table(ui: &Ui) {
     ui.total_val.set_text(&format!("{}", total));
     ui.avgcpu_val.set_text(&format!("{:.1}%", avg_cpu));
     // Earnings — placeholder since v0 receipts don't carry price info.
-    ui.earnings_val.set_text("—");
+    ui.earnings_val.set_text("\u{2014}");
+
+    // Last job indicator — show the age of the most recent receipt.
+    if let Some((age, name, _, _, _)) = jobs.last() {
+        let short_id = name
+            .trim_end_matches(".json")
+            .chars()
+            .take(12)
+            .collect::<String>();
+        let stamp = if *age == u64::MAX {
+            "unknown".to_string()
+        } else if *age < 60 {
+            format!("{}s ago — {}", age, short_id)
+        } else if *age < 3600 {
+            format!("{}m ago — {}", age / 60, short_id)
+        } else {
+            format!("{}h ago — {}", age / 3600, short_id)
+        };
+        ui.last_job_label.set_text(&stamp);
+    } else {
+        ui.last_job_label.set_text("No jobs yet");
+    }
 
     // Clear old rows.
     while let Some(child) = ui.jobs_list.first_child() {
@@ -355,7 +386,7 @@ fn refresh_jobs_table(ui: &Ui) {
     }
 
     // Add rows.
-    for (age, name, cpu, mem_kb) in jobs.into_iter().take(50) {
+    for (age, name, cpu, mem_kb, _elapsed) in jobs.into_iter().rev().take(50) {
         let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         row.add_css_class("job-table-row");
 
@@ -576,6 +607,10 @@ fn build_ui(app: &gtk4::Application) {
     let (cpu_card, cpu_value, cpu_fill) = make_card_with_bar("CPU", "cpu-accent");
     let (mem_card, mem_value, mem_fill) = make_card_with_bar("MEMORY", "mem-accent");
 
+    // Last-job indicator card — spans full width below the 2×2 grid.
+    let last_job_card = make_card("LAST JOB");
+    let last_job_label = last_job_card.2.clone();
+
     // Create jobs page widgets before Ui init.
     fn make_summary(label: &str) -> (gtk4::Box, gtk4::Label) {
         let col = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
@@ -635,6 +670,7 @@ fn build_ui(app: &gtk4::Application) {
         total_val,
         earnings_val,
         avgcpu_val,
+        last_job_label,
     });
 
     // ---- Settings page ---------------------------------------------------
@@ -803,6 +839,7 @@ fn build_ui(app: &gtk4::Application) {
     dashboard_grid.attach(&nodeid_card, 1, 0, 1, 1);
     dashboard_grid.attach(&cpu_card, 0, 1, 1, 1);
     dashboard_grid.attach(&mem_card, 1, 1, 1, 1);
+    dashboard_grid.attach(&last_job_card.0, 0, 2, 2, 1);
 
     dashboard_page.append(&dashboard_grid);
 
