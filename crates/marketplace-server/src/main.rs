@@ -5,6 +5,7 @@ use axum::Router;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tower_http::limit::RequestBodyLimitLayer;
 
 mod config;
 mod receipt_store;
@@ -81,7 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/v1/receipts", post(submit_receipt).get(list_receipts))
         .route("/api/v1/health", get(health))
-        .with_state(state);
+        .with_state(state)
+        .layer(RequestBodyLimitLayer::new(1024 * 1024)); // 1 MiB
 
     let listener = TcpListener::bind(&config.listen_addr).await?;
     println!("marketplace-server listening on {}", config.listen_addr);

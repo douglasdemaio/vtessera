@@ -81,14 +81,6 @@ fn validate_pubkey(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("public key must not be empty".into());
     }
-    // Ed25519 public keys are 32 bytes. Base58 encoding of 32 bytes
-    // produces 43-44 characters.
-    if s.len() < 43 || s.len() > 44 {
-        return Err(format!(
-            "public key must be 43-44 base58 chars (32 bytes), got {}",
-            s.len()
-        ));
-    }
     const BASE58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     for c in s.bytes() {
         if !BASE58_ALPHABET.contains(&c) {
@@ -98,15 +90,66 @@ fn validate_pubkey(s: &str) -> Result<(), String> {
             ));
         }
     }
+    // Decode and verify it produces exactly 32 bytes (Ed25519 public key).
+    let bytes = base58_decode(s).map_err(|e| format!("invalid base58 key: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "public key must decode to 32 bytes, got {}",
+            bytes.len()
+        ));
+    }
     Ok(())
+}
+
+/// Minimal base58 decoder (Bitcoin alphabet). No external deps.
+fn base58_decode(input: &str) -> Result<Vec<u8>, String> {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    let leading_ones = input.bytes().take_while(|&b| b == b'1').count();
+
+    let mut digits: Vec<u64> = Vec::new();
+    for &byte in input.as_bytes() {
+        let pos = ALPHABET
+            .iter()
+            .position(|&b| b == byte)
+            .ok_or_else(|| format!("invalid base58 character: {}", byte as char))?;
+        digits.push(pos as u64);
+    }
+
+    let mut result: Vec<u8> = Vec::new();
+    for &digit in &digits {
+        let mut carry = digit;
+        for r in result.iter_mut() {
+            let val = (*r as u64) * 58 + carry;
+            *r = (val & 0xff) as u8;
+            carry = val >> 8;
+        }
+        while carry > 0 {
+            result.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+
+    result.reverse();
+
+    let mut output = vec![0u8; leading_ones];
+    output.append(&mut result);
+    Ok(output)
 }
 
 /// Minimal base58 encoder for 32-byte public keys. No external deps.
 fn base58_encode(input: &[u8]) -> String {
+    assert!(
+        input.len() <= 32,
+        "base58_encode supports at most 32 bytes, got {}",
+        input.len()
+    );
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let mut digits = vec![0u8; input.len() * 2]; // upper bound
+    // Extra headroom at front for carry propagation.
+    let headroom = 4;
+    let mut digits = vec![0u8; headroom + input.len() * 2];
     let mut carry: u16;
-    let mut start = 0;
+    let mut start = headroom;
 
     for &byte in input {
         carry = byte as u16;
@@ -144,12 +187,12 @@ fn base58_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn load_valid_registry() {
-        let dir = std::env::temp_dir().join("vtessera_key_registry_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("keys.toml");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keys.toml");
         std::fs::write(
             &path,
             r#"
@@ -169,8 +212,6 @@ pubkey = "DjPi1hDRXJLkZajm2VVxSCvnN6hBZNQMLcHREGfVDqTj"
         assert!(registry.contains_str("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"));
         assert!(registry.contains_str("DjPi1hDRXJLkZajm2VVxSCvnN6hBZNQMLcHREGfVDqTj"));
         assert!(!registry.contains_str("3Kz8Abmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"));
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -181,37 +222,29 @@ pubkey = "DjPi1hDRXJLkZajm2VVxSCvnN6hBZNQMLcHREGfVDqTj"
 
     #[test]
     fn load_invalid_toml() {
-        let dir = std::env::temp_dir().join("vtessera_key_registry_test_invalid");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("keys.toml");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keys.toml");
         std::fs::write(&path, "not valid toml {{{").unwrap();
 
         let result = KeyRegistry::load(&path);
         assert!(result.is_err());
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn reject_short_pubkey() {
-        let dir = std::env::temp_dir().join("vtessera_key_registry_test_short");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("keys.toml");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keys.toml");
         std::fs::write(&path, "[[keys]]\nname = \"bad\"\npubkey = \"short\"\n").unwrap();
 
         let result = KeyRegistry::load(&path);
         assert!(result.is_err());
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn contains_works_with_real_key() {
-        // A known Solana pubkey shape (33 chars base58 = 32 bytes).
         let key_b58 = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
-        let dir = std::env::temp_dir().join("vtessera_key_registry_test_real");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("keys.toml");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keys.toml");
         std::fs::write(
             &path,
             format!("[[keys]]\nname = \"test\"\npubkey = \"{key_b58}\"\n"),
@@ -221,7 +254,29 @@ pubkey = "DjPi1hDRXJLkZajm2VVxSCvnN6hBZNQMLcHREGfVDqTj"
         let registry = KeyRegistry::load(&path).unwrap();
         assert!(registry.contains_str(key_b58));
         assert!(!registry.contains_str("7Xf9Bbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"));
+    }
 
-        std::fs::remove_dir_all(&dir).unwrap();
+    #[test]
+    fn base58_roundtrip() {
+        let original = [0x42u8; 32];
+        let encoded = base58_encode(&original);
+        let decoded = base58_decode(&encoded).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn base58_encode_leading_zeros() {
+        let mut key = [0u8; 32];
+        key[31] = 0x01;
+        let encoded = base58_encode(&key);
+        assert!(encoded.starts_with(&"1".repeat(31)));
+    }
+
+    #[test]
+    fn validate_pubkey_accepts_short_base58() {
+        let key = [0u8; 32];
+        let encoded = base58_encode(&key);
+        assert!(encoded.len() < 43);
+        assert!(validate_pubkey(&encoded).is_ok());
     }
 }
