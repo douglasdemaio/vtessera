@@ -32,6 +32,7 @@ spl-associated-token-account = { version = "2.3.0", features = ["no-entrypoint"]
 # Anchor uses borsh 0.10 for IX serialisation on the 0.30 line.
 borsh = "0.10"
 sha2 = "0.10"
+ctrlc = "3"
 
 # NOTE: the demo does NOT depend on vtessera-executor or vtessera-settlement
 # even though it exercises their semantics. Those crates pull modern crypto
