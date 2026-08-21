@@ -241,6 +241,7 @@ fn is_transient_error(e: &dyn std::error::Error) -> bool {
         || msg.contains("502")
         || msg.contains("reset")
         || msg.contains("broken pipe")
+        || msg.contains("blockhash")
 }
 
 fn send_tx_with_retry(
