@@ -501,7 +501,11 @@ struct TransactionData {
 
 #[derive(serde::Deserialize)]
 struct TransactionMessage {
-    #[serde(default, deserialize_with = "deserialize_account_keys", rename = "accountKeys")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_account_keys",
+        rename = "accountKeys"
+    )]
     account_keys: Vec<String>,
 }
 
