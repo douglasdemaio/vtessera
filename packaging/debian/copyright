@@ -1,0 +1,20 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: vtessera
+Upstream-Contact: https://github.com/douglasdemaio/vtessera
+Source: https://github.com/douglasdemaio/vtessera
+
+Files: *
+Copyright: 2026 Vtessera contributors
+License: Apache-2.0
+
+License: Apache-2.0
+ On systems with /usr/share/common-licenses/Apache-2.0:
+ .
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ .
+     http://www.apache.org/licenses/LICENSE-2.0
+ .
+ On other systems the full text is provided under
+ /usr/share/common-licenses/Apache-2.0.

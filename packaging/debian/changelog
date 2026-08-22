@@ -1,0 +1,7 @@
+vtessera (0.1.0-1) unstable; urgency=low
+
+  * Initial deb packaging.
+  * Ships: vtesserad, vtessera-node, vtessera-mcp, vtessera-offer-index,
+    vtessera-settle.
+
+ -- Vtessera contributors <https://github.com/douglasdemaio/vtessera>  Sat, 22 Aug 2026 00:00:00 +0000

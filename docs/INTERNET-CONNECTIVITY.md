@@ -486,17 +486,26 @@ crates/
 
 | Feature | v0 | v1 |
 |---------|----|----|
-| Public index (REST + SSE) | ✅ | ✅ |
+| Public index (REST) | ✅ | ✅ + SSE push |
 | Signed registrations | ✅ | ✅ |
 | Heartbeats with TTL | ✅ | ✅ |
 | STUN reflexive discovery | ✅ (public servers) | ✅ (self-hosted) |
-| UDP hole punching | ✅ | ✅ |
-| TURN relay fallback | ✅ (public TURN) | ✅ (self-hosted) |
-| QUIC transport | ✅ | ✅ |
+| UDP hole punching | ❌ design-only | ✅ |
+| TURN relay fallback | ❌ design-only | ✅ (public TURN) |
+| QUIC transport | ❌ design-only | ✅ |
+| HTTP transport (current) | ✅ | ✅ |
 | Tailscale transport | ❌ | ✅ |
-| Public key pinning | ✅ | ✅ |
+| Public key pinning | ❌ design-only | ✅ |
 | Capability tokens | ❌ | ✅ |
 | Self-hosted relay | ❌ | ✅ |
+| Rate limiting (per-key) | ✅ | ✅ |
+
+**v0 reality:** Nodes advertise HTTP candidates (LAN + STUN reflexive).
+Agents discover nodes via the index, then connect over HTTP. NAT
+traversal works only if the node's HTTP port is reachable (public IP or
+port-forward). STUN discovers the reflexive address but without hole
+punching or TURN, agents behind symmetric NAT cannot connect. Full
+NAT traversal (hole punching, TURN relay, QUIC with key pinning) is v1.
 
 ---
 

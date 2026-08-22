@@ -27,6 +27,56 @@ use vtessera_offer::{verify, AdvertisedDevice, PriceQuote, SignedOffer, VerifyEr
 /// Default first-come-first-served claim lifetime, in seconds.
 pub const DEFAULT_CLAIM_TTL_SECS: u64 = 60;
 
+/// Default rate limit: max requests per key per sliding window.
+/// Very high default so tests are unaffected; production uses `with_rate_limit()`.
+pub const DEFAULT_RATE_LIMIT: usize = 100_000;
+/// Default sliding window for rate limiting, in seconds.
+pub const DEFAULT_RATE_WINDOW_SECS: u64 = 60;
+
+/// Simple sliding-window rate limiter. Tracks request timestamps per key.
+#[derive(Debug)]
+struct RateLimiter {
+    /// Key → list of request timestamps (UNIX seconds).
+    history: BTreeMap<String, Vec<u64>>,
+    /// Max requests per window per key.
+    max_per_window: usize,
+    /// Window duration in seconds.
+    window_secs: u64,
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self {
+            history: BTreeMap::new(),
+            max_per_window: DEFAULT_RATE_LIMIT,
+            window_secs: DEFAULT_RATE_WINDOW_SECS,
+        }
+    }
+}
+
+impl RateLimiter {
+    fn new(max_per_window: usize, window_secs: u64) -> Self {
+        Self {
+            history: BTreeMap::new(),
+            max_per_window,
+            window_secs,
+        }
+    }
+
+    /// Returns `true` if the request is allowed, `false` if rate-limited.
+    fn allow(&mut self, key: &str, now_unix: u64) -> bool {
+        let window_start = now_unix.saturating_sub(self.window_secs);
+        let timestamps = self.history.entry(key.to_string()).or_default();
+        // Prune old entries.
+        timestamps.retain(|t| *t > window_start);
+        if timestamps.len() >= self.max_per_window {
+            return false;
+        }
+        timestamps.push(now_unix);
+        true
+    }
+}
+
 /// One verified, current offer in the index.
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
@@ -160,11 +210,21 @@ impl std::error::Error for HeartbeatError {}
 #[derive(Debug, Default)]
 pub struct IndexState {
     entries: BTreeMap<String, IndexEntry>,
+    /// Per-key rate limiter for write operations (register, claim, heartbeat).
+    rate_limiter: RateLimiter,
 }
 
 impl IndexState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create with custom rate limit settings.
+    pub fn with_rate_limit(max_per_window: usize, window_secs: u64) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            rate_limiter: RateLimiter::new(max_per_window, window_secs),
+        }
     }
 
     pub fn count(&self) -> usize {
@@ -343,6 +403,34 @@ pub fn dispatch(state: &mut IndexState, req: Request, now_unix: u64) -> Response
         Some((p, q)) => (p, Some(q)),
         None => (req.path.as_str(), None),
     };
+
+    // Rate-limit write operations. Use path as the key for registrations
+    // and heartbeats, agent_id for claims.
+    match req.method {
+        Method::Post | Method::Delete => {
+            let rate_key = if path.starts_with("/offers/") && path.ends_with("/heartbeat") {
+                // Heartbeat — rate-limit by node_id extracted from path.
+                path.strip_prefix("/offers/")
+                    .and_then(|s| s.strip_suffix("/heartbeat"))
+                    .unwrap_or(path)
+                    .to_string()
+            } else if path.starts_with("/offers/") && path.ends_with("/claim") {
+                // Claim — rate-limit by agent_id from body.
+                agent_id_from_body(&req.body).unwrap_or_else(|| "unknown".into())
+            } else {
+                // Registration or other write — rate-limit by source IP
+                // or path. We use the path as a simple proxy.
+                path.to_string()
+            };
+            if !state.rate_limiter.allow(&rate_key, now_unix) {
+                return Response::json(
+                    429,
+                    r#"{"status":"rate_limited","reason":"too many requests"}"#.into(),
+                );
+            }
+        }
+        _ => {}
+    }
 
     match (req.method, path) {
         (Method::Get, "/healthz") => Response::text(200, "ok"),
@@ -1120,5 +1208,78 @@ mod tests {
             v["offers"][0]["candidates"][0]["addr"],
             "192.168.1.100:8402"
         );
+    }
+
+    #[test]
+    fn rate_limiter_allows_within_window() {
+        let mut limiter = RateLimiter::new(3, 60);
+        assert!(limiter.allow("key1", 100));
+        assert!(limiter.allow("key1", 101));
+        assert!(limiter.allow("key1", 102));
+    }
+
+    #[test]
+    fn rate_limiter_rejects_over_limit() {
+        let mut limiter = RateLimiter::new(2, 60);
+        assert!(limiter.allow("key1", 100));
+        assert!(limiter.allow("key1", 101));
+        assert!(!limiter.allow("key1", 102));
+    }
+
+    #[test]
+    fn rate_limiter_window_expiry() {
+        let mut limiter = RateLimiter::new(2, 60);
+        assert!(limiter.allow("key1", 100));
+        assert!(limiter.allow("key1", 101));
+        assert!(!limiter.allow("key1", 102));
+        // After window expires, new requests are allowed.
+        assert!(limiter.allow("key1", 162));
+    }
+
+    #[test]
+    fn rate_limiter_independent_keys() {
+        let mut limiter = RateLimiter::new(1, 60);
+        assert!(limiter.allow("key1", 100));
+        assert!(!limiter.allow("key1", 101));
+        assert!(limiter.allow("key2", 101));
+    }
+
+    #[test]
+    fn dispatch_rate_limits_heavy_writes() {
+        let node = signed_node_id(1);
+        let mut state = IndexState::with_rate_limit(2, 60);
+
+        // Register the node first — heartbeat requires an existing entry.
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW)
+            .unwrap();
+
+        // First two heartbeats succeed.
+        let body = r#"{"candidates":[]}"#;
+        for i in 0..2 {
+            let r = dispatch(
+                &mut state,
+                Request {
+                    method: Method::Post,
+                    path: format!("/offers/{node}/heartbeat"),
+                    headers: vec![],
+                    body: body.as_bytes().to_vec(),
+                },
+                NOW + i,
+            );
+            assert_eq!(r.status, 200, "heartbeat {i} should succeed");
+        }
+        // Third is rate-limited.
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Post,
+                path: format!("/offers/{node}/heartbeat"),
+                headers: vec![],
+                body: body.as_bytes().to_vec(),
+            },
+            NOW + 2,
+        );
+        assert_eq!(r.status, 429);
     }
 }

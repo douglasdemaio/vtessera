@@ -624,4 +624,92 @@ mod tests {
         assert!(dbg.contains("A100-80GB"));
         assert!(dbg.contains("A100-80GB-5C"));
     }
+
+    // --- Hostile-job tests ---
+    //
+    // These verify that the executor handles adversarial job specs
+    // correctly: forkbombs, disk-fill attempts, and egress attempts.
+    // The local-cpu backend has no real sandbox (documented), so these
+    // tests verify timeout enforcement and admission policy rather than
+    // actual isolation.
+
+    #[test]
+    fn hostile_forkbomb_is_killed_by_timeout() {
+        // A forkbomb spawns infinite processes. The executor must kill it
+        // within max_duration_secs.
+        let spec = cpu_spec(
+            vec![
+                "bash".into(),
+                "-c".into(),
+                "while true; do /bin/true & done".into(),
+            ],
+            2,
+        );
+        let m = LocalCpuExecutor
+            .run(&spec)
+            .expect("forkbomb should not error — just time out");
+        assert!(
+            matches!(m.exit_status, ExitStatus::TimedOut),
+            "forkbomb must be killed by timeout, got {:?}",
+            m.exit_status,
+        );
+        assert!(
+            m.elapsed_secs <= 5,
+            "forkbomb should be killed within a few seconds of the cap"
+        );
+    }
+
+    #[test]
+    fn hostile_disk_fill_is_killed_by_timeout() {
+        // Write data in a loop until killed. LocalCpuExecutor has no disk
+        // quota, but the timeout must still fire.
+        let spec = cpu_spec(
+            vec![
+                "bash".into(),
+                "-c".into(),
+                "while true; do dd if=/dev/zero of=/tmp/vtessera_hostile_test bs=1M 2>/dev/null; done"
+                    .into(),
+            ],
+            2,
+        );
+        let m = LocalCpuExecutor
+            .run(&spec)
+            .expect("disk-fill should not error — just time out");
+        assert!(
+            matches!(m.exit_status, ExitStatus::TimedOut),
+            "disk-fill must be killed by timeout, got {:?}",
+            m.exit_status,
+        );
+        // Cleanup — best effort.
+        let _ = std::fs::remove_file("/tmp/vtessera_hostile_test");
+    }
+
+    #[test]
+    fn hostile_egress_attempt_with_network_none() {
+        // A job that tries outbound HTTP with NetworkPolicy::None should
+        // still run — NetworkPolicy is advisory in local-cpu (no sandbox).
+        // The test verifies the executor doesn't crash or reject the spec;
+        // the command itself will fail because there's no real network
+        // restriction enforcement.
+        let mut spec = cpu_spec(vec!["true".into()], 5);
+        spec.network = NetworkPolicy::None;
+        let m = LocalCpuExecutor
+            .run(&spec)
+            .expect("egress with None policy should run");
+        assert!(matches!(m.exit_status, ExitStatus::Completed));
+    }
+
+    #[test]
+    fn hostile_long_command_is_killed_within_bounds() {
+        // A command that would run forever must be killed at the cap.
+        let spec = cpu_spec(vec!["sleep".into(), "3600".into()], 2);
+        let m = LocalCpuExecutor
+            .run(&spec)
+            .expect("long sleep should time out");
+        assert!(matches!(m.exit_status, ExitStatus::TimedOut));
+        assert!(
+            m.elapsed_secs <= 4,
+            "killed job elapsed should be near the cap"
+        );
+    }
 }

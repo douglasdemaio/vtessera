@@ -177,7 +177,7 @@ pub fn gather_candidates(lan_ip: &str, port: u16) -> Vec<Candidate> {
         },
         Candidate {
             kind: CandidateKind::Host,
-            transport: TransportKind::QuicDirect,
+            transport: TransportKind::Https,
             addr: format!("{lan_ip}:{port}"),
             priority: 200,
         },
@@ -187,7 +187,11 @@ pub fn gather_candidates(lan_ip: &str, port: u16) -> Vec<Candidate> {
         eprintln!("STUN: reflexive address {reflexive}");
         candidates.push(Candidate {
             kind: CandidateKind::ServerReflexive,
-            transport: TransportKind::QuicDirect,
+            // v0: node serves HTTP on this port, not QUIC. An agent that
+            // discovers this candidate must connect via HTTP and upgrade
+            // or negotiate. Marked Https so agents don't attempt a QUIC
+            // handshake against an HTTP listener.
+            transport: TransportKind::Https,
             addr: reflexive,
             priority: 100,
         });
@@ -260,5 +264,9 @@ mod tests {
     fn gather_candidates_includes_lan() {
         let candidates = gather_candidates("192.168.1.100", 8402);
         assert!(candidates.iter().any(|c| c.addr == "192.168.1.100:8402"));
+        // All candidates use Https in v0 — no QUIC listener exists.
+        for c in &candidates {
+            assert_ne!(c.transport, TransportKind::QuicDirect);
+        }
     }
 }
