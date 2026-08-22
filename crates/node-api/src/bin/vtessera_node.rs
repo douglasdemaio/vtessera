@@ -774,7 +774,12 @@ fn main() {
             // Gather candidates (LAN + STUN reflexive) and start heartbeating
             // them to the index so agents know how to reach this node.
             let lan_ip = args.bind.split(':').next().unwrap_or("0.0.0.0");
-            let port: u16 = args.bind.rsplit(':').next().and_then(|s| s.parse().ok()).unwrap_or(8402);
+            let port: u16 = args
+                .bind
+                .rsplit(':')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8402);
             let candidates = gather_candidates(lan_ip, port);
             spawn_heartbeat(url.clone(), node_id.clone(), candidates);
             Some(Arc::new(client) as Arc<dyn IndexClient>)
@@ -856,8 +861,15 @@ fn spawn_publisher(index_url: String, offer_json: String, interval: Duration) {
 
 /// POST a heartbeat with candidates to the index. Non-fatal: caller logs
 /// and retries on the next tick.
-fn post_heartbeat(index_url: &str, node_id: &str, candidates: &[vtessera_transport::Candidate]) -> Result<(), String> {
-    let url = format!("{}/offers/{node_id}/heartbeat", index_url.trim_end_matches('/'));
+fn post_heartbeat(
+    index_url: &str,
+    node_id: &str,
+    candidates: &[vtessera_transport::Candidate],
+) -> Result<(), String> {
+    let url = format!(
+        "{}/offers/{node_id}/heartbeat",
+        index_url.trim_end_matches('/')
+    );
     let body = serde_json::json!({
         "candidates": candidates,
     });
@@ -875,7 +887,11 @@ fn post_heartbeat(index_url: &str, node_id: &str, candidates: &[vtessera_transpo
 /// Background loop that sends heartbeats with candidate addresses to the
 /// index on an interval. Candidates include STUN reflexive addresses so
 /// agents outside the LAN can reach this node.
-fn spawn_heartbeat(index_url: String, node_id: String, candidates: Vec<vtessera_transport::Candidate>) {
+fn spawn_heartbeat(
+    index_url: String,
+    node_id: String,
+    candidates: Vec<vtessera_transport::Candidate>,
+) {
     thread::spawn(move || {
         let interval = Duration::from_secs(DEFAULT_HEARTBEAT_SECS);
         loop {

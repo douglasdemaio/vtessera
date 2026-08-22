@@ -151,7 +151,9 @@ fn main() {
         let state = state.clone();
         let stale_secs = 3 * vtessera_transport::DEFAULT_HEARTBEAT_SECS;
         thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(vtessera_transport::DEFAULT_HEARTBEAT_SECS));
+            thread::sleep(Duration::from_secs(
+                vtessera_transport::DEFAULT_HEARTBEAT_SECS,
+            ));
             let now = now_unix();
             let pruned = state.lock().unwrap().prune_stale(now, stale_secs);
             if pruned > 0 {

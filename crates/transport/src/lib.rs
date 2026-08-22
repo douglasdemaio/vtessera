@@ -47,10 +47,7 @@ pub struct Candidate {
 }
 
 /// Default STUN servers for v0 (public, free).
-pub const DEFAULT_STUN_SERVERS: &[&str] = &[
-    "stun.l.google.com:19302",
-    "stun.cloudflare.com:3478",
-];
+pub const DEFAULT_STUN_SERVERS: &[&str] = &["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
 
 /// Default heartbeat interval in seconds.
 pub const DEFAULT_HEARTBEAT_SECS: u64 = 30;
@@ -118,7 +115,8 @@ pub fn stun_probe(server: &str) -> Result<String, StunError> {
     let mut offset = 20;
     while offset + 4 <= 20 + resp_len && offset + 4 <= n {
         let attr_type = u16::from_be_bytes(resp[offset..offset + 2].try_into().unwrap());
-        let attr_len = u16::from_be_bytes(resp[offset + 2..offset + 4].try_into().unwrap()) as usize;
+        let attr_len =
+            u16::from_be_bytes(resp[offset + 2..offset + 4].try_into().unwrap()) as usize;
 
         if attr_type == 0x0020 {
             // XOR-MAPPED-ADDRESS
@@ -128,9 +126,8 @@ pub fn stun_probe(server: &str) -> Result<String, StunError> {
             let family = resp[offset + 5];
             if family == 0x01 {
                 // IPv4
-                let xored_port = u16::from_be_bytes(
-                    resp[offset + 6..offset + 8].try_into().unwrap(),
-                );
+                let xored_port =
+                    u16::from_be_bytes(resp[offset + 6..offset + 8].try_into().unwrap());
                 let port = xored_port ^ (magic_cookie >> 16) as u16;
                 let mut ip_bytes = [0u8; 4];
                 ip_bytes.copy_from_slice(&resp[offset + 8..offset + 12]);

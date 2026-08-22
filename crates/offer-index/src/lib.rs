@@ -474,8 +474,10 @@ fn handle_heartbeat(state: &mut IndexState, node_id: &str, body: &[u8], now_unix
         Err(e) => {
             return Response::json(
                 400,
-                serde_json::to_string(&json!({ "status": "rejected", "reason": format!("bad JSON: {e}") }))
-                    .unwrap_or_else(|_| r#"{"status":"rejected"}"#.into()),
+                serde_json::to_string(
+                    &json!({ "status": "rejected", "reason": format!("bad JSON: {e}") }),
+                )
+                .unwrap_or_else(|_| r#"{"status":"rejected"}"#.into()),
             );
         }
     };
@@ -1114,6 +1116,9 @@ mod tests {
         );
         assert_eq!(r.status, 200);
         let v: Value = serde_json::from_str(&String::from_utf8(r.body).unwrap()).unwrap();
-        assert_eq!(v["offers"][0]["candidates"][0]["addr"], "192.168.1.100:8402");
+        assert_eq!(
+            v["offers"][0]["candidates"][0]["addr"],
+            "192.168.1.100:8402"
+        );
     }
 }

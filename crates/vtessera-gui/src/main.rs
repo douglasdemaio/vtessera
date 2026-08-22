@@ -144,7 +144,8 @@ impl Ui {
         })?;
         let port = self.port_spin.value() as u16;
         let backend = backend_from_dropdown(&self.backend_dd);
-        let (network_preset, network) = network_from_dropdown(&self.network_dd, &self.network_custom_entry);
+        let (network_preset, network) =
+            network_from_dropdown(&self.network_dd, &self.network_custom_entry);
         let settings = Settings {
             mode: mode.into(),
             currency: currency.into(),
@@ -189,8 +190,7 @@ impl Ui {
             .set_visible(s.network_preset == "custom");
         self.local_network_switch.set_active(s.local_network);
         self.marketplace_url_entry.set_text(&s.marketplace_url);
-        self.cidr_entry
-            .set_text(&s.allowed_cidrs.join(", "));
+        self.cidr_entry.set_text(&s.allowed_cidrs.join(", "));
         self.sync_network_sensitivity();
         self.interval_spin.set_value(s.sample_interval_secs as f64);
         self.backend_dd
@@ -214,10 +214,7 @@ fn network_from_dropdown(dd: &gtk4::DropDown, custom_entry: &gtk4::Entry) -> (St
     match dd.selected() {
         0 => ("devnet".into(), "solana-devnet".into()),
         1 => ("mainnet".into(), "solana-mainnet".into()),
-        _ => (
-            "custom".into(),
-            custom_entry.text().trim().to_string(),
-        ),
+        _ => ("custom".into(), custom_entry.text().trim().to_string()),
     }
 }
 
@@ -851,11 +848,7 @@ fn build_ui(app: &gtk4::Application) {
         ),
         endpoint_entry: gtk4::Entry::new(),
         escrow_entry: gtk4::Entry::new(),
-        network_dd: gtk4::DropDown::from_strings(&[
-            "Solana Devnet",
-            "Solana Mainnet",
-            "Custom",
-        ]),
+        network_dd: gtk4::DropDown::from_strings(&["Solana Devnet", "Solana Mainnet", "Custom"]),
         network_custom_entry: gtk4::Entry::new(),
         local_network_switch: gtk4::Switch::new(),
         marketplace_url_entry: gtk4::Entry::new(),
@@ -1224,7 +1217,10 @@ fn build_ui(app: &gtk4::Application) {
         move |dd| {
             ui.sync_network_sensitivity();
             if dd.selected() == 1 {
-                let window = ui.start_btn.root().and_then(|r| r.downcast_ref::<gtk4::Window>().cloned());
+                let window = ui
+                    .start_btn
+                    .root()
+                    .and_then(|r| r.downcast_ref::<gtk4::Window>().cloned());
                 if let Some(win) = window {
                     show_mainnet_confirm(&ui, &win);
                 }
@@ -1445,22 +1441,26 @@ fn show_mainnet_confirm(ui: &Ui, parent: &gtk4::Window) {
     let sync_target2 = ui.local_network_switch.clone();
     let sync_target3 = ui.marketplace_url_entry.clone();
     let sync_target4 = ui.cidr_entry.clone();
-    dialog.choose(Some(parent), None::<&gtk4::gio::Cancellable>, move |result| {
-        // Index 0 = Cancel, Index 1 = Switch to Mainnet.
-        let cancel = match result {
-            Ok(idx) => idx != 1,
-            Err(_) => true,
-        };
-        if cancel {
-            if let Some(dd) = dd_weak.upgrade() {
-                dd.set_selected(0);
+    dialog.choose(
+        Some(parent),
+        None::<&gtk4::gio::Cancellable>,
+        move |result| {
+            // Index 0 = Cancel, Index 1 = Switch to Mainnet.
+            let cancel = match result {
+                Ok(idx) => idx != 1,
+                Err(_) => true,
+            };
+            if cancel {
+                if let Some(dd) = dd_weak.upgrade() {
+                    dd.set_selected(0);
+                }
+                sync_target.set_visible(false);
+                sync_target2.set_active(false);
+                sync_target3.set_visible(true);
+                sync_target4.set_visible(false);
             }
-            sync_target.set_visible(false);
-            sync_target2.set_active(false);
-            sync_target3.set_visible(true);
-            sync_target4.set_visible(false);
-        }
-    });
+        },
+    );
 }
 
 fn install_css() {
