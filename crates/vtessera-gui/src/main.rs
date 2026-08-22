@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use gtk4::glib;
 use gtk4::prelude::*;
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use daemon::Daemons;
 use settings::Settings;
@@ -73,6 +74,8 @@ struct Ui {
     total_val: gtk4::Label,
     earnings_val: gtk4::Label,
     avgcpu_val: gtk4::Label,
+    // Dashboard: last job indicator
+    last_job_label: gtk4::Label,
 }
 
 /// Mutable node runtime state.
@@ -142,6 +145,7 @@ impl Ui {
             metering_consent: self.settings.borrow().metering_consent,
             accept_workloads: self.accept_switch.is_active(),
             consent_version: self.settings.borrow().consent_version,
+            marketplace_url: self.settings.borrow().marketplace_url.clone(),
         };
         settings.validate()?;
         Ok(settings)
@@ -155,7 +159,11 @@ impl Ui {
         self.currency_dd
             .set_selected(if s.currency == "usdc" { 1 } else { 0 });
         self.port_spin.set_value(s.port as f64);
-        self.endpoint_entry.set_text(&s.endpoint);
+        if s.endpoint.is_empty() {
+            self.endpoint_entry.set_text("");
+        } else {
+            self.endpoint_entry.set_text(&s.endpoint);
+        }
         self.escrow_entry.set_text(&s.escrow_account);
         self.network_entry.set_text(&s.network);
         self.interval_spin.set_value(s.sample_interval_secs as f64);
@@ -197,6 +205,120 @@ fn current_node_id() -> Option<String> {
     Some(vtessera_offer::derive_node_id(
         &key.verifying_key().to_bytes(),
     ))
+}
+
+/// Base58-encode a byte slice (Bitcoin alphabet).  Matches the
+/// implementation in `vtesserad::key_registry`.
+fn base58_encode(input: &[u8]) -> String {
+    assert!(
+        input.len() <= 32,
+        "base58_encode supports at most 32 bytes, got {}",
+        input.len()
+    );
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let headroom = 4;
+    let mut digits = vec![0u8; headroom + input.len() * 2];
+    let mut start = headroom;
+
+    for &byte in input {
+        let mut carry = byte as u16;
+        let mut j = digits.len() - 1;
+        while j >= start {
+            carry += (digits[j] as u16) << 8;
+            digits[j] = (carry % 58) as u8;
+            carry /= 58;
+            j -= 1;
+        }
+        while carry > 0 {
+            start -= 1;
+            digits[start] = (carry % 58) as u8;
+            carry /= 58;
+        }
+    }
+
+    while start < digits.len() && digits[start] == 0 {
+        start += 1;
+    }
+
+    let leading_ones = input.iter().take_while(|&&b| b == 0).count();
+    let mut result = String::with_capacity(leading_ones + digits.len() - start);
+    for _ in 0..leading_ones {
+        result.push(ALPHABET[0] as char);
+    }
+    for &d in &digits[start..] {
+        result.push(ALPHABET[d as usize] as char);
+    }
+    result
+}
+
+/// Detect the machine's LAN IP address by opening a UDP socket to a public
+/// IP (no actual traffic is sent). Returns `None` if detection fails.
+fn detect_lan_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    Some(addr.ip())
+}
+
+/// Auto-register the node's pubkey in the marketplace keys.toml so
+/// vtessera-node can publish its offer without manual key setup.
+fn register_node_in_marketplace(pubkey: &[u8; 32], node_id: &str) {
+    let keys_path = settings::state_dir().join("marketplace").join("keys.toml");
+    if let Err(e) = std::fs::create_dir_all(keys_path.parent().unwrap()) {
+        eprintln!("marketplace dir create: {e}");
+        return;
+    }
+    let b58 = base58_encode(pubkey);
+    if let Ok(existing) = std::fs::read_to_string(&keys_path) {
+        if existing.contains(&b58) {
+            return;
+        }
+    }
+    let entry = format!("\n[[keys]]\nname = \"{node_id}\"\npubkey = \"{b58}\"\n");
+    let mut content = std::fs::read_to_string(&keys_path).unwrap_or_default();
+    content.push_str(&entry);
+    if let Err(e) = std::fs::write(&keys_path, &content) {
+        eprintln!("marketplace keys write: {e}");
+    }
+}
+
+/// Advertise this node via mDNS so LAN agents can discover it without
+/// knowing the IP address. The service type `_vtessera._tcp` carries
+/// TXT records with the node_id and offer endpoint.
+fn advertise_mdns(node_id: &str, lan_ip: &str, port: u16, index_port: u16) {
+    let service_type = "_vtessera._tcp.local.";
+    // mDNS instance names are limited to 63 chars; use a short prefix.
+    let instance = node_id.chars().take(30).collect::<String>();
+    let properties = [
+        ("node_id", node_id),
+        ("offer_index", &format!("{lan_ip}:{index_port}")),
+    ];
+    let svc = match ServiceInfo::new(
+        service_type,
+        &instance,
+        &format!("{lan_ip}.local."),
+        lan_ip,
+        port,
+        &properties[..],
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("mDNS service info: {e}");
+            return;
+        }
+    };
+    let mdns = match ServiceDaemon::new() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("mDNS daemon: {e}");
+            return;
+        }
+    };
+    if let Err(e) = mdns.register(svc) {
+        eprintln!("mDNS register: {e}");
+        return;
+    }
+    eprintln!("mDNS: advertising _vtessera._tcp as {instance} on {lan_ip}:{port}");
 }
 
 /// The three observable states (§2.3 of `docs/CONSENT.md`):
@@ -284,6 +406,11 @@ fn refresh_dashboard(ui: &Ui) {
 }
 
 /// Read job receipts and populate the jobs table + summary bar.
+///
+/// Handles both `SignedJobReceipt` (from vtessera-node, with
+/// `receipt.metering.cpu_seconds` / `receipt.metering.peak_mem_kb`) and
+/// legacy vtesserad window-receipts (with
+/// `receipt.totals.cpu_pct_avg` / `receipt.totals.mem_used_kb_avg`).
 fn refresh_jobs_table(ui: &Ui) {
     use std::time::SystemTime;
 
@@ -291,20 +418,21 @@ fn refresh_jobs_table(ui: &Ui) {
     let now = SystemTime::now();
 
     #[derive(serde::Deserialize)]
-    struct ReceiptTotals {
-        cpu_pct_avg: f64,
-        mem_used_kb_avg: u64,
+    struct Metering {
+        cpu_seconds: f64,
+        peak_mem_kb: u64,
+        elapsed_secs: u64,
     }
     #[derive(serde::Deserialize)]
-    struct ReceiptInner {
-        totals: ReceiptTotals,
+    struct JobReceiptInner {
+        metering: Metering,
     }
     #[derive(serde::Deserialize)]
-    struct JobReceipt {
-        receipt: ReceiptInner,
+    struct SignedJobReceipt {
+        receipt: JobReceiptInner,
     }
 
-    let mut jobs: Vec<(u64, String, f64, u64)> = Vec::new();
+    let mut jobs: Vec<(u64, String, f64, u64, u64)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for entry in rd.flatten() {
             let path = entry.path();
@@ -321,15 +449,17 @@ fn refresh_jobs_table(ui: &Ui) {
                     .to_string_lossy()
                     .into_owned();
                 if let Ok(raw) = std::fs::read_to_string(&path) {
-                    if let Ok(job) = serde_json::from_str::<JobReceipt>(&raw) {
-                        jobs.push((
-                            age,
-                            name,
-                            job.receipt.totals.cpu_pct_avg,
-                            job.receipt.totals.mem_used_kb_avg,
-                        ));
+                    if let Ok(job) = serde_json::from_str::<SignedJobReceipt>(&raw) {
+                        let m = &job.receipt.metering;
+                        // Convert cpu_seconds to approximate CPU% using elapsed_secs.
+                        let cpu_pct = if m.elapsed_secs > 0 {
+                            (m.cpu_seconds / m.elapsed_secs as f64 * 100.0).min(100.0)
+                        } else {
+                            0.0
+                        };
+                        jobs.push((age, name, cpu_pct, m.peak_mem_kb, m.elapsed_secs));
                     } else {
-                        jobs.push((age, name, 0.0, 0));
+                        jobs.push((age, name, 0.0, 0, 0));
                     }
                 }
             }
@@ -347,7 +477,28 @@ fn refresh_jobs_table(ui: &Ui) {
     ui.total_val.set_text(&format!("{}", total));
     ui.avgcpu_val.set_text(&format!("{:.1}%", avg_cpu));
     // Earnings — placeholder since v0 receipts don't carry price info.
-    ui.earnings_val.set_text("—");
+    ui.earnings_val.set_text("\u{2014}");
+
+    // Last job indicator — show the age of the most recent receipt.
+    if let Some((age, name, _, _, _)) = jobs.last() {
+        let short_id = name
+            .trim_end_matches(".json")
+            .chars()
+            .take(12)
+            .collect::<String>();
+        let stamp = if *age == u64::MAX {
+            "unknown".to_string()
+        } else if *age < 60 {
+            format!("{}s ago — {}", age, short_id)
+        } else if *age < 3600 {
+            format!("{}m ago — {}", age / 60, short_id)
+        } else {
+            format!("{}h ago — {}", age / 3600, short_id)
+        };
+        ui.last_job_label.set_text(&stamp);
+    } else {
+        ui.last_job_label.set_text("No jobs yet");
+    }
 
     // Clear old rows.
     while let Some(child) = ui.jobs_list.first_child() {
@@ -355,7 +506,7 @@ fn refresh_jobs_table(ui: &Ui) {
     }
 
     // Add rows.
-    for (age, name, cpu, mem_kb) in jobs.into_iter().take(50) {
+    for (age, name, cpu, mem_kb, _elapsed) in jobs.into_iter().rev().take(50) {
         let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         row.add_css_class("job-table-row");
 
@@ -400,7 +551,7 @@ fn refresh_jobs_table(ui: &Ui) {
 }
 
 fn start_node(ui: &Ui, state: &NodeState) {
-    let settings = match ui.read_settings() {
+    let mut settings = match ui.read_settings() {
         Ok(s) => s,
         Err(e) => {
             ui.set_error(&e);
@@ -436,6 +587,17 @@ fn start_node(ui: &Ui, state: &NodeState) {
     // the second consent gate (§2.2). With `accept_workloads` off we write no
     // offer and spawn no node; only vtesserad meters.
     let accepting = settings.accept_workloads;
+
+    // Detect LAN IP for multi-machine discovery. When the endpoint is
+    // empty (the default), auto-fill with the LAN address so agents on
+    // the same network can reach this node.
+    let lan_ip = detect_lan_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "127.0.0.1".into());
+    if settings.endpoint.is_empty() {
+        settings.endpoint = format!("http://{lan_ip}:{}", settings.port);
+    }
+
     if accepting {
         let offer_json = offer::build_offer_json(&settings, &key);
         if let Err(e) = std::fs::write(settings::offer_path(), &offer_json) {
@@ -445,10 +607,21 @@ fn start_node(ui: &Ui, state: &NodeState) {
     }
 
     let node_id = vtessera_offer::derive_node_id(&key.verifying_key().to_bytes());
-    // Bind loopback to match the advertised endpoint (default
-    // http://127.0.0.1:8402): the node has no TLS/auth and must not sit on
-    // a routable interface. The node binary's `--bind` stays configurable.
-    let bind = format!("127.0.0.1:{}", settings.port);
+
+    // Auto-register this node's pubkey in the marketplace key registry
+    // so vtessera-node can publish without manual keys.toml setup.
+    register_node_in_marketplace(&key.verifying_key().to_bytes(), &node_id);
+
+    // Bind to all interfaces so other machines can reach the node.
+    let bind = format!("0.0.0.0:{}", settings.port);
+
+    // Offer-index — the discovery service that agents query and nodes
+    // publish to. Bind to all interfaces for LAN/internet reachability.
+    let index_port: u16 = 8403;
+    let index_bind = format!("0.0.0.0:{index_port}");
+
+    // Publish URL points to the offer-index, auto-detected from LAN IP.
+    let publish = Some(format!("http://{lan_ip}:{index_port}"));
 
     let bin_dir = daemon::bin_dir();
     let opts = daemon::StartOptions {
@@ -462,6 +635,8 @@ fn start_node(ui: &Ui, state: &NodeState) {
         key_path: settings::key_path(),
         state_dir: settings::state_dir(),
         spawn_node: accepting,
+        publish,
+        index_bind: Some(index_bind),
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,
@@ -508,6 +683,13 @@ fn start_node(ui: &Ui, state: &NodeState) {
         ui.log_line(&format!(
             "offer written to {}",
             settings::offer_path().display()
+        ));
+
+        // Advertise via mDNS so LAN agents can discover this node
+        // without knowing the IP address.
+        advertise_mdns(&node_id, &lan_ip, settings.port, index_port);
+        ui.log_line(&format!(
+            "mDNS: advertising _vtessera._tcp as {node_id} on {lan_ip}"
         ));
     }
 
@@ -576,6 +758,10 @@ fn build_ui(app: &gtk4::Application) {
     let (cpu_card, cpu_value, cpu_fill) = make_card_with_bar("CPU", "cpu-accent");
     let (mem_card, mem_value, mem_fill) = make_card_with_bar("MEMORY", "mem-accent");
 
+    // Last-job indicator card — spans full width below the 2×2 grid.
+    let last_job_card = make_card("LAST JOB");
+    let last_job_label = last_job_card.2.clone();
+
     // Create jobs page widgets before Ui init.
     fn make_summary(label: &str) -> (gtk4::Box, gtk4::Label) {
         let col = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
@@ -635,6 +821,7 @@ fn build_ui(app: &gtk4::Application) {
         total_val,
         earnings_val,
         avgcpu_val,
+        last_job_label,
     });
 
     // ---- Settings page ---------------------------------------------------
@@ -803,6 +990,7 @@ fn build_ui(app: &gtk4::Application) {
     dashboard_grid.attach(&nodeid_card, 1, 0, 1, 1);
     dashboard_grid.attach(&cpu_card, 0, 1, 1, 1);
     dashboard_grid.attach(&mem_card, 1, 1, 1, 1);
+    dashboard_grid.attach(&last_job_card.0, 0, 2, 2, 1);
 
     dashboard_page.append(&dashboard_grid);
 

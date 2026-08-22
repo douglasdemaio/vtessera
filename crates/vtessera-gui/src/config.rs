@@ -84,6 +84,7 @@ mod tests {
             metering_consent: true,
             accept_workloads: false,
             consent_version: crate::settings::CURRENT_CONSENT_VERSION,
+            marketplace_url: String::new(),
         }
     }
 

@@ -1,11 +1,12 @@
 //! Child-process management for the GUI.
 //!
-//! Starting the node = two long-running binaries:
+//! Starting the node = up to three long-running binaries:
 //!
 //! * `vtesserad` — metering daemon (samples usage, writes receipts).
+//! * `vtessera-offer-index` — offer discovery (agents query, nodes publish).
 //! * `vtessera-node` — agent-facing HTTP server (offer + jobs + 402/x402).
 //!
-//! Both are shipped in the Flatpak (`/app/bin`) and looked up on `PATH`.
+//! All are shipped in the Flatpak (`/app/bin`) and looked up on `PATH`.
 //! `VTESSERA_BIN_DIR` overrides the lookup for local (non-Flatpak) runs.
 //!
 //! The executor the node runs free jobs on is chosen by the GUI settings
@@ -24,6 +25,8 @@ pub struct Daemons {
     pub meter: Child,
     /// `None` when an already-running node was reused (see [`start`]).
     pub node: Option<Child>,
+    /// `None` when an already-running index was reused.
+    pub offer_index: Option<Child>,
     /// True when the node wasn't spawned because one was already serving.
     pub node_reused: bool,
 }
@@ -52,6 +55,12 @@ pub struct StartOptions<'a> {
     /// `vtesserad` runs (metering only), and an already-serving node is
     /// neither spawned nor reused.
     pub spawn_node: bool,
+    /// `vtessera-node --publish <index-url>`: optional marketplace index
+    /// URL to register the node's offer with. None = no publishing.
+    pub publish: Option<String>,
+    /// Bind address for the offer-index (`vtessera-offer-index --bind`).
+    /// None = don't spawn the index.
+    pub index_bind: Option<String>,
 }
 
 /// Directory holding the built binaries, when set (local runs). In the
@@ -95,7 +104,7 @@ fn healthz_up(host: &str, port: u16) -> bool {
     buf[..n].starts_with(b"HTTP/1.1 200")
 }
 
-/// Spawn both daemons. Caller must already have written the config + offer.
+/// Spawn all daemons. Caller must already have written the config + offer.
 pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
     let env_dir = bin_dir();
     let extra: Option<&Path> = match (opts.bin_dir, env_dir.as_deref()) {
@@ -112,10 +121,32 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
         .spawn()
         .map_err(|e| format!("spawn vtesserad: {e}"))?;
 
+    // Spawn the offer-index before the node so the node can register.
+    let offer_index = if let Some(ref index_bind) = opts.index_bind {
+        let index_port = index_bind
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+            .unwrap_or(0);
+        if index_port != 0 && healthz_up("127.0.0.1", index_port) {
+            None // already running
+        } else {
+            let mut idx_cmd = build_command("vtessera-offer-index", extra);
+            idx_cmd.args(["--bind", index_bind]);
+            Some(
+                idx_cmd
+                    .spawn()
+                    .map_err(|e| format!("spawn vtessera-offer-index: {e}"))?,
+            )
+        }
+    } else {
+        None
+    };
+
     if !opts.spawn_node {
         return Ok(Daemons {
             meter,
             node: None,
+            offer_index,
             node_reused: false,
         });
     }
@@ -143,6 +174,9 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
             .args(["--backend", opts.backend])
             .args(["--key", opts.key_path.to_str().unwrap_or_default()])
             .args(["--state-dir", opts.state_dir.to_str().unwrap_or_default()]);
+        if let Some(url) = &opts.publish {
+            node_cmd.args(["--publish", url]);
+        }
         Some(
             node_cmd
                 .spawn()
@@ -153,6 +187,7 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
     Ok(Daemons {
         meter,
         node,
+        offer_index,
         node_reused,
     })
 }
@@ -175,7 +210,15 @@ where
             spawn_reader(stdout, "vtessera-node", on_line.clone());
         }
         if let Some(stderr) = node.stderr.take() {
-            spawn_reader(stderr, "vtessera-node", on_line);
+            spawn_reader(stderr, "vtessera-node", on_line.clone());
+        }
+    }
+    if let Some(idx) = daemons.offer_index.as_mut() {
+        if let Some(stdout) = idx.stdout.take() {
+            spawn_reader(stdout, "offer-index", on_line.clone());
+        }
+        if let Some(stderr) = idx.stderr.take() {
+            spawn_reader(stderr, "offer-index", on_line);
         }
     }
 }
@@ -196,7 +239,7 @@ where
     });
 }
 
-/// Kill both children and reap them. Synchronous; call on the main thread.
+/// Kill all children and reap them. Synchronous; call on the main thread.
 pub fn stop(daemons: &mut Daemons, on_line: &impl Fn(String)) {
     let mut killed = false;
     if let Err(e) = daemons.meter.kill() {
@@ -216,6 +259,16 @@ pub fn stop(daemons: &mut Daemons, on_line: &impl Fn(String)) {
             killed = true;
         }
         let _ = node.wait();
+    }
+    if let Some(idx) = daemons.offer_index.as_mut() {
+        if let Err(e) = idx.kill() {
+            if e.kind() != std::io::ErrorKind::InvalidInput {
+                on_line(format!("kill: {e}"));
+            }
+        } else {
+            killed = true;
+        }
+        let _ = idx.wait();
     }
     if killed {
         on_line("node stopped".into());
