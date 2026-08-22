@@ -59,10 +59,14 @@ pub struct Settings {
     pub accept_workloads: bool,
     /// Version of the consent copy this `metering_consent` was given
     /// against. Bumped by `CURRENT_CONSENT_VERSION`; stored values below it
-    /// re-show the gate. `0` also marks "never consented" for pre-consent
+    /// re-shows the gate. `0` also marks "never consented" for pre-consent
     /// `settings.toml` files that predate this field.
     #[serde(default)]
     pub consent_version: u32,
+    /// Marketplace index URL for offer publishing. Empty = no publishing.
+    /// Defaults to `http://<lan-ip>:8443` when empty.
+    #[serde(default)]
+    pub marketplace_url: String,
 }
 
 fn default_backend() -> String {
@@ -77,7 +81,7 @@ impl Default for Settings {
             price_per_cpu_hour: 0.05,
             payout_id: String::new(),
             port: DEFAULT_PORT,
-            endpoint: format!("http://127.0.0.1:{DEFAULT_PORT}"),
+            endpoint: String::new(), // auto-detected at start time
             escrow_account: DEFAULT_ESCROW.into(),
             network: DEFAULT_NETWORK.into(),
             sample_interval_secs: 60,
@@ -85,6 +89,7 @@ impl Default for Settings {
             metering_consent: false,
             accept_workloads: false,
             consent_version: 0,
+            marketplace_url: String::new(),
         }
     }
 }
@@ -241,6 +246,7 @@ mod tests {
             metering_consent: true,
             accept_workloads: false,
             consent_version: CURRENT_CONSENT_VERSION,
+            marketplace_url: String::new(),
         }
     }
 

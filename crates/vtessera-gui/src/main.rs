@@ -144,6 +144,7 @@ impl Ui {
             metering_consent: self.settings.borrow().metering_consent,
             accept_workloads: self.accept_switch.is_active(),
             consent_version: self.settings.borrow().consent_version,
+            marketplace_url: self.settings.borrow().marketplace_url.clone(),
         };
         settings.validate()?;
         Ok(settings)
@@ -157,7 +158,11 @@ impl Ui {
         self.currency_dd
             .set_selected(if s.currency == "usdc" { 1 } else { 0 });
         self.port_spin.set_value(s.port as f64);
-        self.endpoint_entry.set_text(&s.endpoint);
+        if s.endpoint.is_empty() {
+            self.endpoint_entry.set_text("");
+        } else {
+            self.endpoint_entry.set_text(&s.endpoint);
+        }
         self.escrow_entry.set_text(&s.escrow_account);
         self.network_entry.set_text(&s.network);
         self.interval_spin.set_value(s.sample_interval_secs as f64);
@@ -243,6 +248,15 @@ fn base58_encode(input: &[u8]) -> String {
         result.push(ALPHABET[d as usize] as char);
     }
     result
+}
+
+/// Detect the machine's LAN IP address by opening a UDP socket to a public
+/// IP (no actual traffic is sent). Returns `None` if detection fails.
+fn detect_lan_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    Some(addr.ip())
 }
 
 /// Auto-register the node's pubkey in the marketplace keys.toml so
@@ -497,7 +511,7 @@ fn refresh_jobs_table(ui: &Ui) {
 }
 
 fn start_node(ui: &Ui, state: &NodeState) {
-    let settings = match ui.read_settings() {
+    let mut settings = match ui.read_settings() {
         Ok(s) => s,
         Err(e) => {
             ui.set_error(&e);
@@ -533,6 +547,17 @@ fn start_node(ui: &Ui, state: &NodeState) {
     // the second consent gate (§2.2). With `accept_workloads` off we write no
     // offer and spawn no node; only vtesserad meters.
     let accepting = settings.accept_workloads;
+
+    // Detect LAN IP for multi-machine discovery. When the endpoint is
+    // empty (the default), auto-fill with the LAN address so agents on
+    // the same network can reach this node.
+    let lan_ip = detect_lan_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "127.0.0.1".into());
+    if settings.endpoint.is_empty() {
+        settings.endpoint = format!("http://{lan_ip}:{}", settings.port);
+    }
+
     if accepting {
         let offer_json = offer::build_offer_json(&settings, &key);
         if let Err(e) = std::fs::write(settings::offer_path(), &offer_json) {
@@ -547,10 +572,16 @@ fn start_node(ui: &Ui, state: &NodeState) {
     // so vtessera-node can publish without manual keys.toml setup.
     register_node_in_marketplace(&key.verifying_key().to_bytes(), &node_id);
 
-    // Bind loopback to match the advertised endpoint (default
-    // http://127.0.0.1:8402): the node has no TLS/auth and must not sit on
-    // a routable interface. The node binary's `--bind` stays configurable.
-    let bind = format!("127.0.0.1:{}", settings.port);
+    // Bind to all interfaces so other machines can reach the node.
+    let bind = format!("0.0.0.0:{}", settings.port);
+
+    // Offer-index — the discovery service that agents query and nodes
+    // publish to. Bind to all interfaces for LAN/internet reachability.
+    let index_port: u16 = 8403;
+    let index_bind = format!("0.0.0.0:{index_port}");
+
+    // Publish URL points to the offer-index, auto-detected from LAN IP.
+    let publish = Some(format!("http://{lan_ip}:{index_port}"));
 
     let bin_dir = daemon::bin_dir();
     let opts = daemon::StartOptions {
@@ -564,7 +595,8 @@ fn start_node(ui: &Ui, state: &NodeState) {
         key_path: settings::key_path(),
         state_dir: settings::state_dir(),
         spawn_node: accepting,
-        publish: Some("http://127.0.0.1:8443".into()),
+        publish,
+        index_bind: Some(index_bind),
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,
