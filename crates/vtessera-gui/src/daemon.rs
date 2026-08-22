@@ -117,9 +117,18 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
     meter_cmd
         .arg("--config")
         .arg(opts.daemon_config.as_os_str());
-    let meter = meter_cmd
+    let mut meter = meter_cmd
         .spawn()
         .map_err(|e| format!("spawn vtesserad: {e}"))?;
+
+    // Helper: kill + reap the meter process so it doesn't panic on EPIPE
+    // when we bail after a partial-spawn failure. Without this, the
+    // dropped Child closes stderr while vtesserad is still writing, and
+    // `panic = "abort"` turns the EPIPE into SIGABRT (issue #69).
+    let kill_meter = |meter: &mut Child| {
+        let _ = meter.kill();
+        let _ = meter.wait();
+    };
 
     // Spawn the offer-index before the node so the node can register.
     let offer_index = if let Some(ref index_bind) = opts.index_bind {
@@ -132,11 +141,13 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
         } else {
             let mut idx_cmd = build_command("vtessera-offer-index", extra);
             idx_cmd.args(["--bind", index_bind]);
-            Some(
-                idx_cmd
-                    .spawn()
-                    .map_err(|e| format!("spawn vtessera-offer-index: {e}"))?,
-            )
+            match idx_cmd.spawn() {
+                Ok(child) => Some(child),
+                Err(e) => {
+                    kill_meter(&mut meter);
+                    return Err(format!("spawn vtessera-offer-index: {e}"));
+                }
+            }
         }
     } else {
         None
@@ -177,11 +188,18 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
         if let Some(url) = &opts.publish {
             node_cmd.args(["--publish", url]);
         }
-        Some(
-            node_cmd
-                .spawn()
-                .map_err(|e| format!("spawn vtessera-node: {e}"))?,
-        )
+        match node_cmd.spawn() {
+            Ok(child) => Some(child),
+            Err(e) => {
+                kill_meter(&mut meter);
+                // Also kill offer-index if we spawned it.
+                if let Some(mut idx) = offer_index {
+                    let _ = idx.kill();
+                    let _ = idx.wait();
+                }
+                return Err(format!("spawn vtessera-node: {e}"));
+            }
+        }
     };
 
     Ok(Daemons {
