@@ -1,0 +1,51 @@
+Source: vtessera
+Section: net
+Priority: optional
+Maintainer: Vtessera contributors <https://github.com/douglasdemaio/vtessera>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               rustc,
+               dh-cargo (>= 24)
+Standards-Version: 4.6.2
+Homepage: https://github.com/douglasdemaio/vtessera
+Rules-Requires-Root: no
+
+Package: vtessera
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Opt-in compute marketplace — metering daemon
+ Vtessera is a metering daemon for an opt-in compute marketplace.
+ It samples local resource usage from /proc, produces signed usage
+ receipts (Ed25519), and writes them to a state directory.
+ .
+ This package ships the core daemon (vtesserad).
+
+Package: vtessera-node
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Opt-in compute marketplace — node HTTP server
+ The node server exposes an HTTP API for AI agents to submit jobs,
+ verify x402 payments, and retrieve signed receipts. Includes MCP
+ (Model Context Protocol) tool interface.
+ .
+ This package ships vtessera-node and vtessera-mcp.
+
+Package: vtessera-offer-index
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Opt-in compute marketplace — central offer index
+ The offer index aggregates signed offers from provider nodes and
+ serves them to AI agents. Supports heartbeats, claims, and
+ STUN-reflexive candidate discovery.
+ .
+ This package ships vtessera-offer-index.
+
+Package: vtessera-settle
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Opt-in compute marketplace — settlement tool
+ Reads signed job receipts from the spool and writes settlement
+ records. When wired to Solana, submits completion-fraction
+ settlements against the on-chain escrow.
+ .
+ This package ships vtessera-settle.

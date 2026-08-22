@@ -773,15 +773,15 @@ fn main() {
             spawn_publisher(url.clone(), offer_json, args.publish_interval);
             // Gather candidates (LAN + STUN reflexive) and start heartbeating
             // them to the index so agents know how to reach this node.
-            let lan_ip = args.bind.split(':').next().unwrap_or("0.0.0.0");
+            let lan_ip = args.bind.split(':').next().unwrap_or("0.0.0.0").to_string();
             let port: u16 = args
                 .bind
                 .rsplit(':')
                 .next()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(8402);
-            let candidates = gather_candidates(lan_ip, port);
-            spawn_heartbeat(url.clone(), node_id.clone(), candidates);
+            let candidates = gather_candidates(&lan_ip, port);
+            spawn_heartbeat(url.clone(), node_id.clone(), candidates, lan_ip, port);
             Some(Arc::new(client) as Arc<dyn IndexClient>)
         }
         None => None,
@@ -887,15 +887,32 @@ fn post_heartbeat(
 /// Background loop that sends heartbeats with candidate addresses to the
 /// index on an interval. Candidates include STUN reflexive addresses so
 /// agents outside the LAN can reach this node.
+///
+/// Candidates are re-gathered every cycle so the node picks up IP changes
+/// (DHCP renewal, VPN toggle) and re-probes STUN for a fresh reflexive
+/// address. The first heartbeat fires immediately on startup so the index
+/// isn't stale for the first 30 seconds.
 fn spawn_heartbeat(
     index_url: String,
     node_id: String,
-    candidates: Vec<vtessera_transport::Candidate>,
+    initial_candidates: Vec<vtessera_transport::Candidate>,
+    lan_ip: String,
+    port: u16,
 ) {
     thread::spawn(move || {
         let interval = Duration::from_secs(DEFAULT_HEARTBEAT_SECS);
+        let mut candidates = initial_candidates;
+        // Send first heartbeat immediately so the index reflects this node
+        // from the moment the server starts accepting connections.
+        match post_heartbeat(&index_url, &node_id, &candidates) {
+            Ok(()) => {}
+            Err(e) => eprintln!("vtessera-node: initial heartbeat failed (will retry): {e}"),
+        }
         loop {
             thread::sleep(interval);
+            // Re-gather candidates to pick up IP changes and fresh STUN
+            // reflexive addresses.
+            candidates = gather_candidates(&lan_ip, port);
             match post_heartbeat(&index_url, &node_id, &candidates) {
                 Ok(()) => {}
                 Err(e) => eprintln!("vtessera-node: heartbeat failed (will retry): {e}"),

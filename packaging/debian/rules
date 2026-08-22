@@ -1,0 +1,42 @@
+#!/usr/bin/make -f
+export CARGO_HOME=/usr/share/cargo
+
+%:
+	dh $@ --buildsystem=cargo
+
+override_dh_auto_build:
+	# Build all four binaries in one pass.
+	cargo build --release --locked -p vtesserad \
+	  -p vtessera-node-api --features serve \
+	  -p vtessera-offer-index --features serve \
+	  -p vtessera-settlement
+
+override_dh_auto_install:
+	# Binaries
+	install -D -m 0755 target/release/vtesserad \
+	  debian/vtessera/usr/bin/vtesserad
+	install -D -m 0755 target/release/vtessera-node \
+	  debian/vtessera-node/usr/bin/vtessera-node
+	install -D -m 0755 target/release/vtessera-mcp \
+	  debian/vtessera-node/usr/bin/vtessera-mcp
+	install -D -m 0755 target/release/vtessera-offer-index \
+	  debian/vtessera-offer-index/usr/bin/vtessera-offer-index
+	install -D -m 0755 target/release/vtessera-settle \
+	  debian/vtessera-settle/usr/bin/vtessera-settle
+
+	# Systemd units
+	install -D -m 0644 packaging/vtesserad.service \
+	  debian/vtessera/lib/systemd/system/vtesserad.service
+
+	# Config + AppArmor (daemon only)
+	install -D -m 0644 packaging/vtessera.toml.example \
+	  debian/vtessera/etc/vtessera/vtessera.toml.example
+	install -D -m 0644 packaging/vtessera.apparmor \
+	  debian/vtessera/etc/apparmor.d/usr.bin.vtesserad
+
+	# State directory
+	install -d -m 0700 debian/vtessera/var/lib/vtessera
+
+override_dh_auto_test:
+	# Skip tests during deb build — CI already runs the full suite.
+	# The test binaries need GTK4 dev libs which aren't in build-deps.
