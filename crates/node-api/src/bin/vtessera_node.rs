@@ -1061,12 +1061,10 @@ fn handle_relay_request(
 
     // Read body bytes
     let mut body = vec![0u8; body_len];
-    if body_len > 0 {
-        if reader.read_exact(&mut body).is_err() {
-            let resp = serde_json::json!({"error": "failed to read request body"});
-            let _ = writer.write_all(format!("RESPONSE {resp}\n").as_bytes());
-            return;
-        }
+    if body_len > 0 && reader.read_exact(&mut body).is_err() {
+        let resp = serde_json::json!({"error": "failed to read request body"});
+        let _ = writer.write_all(format!("RESPONSE {resp}\n").as_bytes());
+        return;
     }
 
     let method = match method_str {
