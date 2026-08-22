@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn prune_stale_keeps_unheartbeated_fresh_entries() {
         let mut state = IndexState::new();
-        let node = register_one(&mut state, 1);
+        let _node = register_one(&mut state, 1);
         assert_eq!(state.prune_stale(NOW + 100, 360), 0);
         assert_eq!(state.count(), 1);
     }
