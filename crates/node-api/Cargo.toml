@@ -33,6 +33,7 @@ serve = [
     "dep:vtessera-mini-http",
     "dep:vtessera-executor",
     "dep:vtessera-settlement",
+    "dep:vtessera-transport",
     "dep:ureq",
     # Production CPU backend (ROADMAP.md §1): Cloud Hypervisor microVM. The
     # feature only pulls serde_json in the executor crate; it spawns the
@@ -58,6 +59,7 @@ vtessera-executor = { path = "../executor", optional = true }
 # Module 3 (ROADMAP.md §3): job-receipt signing for the node binary.
 vtessera-settlement = { path = "../settlement", optional = true }
 vtessera-mini-http = { path = "../mini-http", optional = true }
+vtessera-transport = { path = "../transport", optional = true }
 # Outbound HTTP for the offer-index publish loop + claim gate + MCP discover
 # (serve only — the default library build stays socket-free).
 ureq = { workspace = true, optional = true }

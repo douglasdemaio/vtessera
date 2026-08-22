@@ -72,8 +72,10 @@ use vtessera_settlement::SigningKey;
 use vtessera_settlement::{
     derive_node_id, load_node_key, sign_job_receipt, JobReceipt, JOB_RECEIPT_SCHEMA_VER,
 };
+use vtessera_transport::gather_candidates;
 
 const DEFAULT_PUBLISH_INTERVAL_SECS: u64 = 60;
+const DEFAULT_HEARTBEAT_SECS: u64 = 30;
 const INDEX_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn usage_and_exit() -> ! {
@@ -769,6 +771,12 @@ fn main() {
                 Err(e) => eprintln!("vtessera-node: publish to {url} failed (will retry): {e}"),
             }
             spawn_publisher(url.clone(), offer_json, args.publish_interval);
+            // Gather candidates (LAN + STUN reflexive) and start heartbeating
+            // them to the index so agents know how to reach this node.
+            let lan_ip = args.bind.split(':').next().unwrap_or("0.0.0.0");
+            let port: u16 = args.bind.rsplit(':').next().and_then(|s| s.parse().ok()).unwrap_or(8402);
+            let candidates = gather_candidates(lan_ip, port);
+            spawn_heartbeat(url.clone(), node_id.clone(), candidates);
             Some(Arc::new(client) as Arc<dyn IndexClient>)
         }
         None => None,
@@ -841,6 +849,40 @@ fn spawn_publisher(index_url: String, offer_json: String, interval: Duration) {
             match publish_offer(&client, &offer_json) {
                 Ok(()) => {}
                 Err(e) => eprintln!("vtessera-node: publish refresh failed (will retry): {e}"),
+            }
+        }
+    });
+}
+
+/// POST a heartbeat with candidates to the index. Non-fatal: caller logs
+/// and retries on the next tick.
+fn post_heartbeat(index_url: &str, node_id: &str, candidates: &[vtessera_transport::Candidate]) -> Result<(), String> {
+    let url = format!("{}/offers/{node_id}/heartbeat", index_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "candidates": candidates,
+    });
+    let resp = ureq::Agent::new_with_defaults()
+        .post(&url)
+        .header("content-type", "application/json")
+        .send(serde_json::to_string(&body).unwrap().as_str())
+        .map_err(|e| e.to_string())?;
+    match resp.status().as_u16() {
+        200 => Ok(()),
+        other => Err(format!("heartbeat rejected: status {other}")),
+    }
+}
+
+/// Background loop that sends heartbeats with candidate addresses to the
+/// index on an interval. Candidates include STUN reflexive addresses so
+/// agents outside the LAN can reach this node.
+fn spawn_heartbeat(index_url: String, node_id: String, candidates: Vec<vtessera_transport::Candidate>) {
+    thread::spawn(move || {
+        let interval = Duration::from_secs(DEFAULT_HEARTBEAT_SECS);
+        loop {
+            thread::sleep(interval);
+            match post_heartbeat(&index_url, &node_id, &candidates) {
+                Ok(()) => {}
+                Err(e) => eprintln!("vtessera-node: heartbeat failed (will retry): {e}"),
             }
         }
     });

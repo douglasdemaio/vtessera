@@ -40,6 +40,10 @@ pub struct IndexEntry {
     pub claimed_by: Option<String>,
     /// UNIX epoch second the current claim expires. `0` when unclaimed.
     pub claim_until_unix: u64,
+    /// Candidate addresses for this node, updated via heartbeats.
+    pub candidates: Vec<vtessera_transport::Candidate>,
+    /// Last heartbeat timestamp. `0` = never heartbeated.
+    pub last_heartbeat_unix: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +138,23 @@ impl std::fmt::Display for ClaimError {
 
 impl std::error::Error for ClaimError {}
 
+/// Why a heartbeat operation failed.
+#[derive(Debug)]
+pub enum HeartbeatError {
+    /// The node_id has no registered offer.
+    NotFound,
+}
+
+impl std::fmt::Display for HeartbeatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HeartbeatError::NotFound => write!(f, "node not registered"),
+        }
+    }
+}
+
+impl std::error::Error for HeartbeatError {}
+
 /// The index. Keyed by `node_id` (a signed offer carries exactly one);
 /// re-registering the same node id replaces the prior entry.
 #[derive(Debug, Default)]
@@ -201,6 +222,8 @@ impl IndexState {
                 fetched_at_unix: now_unix,
                 claimed_by,
                 claim_until_unix,
+                candidates: vec![],
+                last_heartbeat_unix: 0,
             },
         );
         Ok(node_id)
@@ -280,6 +303,37 @@ impl IndexState {
             Some(_) => Err(ClaimError::NotOwner),
         }
     }
+
+    /// Handle a heartbeat from a node. Updates candidates and last_heartbeat.
+    pub fn heartbeat(
+        &mut self,
+        node_id: &str,
+        candidates: Vec<vtessera_transport::Candidate>,
+        now_unix: u64,
+    ) -> Result<(), HeartbeatError> {
+        let entry = self
+            .entries
+            .get_mut(node_id)
+            .ok_or(HeartbeatError::NotFound)?;
+        entry.candidates = candidates;
+        entry.last_heartbeat_unix = now_unix;
+        Ok(())
+    }
+
+    /// Drop entries that haven't heartbeated recently (stale entry removal).
+    /// Entries that never heartbeated are pruned if they are older than
+    /// `stale_secs` from registration.
+    pub fn prune_stale(&mut self, now_unix: u64, stale_secs: u64) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, e| {
+            if e.last_heartbeat_unix == 0 {
+                e.fetched_at_unix + stale_secs > now_unix
+            } else {
+                e.last_heartbeat_unix + stale_secs > now_unix
+            }
+        });
+        before - self.entries.len()
+    }
 }
 
 /// Route one HTTP request. `now_unix` is the index's clock — supplied by
@@ -295,33 +349,40 @@ pub fn dispatch(state: &mut IndexState, req: Request, now_unix: u64) -> Response
         (Method::Get, "/offers") => handle_list(state, query, now_unix),
         (Method::Post, "/offers") => handle_register(state, &req.body, now_unix),
         _ => match path.strip_prefix("/offers/") {
-            Some(rest) if !rest.is_empty() => match rest.strip_suffix("/claim") {
-                Some(node_id) if !node_id.is_empty() => match req.method {
-                    Method::Post => handle_claim(state, node_id, &req.body, now_unix),
-                    Method::Delete => handle_release(state, node_id, &req.body, now_unix),
-                    _ => Response::text(404, "not found"),
-                },
-                _ => match rest.split('/').next() {
+            Some(rest) if !rest.is_empty() => {
+                if let Some(node_id) = rest.strip_suffix("/heartbeat") {
+                    if !node_id.is_empty() && req.method == Method::Post {
+                        return handle_heartbeat(state, node_id, &req.body, now_unix);
+                    }
+                }
+                match rest.strip_suffix("/claim") {
                     Some(node_id) if !node_id.is_empty() => match req.method {
-                        Method::Get => {
-                            state.prune(now_unix);
-                            match state.get(node_id) {
-                                Some(entry) => Response::json(200, entry_to_json(entry)),
-                                None => Response::text(404, "no offer for this node_id"),
-                            }
-                        }
-                        Method::Delete => {
-                            if state.remove(node_id) {
-                                Response::json(200, r#"{"status":"removed"}"#.into())
-                            } else {
-                                Response::text(404, "no offer for this node_id")
-                            }
-                        }
+                        Method::Post => handle_claim(state, node_id, &req.body, now_unix),
+                        Method::Delete => handle_release(state, node_id, &req.body, now_unix),
                         _ => Response::text(404, "not found"),
                     },
-                    _ => Response::text(404, "not found"),
-                },
-            },
+                    _ => match rest.split('/').next() {
+                        Some(node_id) if !node_id.is_empty() => match req.method {
+                            Method::Get => {
+                                state.prune(now_unix);
+                                match state.get(node_id) {
+                                    Some(entry) => Response::json(200, entry_to_json(entry)),
+                                    None => Response::text(404, "no offer for this node_id"),
+                                }
+                            }
+                            Method::Delete => {
+                                if state.remove(node_id) {
+                                    Response::json(200, r#"{"status":"removed"}"#.into())
+                                } else {
+                                    Response::text(404, "no offer for this node_id")
+                                }
+                            }
+                            _ => Response::text(404, "not found"),
+                        },
+                        _ => Response::text(404, "not found"),
+                    },
+                }
+            }
             _ => Response::text(404, "not found"),
         },
     }
@@ -406,6 +467,28 @@ fn handle_release(state: &mut IndexState, node_id: &str, body: &[u8], now_unix: 
     }
 }
 
+fn handle_heartbeat(state: &mut IndexState, node_id: &str, body: &[u8], now_unix: u64) -> Response {
+    let text = String::from_utf8_lossy(body);
+    let value: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::json(
+                400,
+                serde_json::to_string(&json!({ "status": "rejected", "reason": format!("bad JSON: {e}") }))
+                    .unwrap_or_else(|_| r#"{"status":"rejected"}"#.into()),
+            );
+        }
+    };
+    let candidates: Vec<vtessera_transport::Candidate> = match value.get("candidates") {
+        Some(c) => serde_json::from_value(c.clone()).unwrap_or_default(),
+        None => vec![],
+    };
+    match state.heartbeat(node_id, candidates, now_unix) {
+        Ok(()) => Response::json(200, r#"{"status":"ok"}"#.into()),
+        Err(HeartbeatError::NotFound) => Response::text(404, "node not registered"),
+    }
+}
+
 fn parse_filter(query: Option<&str>) -> OfferFilter {
     let mut f = OfferFilter::default();
     if let Some(q) = query {
@@ -438,12 +521,15 @@ fn parse_filter(query: Option<&str>) -> OfferFilter {
 
 fn entry_to_value(e: &IndexEntry) -> Value {
     let offer = serde_json::to_value(&e.offer).unwrap_or(Value::Null);
+    let candidates = serde_json::to_value(&e.candidates).unwrap_or(Value::Null);
     json!({
         "offer": offer,
         "source": e.source,
         "fetched_at": e.fetched_at_unix,
         "claimed_by": e.claimed_by,
         "claimed_until_unix": e.claim_until_unix,
+        "candidates": candidates,
+        "last_heartbeat": e.last_heartbeat_unix,
     })
 }
 
@@ -911,5 +997,123 @@ mod tests {
         assert_eq!(v["count"], 1);
         assert_eq!(v["offers"][0]["claimed_by"], "agent-a");
         assert!(v["offers"][0]["claimed_until_unix"].as_u64().unwrap() > NOW);
+    }
+
+    #[test]
+    fn heartbeat_updates_candidates() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        let candidates = vec![vtessera_transport::Candidate {
+            kind: vtessera_transport::CandidateKind::ServerReflexive,
+            transport: vtessera_transport::TransportKind::QuicDirect,
+            addr: "203.0.113.1:8402".into(),
+            priority: 100,
+        }];
+        state
+            .heartbeat(&node, candidates.clone(), NOW + 10)
+            .unwrap();
+        let entry = state.get(&node).unwrap();
+        assert_eq!(entry.candidates, candidates);
+        assert_eq!(entry.last_heartbeat_unix, NOW + 10);
+    }
+
+    #[test]
+    fn heartbeat_rejects_unknown_node() {
+        let mut state = IndexState::new();
+        assert!(state.heartbeat("nope", vec![], NOW).is_err());
+    }
+
+    #[test]
+    fn prune_stale_drops_old_entries() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        state.heartbeat(&node, vec![], NOW).unwrap();
+        assert_eq!(state.prune_stale(NOW + 1000, 360), 1);
+        assert_eq!(state.count(), 0);
+    }
+
+    #[test]
+    fn prune_stale_keeps_fresh_entries() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        state.heartbeat(&node, vec![], NOW + 100).unwrap();
+        assert_eq!(state.prune_stale(NOW + 200, 360), 0);
+        assert_eq!(state.count(), 1);
+    }
+
+    #[test]
+    fn prune_stale_keeps_unheartbeated_fresh_entries() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        assert_eq!(state.prune_stale(NOW + 100, 360), 0);
+        assert_eq!(state.count(), 1);
+    }
+
+    #[test]
+    fn dispatch_heartbeat_updates_candidates() {
+        let node = signed_node_id(1);
+        let mut state = IndexState::new();
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW)
+            .unwrap();
+
+        let body = r#"{"candidates":[{"kind":"server_reflexive","transport":"quic_direct","addr":"203.0.113.1:8402","priority":100}]}"#;
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Post,
+                path: format!("/offers/{node}/heartbeat"),
+                headers: vec![],
+                body: body.as_bytes().to_vec(),
+            },
+            NOW + 10,
+        );
+        assert_eq!(r.status, 200);
+        let entry = state.get(&node).unwrap();
+        assert_eq!(entry.candidates.len(), 1);
+        assert_eq!(entry.last_heartbeat_unix, NOW + 10);
+    }
+
+    #[test]
+    fn dispatch_heartbeat_unknown_node_is_404() {
+        let mut state = IndexState::new();
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Post,
+                path: "/offers/nope/heartbeat".into(),
+                headers: vec![],
+                body: br#"{}"#.to_vec(),
+            },
+            NOW,
+        );
+        assert_eq!(r.status, 404);
+    }
+
+    #[test]
+    fn list_includes_candidates() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        let candidates = vec![vtessera_transport::Candidate {
+            kind: vtessera_transport::CandidateKind::Host,
+            transport: vtessera_transport::TransportKind::QuicDirect,
+            addr: "192.168.1.100:8402".into(),
+            priority: 200,
+        }];
+        state.heartbeat(&node, candidates, NOW).unwrap();
+
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Get,
+                path: "/offers".into(),
+                headers: vec![],
+                body: vec![],
+            },
+            NOW,
+        );
+        assert_eq!(r.status, 200);
+        let v: Value = serde_json::from_str(&String::from_utf8(r.body).unwrap()).unwrap();
+        assert_eq!(v["offers"][0]["candidates"][0]["addr"], "192.168.1.100:8402");
     }
 }
