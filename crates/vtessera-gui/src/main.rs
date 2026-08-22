@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use gtk4::glib;
 use gtk4::prelude::*;
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use daemon::Daemons;
 use settings::Settings;
@@ -279,6 +280,45 @@ fn register_node_in_marketplace(pubkey: &[u8; 32], node_id: &str) {
     if let Err(e) = std::fs::write(&keys_path, &content) {
         eprintln!("marketplace keys write: {e}");
     }
+}
+
+/// Advertise this node via mDNS so LAN agents can discover it without
+/// knowing the IP address. The service type `_vtessera._tcp` carries
+/// TXT records with the node_id and offer endpoint.
+fn advertise_mdns(node_id: &str, lan_ip: &str, port: u16, index_port: u16) {
+    let service_type = "_vtessera._tcp.local.";
+    // mDNS instance names are limited to 63 chars; use a short prefix.
+    let instance = node_id.chars().take(30).collect::<String>();
+    let properties = [
+        ("node_id", node_id),
+        ("offer_index", &format!("{lan_ip}:{index_port}")),
+    ];
+    let svc = match ServiceInfo::new(
+        service_type,
+        &instance,
+        &format!("{lan_ip}.local."),
+        lan_ip,
+        port,
+        &properties[..],
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("mDNS service info: {e}");
+            return;
+        }
+    };
+    let mdns = match ServiceDaemon::new() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("mDNS daemon: {e}");
+            return;
+        }
+    };
+    if let Err(e) = mdns.register(svc) {
+        eprintln!("mDNS register: {e}");
+        return;
+    }
+    eprintln!("mDNS: advertising _vtessera._tcp as {instance} on {lan_ip}:{port}");
 }
 
 /// The three observable states (§2.3 of `docs/CONSENT.md`):
@@ -643,6 +683,13 @@ fn start_node(ui: &Ui, state: &NodeState) {
         ui.log_line(&format!(
             "offer written to {}",
             settings::offer_path().display()
+        ));
+
+        // Advertise via mDNS so LAN agents can discover this node
+        // without knowing the IP address.
+        advertise_mdns(&node_id, &lan_ip, settings.port, index_port);
+        ui.log_line(&format!(
+            "mDNS: advertising _vtessera._tcp as {node_id} on {lan_ip}"
         ));
     }
 
