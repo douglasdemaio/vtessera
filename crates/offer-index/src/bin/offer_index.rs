@@ -144,6 +144,24 @@ fn main() {
         });
     }
 
+    // Stale entry pruner — drops entries that haven't heartbeated in 3x
+    // the heartbeat interval (90s default). Nodes that die or shut down
+    // gracefully will be cleaned up automatically.
+    {
+        let state = state.clone();
+        let stale_secs = 3 * vtessera_transport::DEFAULT_HEARTBEAT_SECS;
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_secs(
+                vtessera_transport::DEFAULT_HEARTBEAT_SECS,
+            ));
+            let now = now_unix();
+            let pruned = state.lock().unwrap().prune_stale(now, stale_secs);
+            if pruned > 0 {
+                eprintln!("pruned {pruned} stale entries");
+            }
+        });
+    }
+
     let listener = TcpListener::bind(&args.bind).unwrap_or_else(|e| {
         eprintln!("bind {}: {e}", args.bind);
         process::exit(1);

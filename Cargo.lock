@@ -2061,6 +2061,7 @@ dependencies = [
  "vtessera-mini-http",
  "vtessera-offer",
  "vtessera-settlement",
+ "vtessera-transport",
 ]
 
 [[package]]
@@ -2079,10 +2080,12 @@ name = "vtessera-offer-index"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "serde",
  "serde_json",
  "ureq",
  "vtessera-mini-http",
  "vtessera-offer",
+ "vtessera-transport",
 ]
 
 [[package]]
@@ -2095,6 +2098,16 @@ dependencies = [
  "serde_json",
  "sha2",
  "vtessera-executor",
+]
+
+[[package]]
+name = "vtessera-transport"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
