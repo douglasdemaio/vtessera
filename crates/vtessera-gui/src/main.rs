@@ -51,7 +51,11 @@ struct Ui {
     port_spin: gtk4::SpinButton,
     endpoint_entry: gtk4::Entry,
     escrow_entry: gtk4::Entry,
-    network_entry: gtk4::Entry,
+    network_dd: gtk4::DropDown,
+    network_custom_entry: gtk4::Entry,
+    local_network_switch: gtk4::Switch,
+    marketplace_url_entry: gtk4::Entry,
+    cidr_entry: gtk4::Entry,
     interval_spin: gtk4::SpinButton,
     backend_dd: gtk4::DropDown,
     /// "Accept workloads from others" — the second consent gate (§2.2 of
@@ -98,6 +102,15 @@ impl Ui {
         self.currency_dd.set_sensitive(paid);
     }
 
+    /// Show/hide fields based on network dropdown and local-network toggle.
+    fn sync_network_sensitivity(&self) {
+        let custom = self.network_dd.selected() == 2;
+        self.network_custom_entry.set_visible(custom);
+        let local = self.local_network_switch.is_active();
+        self.marketplace_url_entry.set_visible(!local);
+        self.cidr_entry.set_visible(local);
+    }
+
     fn set_error(&self, msg: &str) {
         self.error_label.set_text(msg);
         self.error_label.set_visible(!msg.is_empty());
@@ -131,6 +144,7 @@ impl Ui {
         })?;
         let port = self.port_spin.value() as u16;
         let backend = backend_from_dropdown(&self.backend_dd);
+        let (network_preset, network) = network_from_dropdown(&self.network_dd, &self.network_custom_entry);
         let settings = Settings {
             mode: mode.into(),
             currency: currency.into(),
@@ -139,13 +153,16 @@ impl Ui {
             port,
             endpoint: self.endpoint_entry.text().trim().to_string(),
             escrow_account: self.escrow_entry.text().trim().to_string(),
-            network: self.network_entry.text().trim().to_string(),
+            network,
+            network_preset,
             sample_interval_secs: self.interval_spin.value() as u64,
             backend: backend.into(),
             metering_consent: self.settings.borrow().metering_consent,
             accept_workloads: self.accept_switch.is_active(),
             consent_version: self.settings.borrow().consent_version,
-            marketplace_url: self.settings.borrow().marketplace_url.clone(),
+            marketplace_url: self.marketplace_url_entry.text().trim().to_string(),
+            local_network: self.local_network_switch.is_active(),
+            allowed_cidrs: cidr_list_from_entry(&self.cidr_entry),
         };
         settings.validate()?;
         Ok(settings)
@@ -165,7 +182,16 @@ impl Ui {
             self.endpoint_entry.set_text(&s.endpoint);
         }
         self.escrow_entry.set_text(&s.escrow_account);
-        self.network_entry.set_text(&s.network);
+        self.network_dd
+            .set_selected(network_preset_to_index(&s.network_preset));
+        self.network_custom_entry.set_text(&s.network);
+        self.network_custom_entry
+            .set_visible(s.network_preset == "custom");
+        self.local_network_switch.set_active(s.local_network);
+        self.marketplace_url_entry.set_text(&s.marketplace_url);
+        self.cidr_entry
+            .set_text(&s.allowed_cidrs.join(", "));
+        self.sync_network_sensitivity();
         self.interval_spin.set_value(s.sample_interval_secs as f64);
         self.backend_dd
             .set_selected(if s.backend == "local-cpu" { 1 } else { 0 });
@@ -181,6 +207,36 @@ fn backend_from_dropdown(dd: &gtk4::DropDown) -> &'static str {
     } else {
         "noop-cpu"
     }
+}
+
+/// Map the network dropdown index to `(preset, network_string)`.
+fn network_from_dropdown(dd: &gtk4::DropDown, custom_entry: &gtk4::Entry) -> (String, String) {
+    match dd.selected() {
+        0 => ("devnet".into(), "solana-devnet".into()),
+        1 => ("mainnet".into(), "solana-mainnet".into()),
+        _ => (
+            "custom".into(),
+            custom_entry.text().trim().to_string(),
+        ),
+    }
+}
+
+fn network_preset_to_index(preset: &str) -> u32 {
+    match preset {
+        "devnet" => 0,
+        "mainnet" => 1,
+        _ => 2,
+    }
+}
+
+/// Parse comma-separated CIDR list from entry text.
+fn cidr_list_from_entry(entry: &gtk4::Entry) -> Vec<String> {
+    entry
+        .text()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn format_price(p: f64) -> String {
@@ -795,7 +851,15 @@ fn build_ui(app: &gtk4::Application) {
         ),
         endpoint_entry: gtk4::Entry::new(),
         escrow_entry: gtk4::Entry::new(),
-        network_entry: gtk4::Entry::new(),
+        network_dd: gtk4::DropDown::from_strings(&[
+            "Solana Devnet",
+            "Solana Mainnet",
+            "Custom",
+        ]),
+        network_custom_entry: gtk4::Entry::new(),
+        local_network_switch: gtk4::Switch::new(),
+        marketplace_url_entry: gtk4::Entry::new(),
+        cidr_entry: gtk4::Entry::new(),
         interval_spin: gtk4::SpinButton::new(
             Some(&gtk4::Adjustment::new(60.0, 1.0, 3600.0, 1.0, 10.0, 0.0)),
             0.0,
@@ -909,8 +973,54 @@ fn build_ui(app: &gtk4::Application) {
     let network_caption = gtk4::Label::new(Some("Network"));
     network_caption.set_xalign(0.0);
     grid.attach(&network_caption, 0, row, 1, 1);
-    ui.network_entry.set_hexpand(true);
-    grid.attach(&ui.network_entry, 1, row, 1, 1);
+    let network_box = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    let network_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    ui.network_dd.set_halign(gtk4::Align::Start);
+    network_row.append(&ui.network_dd);
+    ui.network_custom_entry
+        .set_placeholder_text(Some("e.g. solana-devnet"));
+    ui.network_custom_entry.set_hexpand(true);
+    ui.network_custom_entry.set_visible(false);
+    network_row.append(&ui.network_custom_entry);
+    network_box.append(&network_row);
+    grid.attach(&network_box, 1, row, 1, 1);
+    row += 1;
+
+    let local_network_caption = gtk4::Label::new(Some("Local network only"));
+    local_network_caption.set_xalign(0.0);
+    grid.attach(&local_network_caption, 0, row, 1, 1);
+    ui.local_network_switch.set_halign(gtk4::Align::Start);
+    ui.local_network_switch.set_valign(gtk4::Align::Center);
+    grid.attach(&ui.local_network_switch, 1, row, 1, 1);
+    row += 1;
+
+    let local_network_hint = gtk4::Label::new(Some(
+        "ON = operate on a private LAN only (no internet discovery, no marketplace \
+         publishing). OFF = public internet mode with offer-index and STUN.",
+    ));
+    local_network_hint.set_wrap(true);
+    local_network_hint.set_xalign(0.0);
+    local_network_hint.add_css_class("dim-label");
+    grid.attach(&local_network_hint, 0, row, 2, 1);
+    row += 1;
+
+    let marketplace_caption = gtk4::Label::new(Some("Marketplace URL"));
+    marketplace_caption.set_xalign(0.0);
+    grid.attach(&marketplace_caption, 0, row, 1, 1);
+    ui.marketplace_url_entry
+        .set_placeholder_text(Some("http://<index-ip>:8443"));
+    ui.marketplace_url_entry.set_hexpand(true);
+    grid.attach(&ui.marketplace_url_entry, 1, row, 1, 1);
+    row += 1;
+
+    let cidr_caption = gtk4::Label::new(Some("Allowed CIDRs"));
+    cidr_caption.set_xalign(0.0);
+    grid.attach(&cidr_caption, 0, row, 1, 1);
+    ui.cidr_entry
+        .set_placeholder_text(Some("192.168.1.0/24, 10.0.0.0/8"));
+    ui.cidr_entry.set_hexpand(true);
+    ui.cidr_entry.set_visible(false);
+    grid.attach(&ui.cidr_entry, 1, row, 1, 1);
     row += 1;
 
     let interval_caption = gtk4::Label::new(Some("Sample interval (s)"));
@@ -1108,6 +1218,35 @@ fn build_ui(app: &gtk4::Application) {
         }
     });
 
+    // Network dropdown: show/hide custom entry and handle mainnet confirmation.
+    ui.network_dd.connect_selected_notify({
+        let ui = ui.clone();
+        move |dd| {
+            ui.sync_network_sensitivity();
+            if dd.selected() == 1 {
+                let window = ui.start_btn.root().and_then(|r| r.downcast_ref::<gtk4::Window>().cloned());
+                if let Some(win) = window {
+                    show_mainnet_confirm(&ui, &win);
+                }
+            }
+        }
+    });
+
+    // Local network toggle: show/hide marketplace and CIDR fields.
+    ui.local_network_switch.connect_active_notify({
+        let ui = ui.clone();
+        let state = state.clone();
+        move |_switch| {
+            ui.sync_network_sensitivity();
+            let running = state.daemons.borrow().is_some();
+            if running {
+                ui.log_line("Network scope changed — restarting node to apply...");
+                stop_node(&ui, &state);
+                start_node(&ui, &state);
+            }
+        }
+    });
+
     // The second consent gate (§2.2) is a persisted, explicit switch. OFF by
     // default; changes persist immediately and only take effect on Start.
     ui.accept_switch.connect_active_notify({
@@ -1287,6 +1426,41 @@ fn show_consent_gate(app: &gtk4::Application, ui: &Rc<Ui>, main_window: &gtk4::A
     });
 
     gate.present();
+}
+
+/// Show a confirmation dialog when the user selects mainnet.
+/// Reverts to devnet if they cancel.
+fn show_mainnet_confirm(ui: &Ui, parent: &gtk4::Window) {
+    let dialog = gtk4::AlertDialog::builder()
+        .message("Switch to Solana Mainnet?")
+        .detail(
+            "Mainnet uses real SOL and real money. Settlement is irreversible. \
+             Only switch if you understand the risks and have tested on devnet.",
+        )
+        .buttons(["Cancel", "Switch to Mainnet"])
+        .build();
+
+    let dd_weak = gtk4::prelude::ObjectExt::downgrade(&ui.network_dd);
+    let sync_target = ui.network_custom_entry.clone();
+    let sync_target2 = ui.local_network_switch.clone();
+    let sync_target3 = ui.marketplace_url_entry.clone();
+    let sync_target4 = ui.cidr_entry.clone();
+    dialog.choose(Some(parent), None::<&gtk4::gio::Cancellable>, move |result| {
+        // Index 0 = Cancel, Index 1 = Switch to Mainnet.
+        let cancel = match result {
+            Ok(idx) => idx != 1,
+            Err(_) => true,
+        };
+        if cancel {
+            if let Some(dd) = dd_weak.upgrade() {
+                dd.set_selected(0);
+            }
+            sync_target.set_visible(false);
+            sync_target2.set_active(false);
+            sync_target3.set_visible(true);
+            sync_target4.set_visible(false);
+        }
+    });
 }
 
 fn install_css() {

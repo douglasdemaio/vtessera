@@ -38,6 +38,20 @@ pub struct Settings {
     pub escrow_account: String,
     /// Chain identifier surfaced in the x402 payment challenge.
     pub network: String,
+    /// Dropdown preset: "devnet", "mainnet", or "custom".
+    /// When "devnet" or "mainnet", `network` is auto-set.
+    /// When "custom", the user types a free-text network string.
+    #[serde(default = "default_network_preset")]
+    pub network_preset: String,
+    /// When true, operate in local/private network mode. The daemon switches
+    /// to `network.mode = "private"` and uses `allowed_cidrs` for access
+    /// control. The GUI hides marketplace publishing and STUN discovery.
+    #[serde(default)]
+    pub local_network: bool,
+    /// CIDR ranges allowed in local network mode (e.g. "192.168.1.0/24").
+    /// Empty means all private ranges are allowed.
+    #[serde(default)]
+    pub allowed_cidrs: Vec<String>,
     /// Metering sample interval in seconds.
     pub sample_interval_secs: u64,
     /// Job executor backend passed to `vtessera-node --backend`:
@@ -73,6 +87,10 @@ fn default_backend() -> String {
     DEFAULT_BACKEND.into()
 }
 
+fn default_network_preset() -> String {
+    "devnet".into()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -84,6 +102,9 @@ impl Default for Settings {
             endpoint: String::new(), // auto-detected at start time
             escrow_account: DEFAULT_ESCROW.into(),
             network: DEFAULT_NETWORK.into(),
+            network_preset: "devnet".into(),
+            local_network: false,
+            allowed_cidrs: Vec::new(),
             sample_interval_secs: 60,
             backend: DEFAULT_BACKEND.into(),
             metering_consent: false,
@@ -158,6 +179,15 @@ impl Settings {
         }
         if self.network.trim().is_empty() {
             return Err("network must not be empty".into());
+        }
+        if !matches!(
+            self.network_preset.as_str(),
+            "devnet" | "mainnet" | "custom"
+        ) {
+            return Err(format!(
+                "network_preset must be \"devnet\", \"mainnet\", or \"custom\", got \"{}\"",
+                self.network_preset
+            ));
         }
         if self.is_free() {
             // Donate mode: no address and no price required.
@@ -241,12 +271,15 @@ mod tests {
             endpoint: "http://127.0.0.1:8402".into(),
             escrow_account: DEFAULT_ESCROW.into(),
             network: "solana-devnet".into(),
+            network_preset: "devnet".into(),
             sample_interval_secs: 60,
             backend: DEFAULT_BACKEND.into(),
             metering_consent: true,
             accept_workloads: false,
             consent_version: CURRENT_CONSENT_VERSION,
             marketplace_url: String::new(),
+            local_network: false,
+            allowed_cidrs: Vec::new(),
         }
     }
 

@@ -140,12 +140,15 @@ mod tests {
             endpoint: "http://127.0.0.1:8402".into(),
             escrow_account: crate::settings::DEFAULT_ESCROW.into(),
             network: "solana-devnet".into(),
+            network_preset: "devnet".into(),
             sample_interval_secs: 60,
             backend: crate::settings::DEFAULT_BACKEND.into(),
             metering_consent: true,
             accept_workloads: false,
             consent_version: crate::settings::CURRENT_CONSENT_VERSION,
             marketplace_url: String::new(),
+            local_network: false,
+            allowed_cidrs: Vec::new(),
         }
     }
 
