@@ -28,8 +28,8 @@
             "build-commands": [
                 "rm -f rust-toolchain.toml",
                 "cargo --offline fetch --manifest-path Cargo.toml --locked",
-                "cargo --offline build --release --manifest-path Cargo.toml --locked -p vtessera-gui -p vtesserad -p vtessera-node-api --features vtessera-node-api/serve",
-                "install -Dm755 -t ${FLATPAK_DEST}/bin target/release/vtessera-gui target/release/vtesserad target/release/vtessera-node target/release/vtessera-mcp",
+                "cargo --offline build --release --manifest-path Cargo.toml --locked -p vtessera-gui -p vtesserad -p vtessera-node-api --features vtessera-node-api/serve -p vtessera-offer-index --features vtessera-offer-index/serve",
+                "install -Dm755 -t ${FLATPAK_DEST}/bin target/release/vtessera-gui target/release/vtesserad target/release/vtessera-node target/release/vtessera-mcp target/release/vtessera-offer-index",
                 "install -Dm644 -t ${FLATPAK_DEST}/share/metainfo packaging/flatpak/io.github.douglasdemaio.Vtessera.metainfo.xml",
                 "install -Dm644 -t ${FLATPAK_DEST}/share/applications packaging/flatpak/io.github.douglasdemaio.Vtessera.desktop",
                 "for s in 16 22 24 32 36 48 64 72 96 128 192 256 512; do install -Dm644 -t ${FLATPAK_DEST}/share/icons/hicolor/${s}x${s}/apps packaging/flatpak/icons/${s}x${s}/io.github.douglasdemaio.Vtessera.png; done",
