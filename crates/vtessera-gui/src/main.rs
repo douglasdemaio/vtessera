@@ -689,6 +689,7 @@ fn start_node(ui: &Ui, state: &NodeState) {
         state_dir: settings::state_dir(),
         spawn_node: accepting,
         publish,
+        relay: None,
         index_bind: Some(index_bind),
     };
     let mut daemons = match daemon::start(&opts) {

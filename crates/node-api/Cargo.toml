@@ -35,6 +35,7 @@ serve = [
     "dep:vtessera-settlement",
     "dep:vtessera-transport",
     "dep:ureq",
+    "dep:base64",
     # Production CPU backend (ROADMAP.md §1): Cloud Hypervisor microVM. The
     # feature only pulls serde_json in the executor crate; it spawns the
     # `cloud-hypervisor` binary at runtime.
@@ -63,6 +64,7 @@ vtessera-transport = { path = "../transport", optional = true }
 # Outbound HTTP for the offer-index publish loop + claim gate + MCP discover
 # (serve only — the default library build stays socket-free).
 ureq = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

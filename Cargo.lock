@@ -2052,6 +2052,7 @@ version = "0.1.0"
 name = "vtessera-node-api"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ed25519-dalek",
  "hex",
  "serde",
@@ -2086,6 +2087,17 @@ dependencies = [
  "vtessera-mini-http",
  "vtessera-offer",
  "vtessera-transport",
+]
+
+[[package]]
+name = "vtessera-relay"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "rand",
+ "serde",
+ "serde_json",
+ "vtessera-mini-http",
 ]
 
 [[package]]

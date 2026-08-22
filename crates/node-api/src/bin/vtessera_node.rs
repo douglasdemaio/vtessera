@@ -54,6 +54,7 @@
 
 use std::env;
 use std::fs;
+use std::io::BufReader;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -110,6 +111,7 @@ struct Args {
     publish: Option<String>,
     publish_interval: Duration,
     rpc_url: String,
+    relay: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +221,7 @@ fn parse_args() -> Args {
     let mut publish: Option<String> = None;
     let mut publish_interval: u64 = DEFAULT_PUBLISH_INTERVAL_SECS;
     let mut rpc_url = "https://api.devnet.solana.com".to_string();
+    let mut relay: Option<String> = None;
     let mut it = env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -264,6 +267,7 @@ fn parse_args() -> Args {
                     rpc_url = s;
                 }
             }
+            "--relay" => relay = it.next(),
             "--backend" => {
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 backend = BackendChoice::parse(&raw).unwrap_or_else(|| usage_and_exit());
@@ -292,6 +296,7 @@ fn parse_args() -> Args {
             publish,
             publish_interval: Duration::from_secs(publish_interval),
             rpc_url,
+            relay,
         },
         _ => usage_and_exit(),
     }
@@ -792,7 +797,7 @@ fn main() {
     }));
 
     let state = NodeState {
-        offer,
+        offer: offer.clone(),
         escrow_account: args.escrow_account,
         network: args.network,
         runner: Some(runner),
@@ -800,6 +805,15 @@ fn main() {
         state_dir: Some(args.state_dir.clone().into()),
         index,
     };
+
+    // Relay client: connect outbound to the relay so nodes behind NAT can
+    // be reached by agents through the relay's public endpoint.
+    if let Some(relay_addr) = &args.relay {
+        let node_id_clone = node_id.clone();
+        let relay_addr = relay_addr.clone();
+        let state_clone = state.clone();
+        thread::spawn(move || run_relay_client(&relay_addr, &node_id_clone, state_clone));
+    }
 
     let listener = TcpListener::bind(&args.bind).unwrap_or_else(|e| {
         eprintln!("bind {}: {e}", args.bind);
@@ -919,4 +933,160 @@ fn spawn_heartbeat(
             }
         }
     });
+}
+
+/// Connect to a relay server and serve proxied requests.
+///
+/// Protocol over the persistent TCP connection:
+///   Node → Relay: REGISTER <node_id>\n
+///   Node ← Relay: (connection accepted)
+///   Node ← Relay: HEARTBEAT\n (every 30s from relay, or periodically)
+///   Node → Relay: HEARTBEAT_ACK\n
+///   Node ← Relay: REQUEST <json>\n<body-bytes>
+///   Node → Relay: RESPONSE <json>\n<body-bytes>
+///
+/// The REQUEST json contains: method, path, headers, body_len.
+/// The RESPONSE json contains: status, body (base64).
+fn run_relay_client(relay_addr: &str, node_id: &str, state: NodeState) {
+    use std::io::{BufRead, BufReader, Write};
+
+    loop {
+        eprintln!("vtessera-node: connecting to relay {relay_addr}");
+        let stream = match std::net::TcpStream::connect(relay_addr) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("vtessera-node: relay connect failed: {e}, retrying in 10s");
+                std::thread::sleep(Duration::from_secs(10));
+                continue;
+            }
+        };
+
+        if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(90))) {
+            eprintln!("vtessera-node: set read timeout: {e}");
+            continue;
+        }
+
+        let mut writer = match stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("vtessera-node: clone stream: {e}");
+                continue;
+            }
+        };
+
+        // Send REGISTER
+        if writer
+            .write_all(format!("REGISTER {node_id}\n").as_bytes())
+            .is_err()
+        {
+            eprintln!("vtessera-node: failed to send REGISTER, reconnecting");
+            std::thread::sleep(Duration::from_secs(5));
+            continue;
+        }
+        eprintln!("vtessera-node: registered with relay as {node_id}");
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    eprintln!("vtessera-node: relay disconnected");
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("vtessera-node: relay read error: {e}");
+                    break;
+                }
+            }
+
+            let trimmed = line.trim();
+            if trimmed == "HEARTBEAT" {
+                let _ = writer.write_all(b"HEARTBEAT_ACK\n");
+                continue;
+            }
+
+            if let Some(json_str) = trimmed.strip_prefix("REQUEST ") {
+                handle_relay_request(&mut reader, &mut writer, json_str, &state);
+                continue;
+            }
+
+            eprintln!("vtessera-node: unknown relay message: {trimmed}");
+        }
+
+        eprintln!("vtessera-node: reconnecting to relay in 5s");
+        std::thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn handle_relay_request(
+    reader: &mut BufReader<std::net::TcpStream>,
+    writer: &mut std::net::TcpStream,
+    json_str: &str,
+    state: &NodeState,
+) {
+    use base64::Engine;
+    use std::io::{Read, Write};
+
+    let req_json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            let resp = serde_json::json!({"error": format!("bad request json: {e}")});
+            let _ = writer.write_all(format!("RESPONSE {resp}\n").as_bytes());
+            return;
+        }
+    };
+
+    let method_str = req_json["method"].as_str().unwrap_or("GET");
+    let path = req_json["path"].as_str().unwrap_or("/");
+    let body_len = req_json["body_len"].as_u64().unwrap_or(0) as usize;
+
+    let inner_headers: Vec<(String, String)> = req_json["headers"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|pair| {
+                    let a = pair.as_array()?;
+                    if a.len() >= 2 {
+                        Some((a[0].as_str()?.to_string(), a[1].as_str()?.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Read body bytes
+    let mut body = vec![0u8; body_len];
+    if body_len > 0 && reader.read_exact(&mut body).is_err() {
+        let resp = serde_json::json!({"error": "failed to read request body"});
+        let _ = writer.write_all(format!("RESPONSE {resp}\n").as_bytes());
+        return;
+    }
+
+    let method = match method_str {
+        "GET" => HttpMethod::Get,
+        "POST" => HttpMethod::Post,
+        _ => HttpMethod::Other,
+    };
+
+    let http_req = HttpRequest {
+        method,
+        path: path.to_string(),
+        headers: inner_headers,
+        body,
+    };
+
+    let http_resp = dispatch(state, http_req);
+
+    let body_b64 = base64::engine::general_purpose::STANDARD.encode(&http_resp.body);
+    let resp_json = serde_json::json!({
+        "status": http_resp.status,
+        "body": body_b64,
+    });
+
+    let _ = writer.write_all(format!("RESPONSE {resp_json}\n").as_bytes());
 }
