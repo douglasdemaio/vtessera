@@ -62,6 +62,7 @@ jobs:
           cargo clippy -p vtessera-offer-index --all-targets -- -D warnings
           cargo clippy -p vtessera-offer-index --features serve --all-targets -- -D warnings
           cargo clippy -p vtessera-settlement --all-targets -- -D warnings
+          cargo clippy -p vtessera-agent --all-targets -- -D warnings
 
       - name: Test module crates
         run: |
@@ -73,6 +74,7 @@ jobs:
           cargo test -p vtessera-offer-index --locked
           cargo test -p vtessera-offer-index --features serve --locked
           cargo test -p vtessera-settlement --locked
+          cargo test -p vtessera-agent --locked
 
   # ── Heavy: Anchor escrow, adversarial suite, audit, deny ─────────────
   # Compiles Solana BPF toolchain, Anchor CLI, escrow program, litesvm

@@ -14,6 +14,7 @@
 #   crates/vtessera-config Config wizard for private/enterprise deployments
 #   crates/transport        Transport layer — types for iroh connectivity
 #   crates/metering-sidecar    Kata container guest-side metering
+#   crates/agent-cli        CLI entry point for AI agents (free jobs)
 #   programs/vtessera-escrow   Module 4 — Solana Anchor escrow program (excluded)
 #
 # Excluded (own toolchain):
@@ -41,6 +42,7 @@ members = [
     "crates/vtessera-config",
     "crates/transport",
     "crates/vtessera-metrics",
+    "crates/agent-cli",
 ]
 # Crates that live outside the host workspace because they pin Solana SDK
 # versions (1.18.x ecosystem) whose crypto dep tree (curve25519-dalek 3,

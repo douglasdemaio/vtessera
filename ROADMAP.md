@@ -242,15 +242,12 @@ the following gaps prevent agents from using the Flatpak out of the box:
 | --- | --- | --- | --- |
 | `vtessera-mcp` not installed in Flatpak | Agents speaking MCP can't use the Flatpak's MCP server; they must discover the HTTP API and speak raw JSON-RPC | Add `vtessera-mcp` to the Flatpak manifest's install step | **Fixed** (80467b8) |
 | Default mode is `paid` | First-time agent immediately hits HTTP 402 with no guidance on how to pay; no free fallback for smoke tests | Default to `free` on first run, or add a first-run wizard in the GUI that asks | **Fixed** (80467b8) |
-| No agent CLI entry point | Agent must manually `curl` with hand-crafted JSON; no `flatpak run ... --agent-submit job.json` | Add a CLI flag or a `vtessera-agent` helper that wraps the HTTP API | Open |
+| No agent CLI entry point | Agent must manually `curl` with hand-crafted JSON; no `flatpak run ... --agent-submit job.json` | Add a CLI flag or a `vtessera-agent` helper that wraps the HTTP API | **Fixed** (vtessera-agent binary: discover, offer, submit, health) |
 | Config changes require kill/restart | Editing `settings.toml` doesn't propagate to the running node; GUI doesn't restart the node | GUI should restart the node when settings change, or the node should watch the config file | **Fixed** (d695fc5) — GUI auto-restarts node on mode/accept_workloads toggle |
-| No localhost discovery | Agent must know the port (8402); no mDNS, no `/well-known` auto-discovery | Add mDNS registration or a well-known endpoint on localhost | Open |
+| No localhost discovery | Agent must know the port (8402); no mDNS, no `/well-known` auto-discovery | Add mDNS registration or a well-known endpoint on localhost | **Fixed** — well-known discovery file (`~/.local/share/vtessera/node-discovery.json`) + `vtessera-agent --local` |
 | No "For Agents" documentation | README has no section telling agents how to interact with the Flatpak | Add a section with the curl recipe and MCP instructions | **Fixed** (80467b8) — "For agents" section in README |
 
-**Remaining:** agent CLI entry point (nice-to-have, not blocking) and
-localhost discovery (mDNS or well-known endpoint). These are UX gaps, not
-security or correctness issues. The node works; the agent just can't find
-it without knowing the port.
+**Remaining:** none — both gaps are now fixed.
 
 ### 2e. Internet connectivity — iroh integration
 

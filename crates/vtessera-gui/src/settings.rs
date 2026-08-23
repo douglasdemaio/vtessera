@@ -257,6 +257,10 @@ pub fn state_dir() -> PathBuf {
     data_dir()
 }
 
+pub fn discovery_file_path() -> PathBuf {
+    data_dir().join("node-discovery.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
