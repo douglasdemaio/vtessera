@@ -22,7 +22,3 @@ toml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
-
-# mDNS service discovery — advertises the node on the LAN so agents
-# can find it without knowing the IP address.
-mdns-sd = "0.11"
