@@ -1,0 +1,16 @@
+[package]
+name = "vtessera-agent"
+version = "0.1.0"
+edition = "2018"
+description = "CLI entry point for AI agents to discover and submit jobs to vtessera nodes"
+license = "Apache-2.0"
+repository = "https://github.com/douglasdemaio/vtessera"
+
+[[bin]]
+name = "vtessera-agent"
+path = "src/main.rs"
+
+[dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
