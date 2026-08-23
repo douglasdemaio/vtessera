@@ -92,6 +92,9 @@ pub struct IndexEntry {
     pub claim_until_unix: u64,
     /// Candidate addresses for this node, updated via heartbeats.
     pub candidates: Vec<vtessera_transport::Candidate>,
+    /// iroh EndpointId (hex-encoded Ed25519 public key). Agents use this
+    /// to connect via iroh QUIC through relay infrastructure.
+    pub endpoint_id: Option<String>,
     /// Last heartbeat timestamp. `0` = never heartbeated.
     pub last_heartbeat_unix: u64,
 }
@@ -283,6 +286,7 @@ impl IndexState {
                 claimed_by,
                 claim_until_unix,
                 candidates: vec![],
+                endpoint_id: None,
                 last_heartbeat_unix: 0,
             },
         );
@@ -364,11 +368,12 @@ impl IndexState {
         }
     }
 
-    /// Handle a heartbeat from a node. Updates candidates and last_heartbeat.
+    /// Handle a heartbeat from a node. Updates candidates, endpoint_id, and last_heartbeat.
     pub fn heartbeat(
         &mut self,
         node_id: &str,
         candidates: Vec<vtessera_transport::Candidate>,
+        endpoint_id: Option<String>,
         now_unix: u64,
     ) -> Result<(), HeartbeatError> {
         let entry = self
@@ -376,6 +381,9 @@ impl IndexState {
             .get_mut(node_id)
             .ok_or(HeartbeatError::NotFound)?;
         entry.candidates = candidates;
+        if let Some(id) = endpoint_id {
+            entry.endpoint_id = Some(id);
+        }
         entry.last_heartbeat_unix = now_unix;
         Ok(())
     }
@@ -573,7 +581,11 @@ fn handle_heartbeat(state: &mut IndexState, node_id: &str, body: &[u8], now_unix
         Some(c) => serde_json::from_value(c.clone()).unwrap_or_default(),
         None => vec![],
     };
-    match state.heartbeat(node_id, candidates, now_unix) {
+    let endpoint_id = value
+        .get("endpoint_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    match state.heartbeat(node_id, candidates, endpoint_id, now_unix) {
         Ok(()) => Response::json(200, r#"{"status":"ok"}"#.into()),
         Err(HeartbeatError::NotFound) => Response::text(404, "node not registered"),
     }
@@ -619,6 +631,7 @@ fn entry_to_value(e: &IndexEntry) -> Value {
         "claimed_by": e.claimed_by,
         "claimed_until_unix": e.claim_until_unix,
         "candidates": candidates,
+        "endpoint_id": e.endpoint_id,
         "last_heartbeat": e.last_heartbeat_unix,
     })
 }
@@ -1100,7 +1113,7 @@ mod tests {
             priority: 100,
         }];
         state
-            .heartbeat(&node, candidates.clone(), NOW + 10)
+            .heartbeat(&node, candidates.clone(), None, NOW + 10)
             .unwrap();
         let entry = state.get(&node).unwrap();
         assert_eq!(entry.candidates, candidates);
@@ -1110,14 +1123,14 @@ mod tests {
     #[test]
     fn heartbeat_rejects_unknown_node() {
         let mut state = IndexState::new();
-        assert!(state.heartbeat("nope", vec![], NOW).is_err());
+        assert!(state.heartbeat("nope", vec![], None, NOW).is_err());
     }
 
     #[test]
     fn prune_stale_drops_old_entries() {
         let mut state = IndexState::new();
         let node = register_one(&mut state, 1);
-        state.heartbeat(&node, vec![], NOW).unwrap();
+        state.heartbeat(&node, vec![], None, NOW).unwrap();
         assert_eq!(state.prune_stale(NOW + 1000, 360), 1);
         assert_eq!(state.count(), 0);
     }
@@ -1126,7 +1139,7 @@ mod tests {
     fn prune_stale_keeps_fresh_entries() {
         let mut state = IndexState::new();
         let node = register_one(&mut state, 1);
-        state.heartbeat(&node, vec![], NOW + 100).unwrap();
+        state.heartbeat(&node, vec![], None, NOW + 100).unwrap();
         assert_eq!(state.prune_stale(NOW + 200, 360), 0);
         assert_eq!(state.count(), 1);
     }
@@ -1190,7 +1203,7 @@ mod tests {
             addr: "192.168.1.100:8402".into(),
             priority: 200,
         }];
-        state.heartbeat(&node, candidates, NOW).unwrap();
+        state.heartbeat(&node, candidates, None, NOW).unwrap();
 
         let r = dispatch(
             &mut state,

@@ -880,12 +880,13 @@ fn spawn_publisher(index_url: String, offer_json: String, interval: Duration) {
     });
 }
 
-/// POST a heartbeat with candidates to the index. Non-fatal: caller logs
-/// and retries on the next tick.
+/// POST a heartbeat with candidates and endpoint_id to the index.
+/// Non-fatal: caller logs and retries on the next tick.
 fn post_heartbeat(
     index_url: &str,
     node_id: &str,
     candidates: &[vtessera_transport::Candidate],
+    endpoint_id: Option<&str>,
 ) -> Result<(), String> {
     let url = format!(
         "{}/offers/{node_id}/heartbeat",
@@ -893,6 +894,7 @@ fn post_heartbeat(
     );
     let body = serde_json::json!({
         "candidates": candidates,
+        "endpoint_id": endpoint_id,
     });
     let resp = ureq::Agent::new_with_defaults()
         .post(&url)
@@ -920,17 +922,16 @@ fn spawn_heartbeat_with_iroh(
         let interval = Duration::from_secs(DEFAULT_HEARTBEAT_SECS);
         // Send first heartbeat immediately so the index reflects this node
         // from the moment the server starts accepting connections.
-        let candidates = get_iroh_candidates(&iroh_ep);
-        match post_heartbeat(&index_url, &node_id, &candidates) {
+        let (candidates, endpoint_id) = get_iroh_info(&iroh_ep);
+        match post_heartbeat(&index_url, &node_id, &candidates, endpoint_id.as_deref()) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: initial heartbeat failed (will retry): {e}"),
         }
         loop {
             thread::sleep(interval);
-            // Fetch fresh candidates from the iroh endpoint — addresses
-            // change as the endpoint discovers LAN peers and relay paths.
-            let candidates = get_iroh_candidates(&iroh_ep);
-            match post_heartbeat(&index_url, &node_id, &candidates) {
+            // Fetch fresh candidates and endpoint_id from the iroh endpoint.
+            let (candidates, endpoint_id) = get_iroh_info(&iroh_ep);
+            match post_heartbeat(&index_url, &node_id, &candidates, endpoint_id.as_deref()) {
                 Ok(()) => {}
                 Err(e) => eprintln!("vtessera-node: heartbeat failed (will retry): {e}"),
             }
@@ -938,21 +939,22 @@ fn spawn_heartbeat_with_iroh(
     });
 }
 
-/// Fetch current candidates from the iroh endpoint.
+/// Fetch current candidates and endpoint_id from the iroh endpoint.
 ///
-/// Returns at minimum a LAN host candidate (from the bind address)
-/// plus any relay candidates iroh has discovered. Falls back to
-/// an empty list if the endpoint hasn't initialized yet.
-fn get_iroh_candidates(
+/// Returns (candidates, endpoint_id). The endpoint_id is the hex-encoded
+/// Ed25519 public key that agents use to connect via iroh.
+fn get_iroh_info(
     iroh_ep: &Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>,
-) -> Vec<vtessera_transport::Candidate> {
+) -> (Vec<vtessera_transport::Candidate>, Option<String>) {
     // Try to read the endpoint — non-blocking, returns empty if not ready.
     if let Ok(guard) = iroh_ep.try_read() {
         if let Some(ep) = guard.as_ref() {
-            return ep.candidates();
+            let candidates = ep.candidates();
+            let endpoint_id = ep.node_id().to_string();
+            return (candidates, Some(endpoint_id));
         }
     }
-    vec![]
+    (vec![], None)
 }
 
 /// Start the iroh endpoint in a background tokio runtime.
