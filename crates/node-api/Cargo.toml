@@ -56,6 +56,7 @@ kata = ["vtessera-executor/kata"]
 # crate gated behind a Cargo feature so v0's no-inbound-network rule
 # survives by default. See ROADMAP.md §2c.
 vtessera-offer = { path = "../offer" }
+vtessera-metrics = { path = "../vtessera-metrics" }
 # Module 1 (ROADMAP.md §1). Feature-gated so the default library build
 # never links the privileged executor surface; only the `serve` binaries
 # (the composition roots) construct a backend.

@@ -26,6 +26,7 @@ serve = ["dep:ureq"]
 vtessera-offer = { path = "../offer" }
 vtessera-mini-http = { path = "../mini-http" }
 vtessera-transport = { path = "../transport" }
+vtessera-metrics = { path = "../vtessera-metrics" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ureq = { workspace = true, optional = true }
