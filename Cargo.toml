@@ -12,7 +12,7 @@
 #   crates/vtessera-gui    GTK4 desktop app (Flatpak-packaged)
 #   crates/marketplace-server  Reference marketplace server (Axum, private/enterprise)
 #   crates/vtessera-config Config wizard for private/enterprise deployments
-#   crates/transport        Transport layer — candidates + STUN reflexive discovery
+#   crates/transport        Transport layer — types for iroh connectivity
 #   crates/metering-sidecar    Kata container guest-side metering
 #   programs/vtessera-escrow   Module 4 — Solana Anchor escrow program (excluded)
 #
@@ -40,7 +40,6 @@ members = [
     "crates/marketplace-server",
     "crates/vtessera-config",
     "crates/transport",
-    "crates/vtessera-relay",
 ]
 # Crates that live outside the host workspace because they pin Solana SDK
 # versions (1.18.x ecosystem) whose crypto dep tree (curve25519-dalek 3,
@@ -72,6 +71,15 @@ rand = "0.8"
 hex = "0.4"
 serde_json = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# iroh — p2p QUIC connections dialed by Ed25519 public key. Provides
+# NAT traversal (hole punching + relay fallback) out of the box.
+iroh = "1"
+# Async runtime for iroh integration.
+tokio = { version = "1", features = ["rt", "macros"] }
+# Async read/write traits for iroh QUIC streams.
+futures-util = "0.3"
+# Base64 encoding for secret keys.
+base64 = "0.22"
 
 [profile.release]
 opt-level = 2

@@ -45,7 +45,7 @@ pub struct Settings {
     pub network_preset: String,
     /// When true, operate in local/private network mode. The daemon switches
     /// to `network.mode = "private"` and uses `allowed_cidrs` for access
-    /// control. The GUI hides marketplace publishing and STUN discovery.
+    /// control. The GUI hides marketplace publishing and internet discovery.
     #[serde(default)]
     pub local_network: bool,
     /// CIDR ranges allowed in local network mode (e.g. "192.168.1.0/24").

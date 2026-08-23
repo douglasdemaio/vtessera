@@ -58,10 +58,6 @@ pub struct StartOptions<'a> {
     /// `vtessera-node --publish <index-url>`: optional marketplace index
     /// URL to register the node's offer with. None = no publishing.
     pub publish: Option<String>,
-    /// `vtessera-node --relay <host:port>`: optional relay server address.
-    /// When set, the node connects outbound to the relay so agents behind
-    /// different NATs can reach it through the relay's public endpoint.
-    pub relay: Option<String>,
     /// Bind address for the offer-index (`vtessera-offer-index --bind`).
     /// None = don't spawn the index.
     pub index_bind: Option<String>,
@@ -191,9 +187,6 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
             .args(["--state-dir", opts.state_dir.to_str().unwrap_or_default()]);
         if let Some(url) = &opts.publish {
             node_cmd.args(["--publish", url]);
-        }
-        if let Some(addr) = &opts.relay {
-            node_cmd.args(["--relay", addr]);
         }
         match node_cmd.spawn() {
             Ok(child) => Some(child),

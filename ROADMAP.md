@@ -252,6 +252,39 @@ localhost discovery (mDNS or well-known endpoint). These are UX gaps, not
 security or correctness issues. The node works; the agent just can't find
 it without knowing the port.
 
+### 2e. Internet connectivity — iroh integration
+
+Nodes behind symmetric NAT (mobile hotspots, CGNAT, corporate networks)
+are unreachable via STUN reflexive addresses. Rather than hand-rolling
+ICE/STUN/TURN/QUIC, Vtessera adopts **iroh** as a connectivity sidecar:
+
+- **Dial by key** — iroh's `EndpointId` maps 1:1 to vtessera's Ed25519
+  node identity. Agents dial by `node_id`, not by IP:port.
+- **Relay fallback** — iroh connects via public relay servers when direct
+  connection fails. Relays see only encrypted QUIC traffic.
+- **Hole punching** — iroh attempts DCUtR hole punching automatically.
+  Works for cone NAT; falls back to relay for symmetric NAT.
+- **Live path migration** — when a node changes networks, iroh tracks the
+  new path without restart. No stale candidates.
+- **QUIC transport** — authenticated encryption, concurrent streams,
+  no head-of-line blocking. Ed25519 key pinning built in.
+
+**Architecture:** iroh runs as a sidecar in `crates/transport/`. The
+node creates an iroh `Endpoint` from its existing `SecretKey`, connects
+to a relay on startup, and exposes its HTTP API over iroh QUIC streams.
+The offer-index stores `EndpointId` (replacing the candidate list). Agents
+discover nodes via the index, then dial by `EndpointId` through iroh.
+
+**What gets removed:**
+- `stun_probe()`, `discover_reflexive_addr()` in `crates/transport/`
+- `vtessera-relay` binary (replaced by iroh relay infrastructure)
+- `CandidateKind::ServerReflexive`, `CandidateKind::Relayed`
+- `gather_candidates()` — iroh manages live addresses
+- mDNS `_vtessera._tcp` registration (dead code, nothing browses it)
+
+**What stays:** offer-index (signed offers, claims, heartbeats),
+Ed25519 identity, x402 payment flow, mini-http server.
+
 ### 2b. Paying (or not) — x402
 
 For **paid** compute, use **x402**, the open HTTP-native standard for
