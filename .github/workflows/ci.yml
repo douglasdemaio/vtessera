@@ -16,6 +16,9 @@ env:
   AR_x86_64_unknown_linux_musl: ar
 
 jobs:
+  # ── Lightweight: format, clippy, unit tests ──────────────────────────
+  # Fast feedback — no Solana/Anchor toolchain, no heavy compilation.
+  # Always runs on a fresh runner with full disk.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -71,6 +74,38 @@ jobs:
           cargo test -p vtessera-offer-index --features serve --locked
           cargo test -p vtessera-settlement --locked
 
+  # ── Heavy: Anchor escrow, adversarial suite, audit, deny ─────────────
+  # Compiles Solana BPF toolchain, Anchor CLI, escrow program, litesvm
+  # adversarial suite, cargo-audit, cargo-deny.  Runs on a fresh runner
+  # with full disk — no overlap with the `check` job's build artifacts.
+  escrow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Free ~50 GB by removing pre-installed runtimes the job never uses.
+      # The runner's ~14 GB /home + ~14 GB /usr fill up fast once cargo
+      # starts compiling Solana + Anchor + audit toolchains.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/local/share/chromium \
+            /usr/local/share/powershell /usr/share/swift \
+            /usr/local/lib/node_modules /usr/local/graalvm \
+            /usr/share/miniconda /usr/share/az_* /opt/az \
+            /opt/microsoft /opt/pipx_bin
+          sudo apt-get clean
+          sudo apt-get autoremove -y
+          df -h /
+
+      - name: Install Rust toolchain
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Install musl cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       # Anchor escrow program (Module 4) lives under programs/ and builds
       # with the Solana BPF toolchain — `anchor build`. It's excluded
       # from the host workspace, so the host CI doesn't try to compile
@@ -82,11 +117,6 @@ jobs:
       # quote/borsh MSRV pins). CI only needs the compiled ELF for the
       # adversarial litesvm suite; the IDL is a deploy-time artifact.
 
-      # Adversarial escrow suite (MAINNET-CHECKLIST §2): standalone
-      # litesvm crate in tests/adversarial. Needs the compiled program
-      # ELF first (`anchor build` in programs/), which needs the SBF
-      # toolchain. Pinned versions mirror the dev environment.
-      #
       # release.solana.com has been intermittently failing TLS handshakes
       # (curl error 35) from CI runners and from dev machines; the agave
       # GitHub release is the same toolchain and is reachable. Download
@@ -118,9 +148,15 @@ jobs:
       # Build with rustc 1.79: anchor 0.30.1's locked time 0.3.29 only
       # compiles with the parsing/formatting/macros features on rustc <= 1.79
       # (E0282 type annotations needed for Box<_> on 1.80+).
+      #
+      # Ring's C build scripts write temp .s files to $TMPDIR; the default
+      # /tmp fills up on the runner, so redirect to $HOME/tmp which has
+      # more headroom after the disk space cleanup above.
       - name: Install Anchor CLI
         run: |
           rustup toolchain install 1.79.0 --profile minimal
+          export TMPDIR="$HOME/tmp"
+          mkdir -p "$TMPDIR"
           cargo +1.79.0 install --locked anchor-cli --git https://github.com/coral-xyz/anchor --tag v0.30.1
           anchor --version
 
@@ -136,12 +172,33 @@ jobs:
           cargo fmt --check
           cargo test --locked
 
+      # Reclaim disk before the adversarial suite — it compiles its own
+      # large dependency tree from scratch in tests/adversarial/target/.
+      - name: Mid-run cleanup
+        run: |
+          rm -rf programs/vtessera-escrow/target
+          rm -rf "$HOME/tmp"
+          rm -rf ~/.cargo/registry/cache ~/.cargo/git/db
+          df -h /
+
+      # Adversarial escrow suite (MAINNET-CHECKLIST §2): standalone
+      # litesvm crate in tests/adversarial. Needs the compiled program
+      # ELF first (`anchor build` in programs/), which needs the SBF
+      # toolchain. Pinned versions mirror the dev environment.
       - name: Adversarial suite (litesvm, §2)
         run: |
           cd tests/adversarial
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
           cargo test --locked
+
+      # Reclaim disk before the cargo install steps (audit + deny both
+      # compile from source).
+      - name: Clean build artifacts
+        run: |
+          rm -rf target/release target/debug
+          rm -rf tests/adversarial/target
+          df -h /
 
       - name: Audit
         run: |
@@ -173,15 +230,14 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: vtesserad-x86_64-unknown-linux-musl
+          name: vtessera-x86_64-unknown-linux-musl
           path: dist/vtesserad
         if: github.ref == 'refs/heads/main'
 
-  # vtessera-gui (GTK4 desktop app) is excluded from the `check` job because
-  # compiling it needs system GUI dev libs (gtk4, cairo, pango, gdk-pixbuf).
-  # It's also deliberately never built for the musl target (the Flatpak build
-  # takes care of shipping it). This job installs the libs via apt and gates
-  # the GUI crate's surface the same way the module crates are gated.
+  # ── GUI: GTK4 desktop app ────────────────────────────────────────────
+  # Excluded from `check` because compiling it needs system GUI dev libs
+  # (gtk4, cairo, pango, gdk-pixbuf). Deliberately never built for the
+  # musl target (the Flatpak build takes care of shipping it).
   gui:
     runs-on: ubuntu-latest
     steps:
