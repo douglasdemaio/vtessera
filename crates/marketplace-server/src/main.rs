@@ -1,5 +1,5 @@
 use axum::extract::{Json, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
@@ -65,6 +65,23 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+/// GET /metrics — Prometheus text exposition format.
+async fn metrics() -> (
+    StatusCode,
+    [(header::HeaderName, header::HeaderValue); 1],
+    String,
+) {
+    let body = vtessera_metrics::render();
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8".parse().unwrap(),
+        )],
+        body,
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -82,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/v1/receipts", post(submit_receipt).get(list_receipts))
         .route("/api/v1/health", get(health))
+        .route("/metrics", get(metrics))
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(1024 * 1024)); // 1 MiB
 
