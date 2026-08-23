@@ -457,6 +457,24 @@ curl -X POST http://127.0.0.1:8403/offers/<node_id>/claim \
 See `scripts/offer-index-demo.sh` for a full end-to-end demo with
 two nodes, claims, and MCP discovery.
 
+### Local discovery (same machine)
+
+When the GUI starts a node, it writes a discovery file to
+`~/.local/share/vtessera/node-discovery.json` containing the endpoint,
+node ID, and index URL. The `vtessera-agent` CLI reads this file with
+`--local`:
+
+```bash
+# Auto-discover the running node
+vtessera-agent --local health
+vtessera-agent --local offer
+vtessera-agent --local submit --job job.json
+```
+
+If the file is missing or the node process has exited, the agent falls
+back to `http://127.0.0.1:8402`. The file is removed when the node
+stops.
+
 ### Paid jobs (x402)
 
 For paid nodes, the agent must pay via x402 — the node returns `402`

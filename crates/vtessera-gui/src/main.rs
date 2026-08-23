@@ -650,6 +650,8 @@ fn start_node(ui: &Ui, state: &NodeState) {
         spawn_node: accepting,
         publish,
         index_bind: Some(index_bind),
+        discovery_file: Some(settings::discovery_file_path()),
+        node_id: Some(node_id.clone()),
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,

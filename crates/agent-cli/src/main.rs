@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::process;
 
 #[derive(Parser)]
@@ -25,6 +26,10 @@ struct Cli {
     /// Output raw JSON
     #[arg(long, global = true)]
     json: bool,
+
+    /// Auto-discover node from the local discovery file
+    #[arg(long, global = true)]
+    local: bool,
 }
 
 #[derive(Subcommand)]
@@ -43,6 +48,42 @@ enum Commands {
     Health,
 }
 
+#[derive(serde::Deserialize)]
+struct DiscoveryFile {
+    endpoint: String,
+    #[allow(dead_code)]
+    node_id: Option<String>,
+    index: Option<String>,
+    pid: Option<u32>,
+}
+
+fn discovery_file_path() -> PathBuf {
+    let data_dir = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            PathBuf::from(home).join(".local/share")
+        });
+    data_dir.join("vtessera/node-discovery.json")
+}
+
+fn read_discovery() -> Option<DiscoveryFile> {
+    let path = discovery_file_path();
+    let data = std::fs::read_to_string(&path).ok()?;
+    let disc: DiscoveryFile = serde_json::from_str(&data).ok()?;
+
+    // Check if the process is still alive.
+    if let Some(pid) = disc.pid {
+        // kill(pid, 0) checks process existence without sending a signal.
+        let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+        if !alive {
+            return None;
+        }
+    }
+
+    Some(disc)
+}
+
 fn main() {
     let cli = Cli::parse();
     let agent_id = cli.agent_id.unwrap_or_else(|| {
@@ -54,11 +95,31 @@ fn main() {
         format!("agent-{:x}", t)
     });
 
+    let json = cli.json;
+    let default_index = cli.index;
+
+    // Resolve node and index: --local reads the discovery file, otherwise
+    // use the explicit --node/--index flags (or their defaults).
+    let (node, index) = if cli.local {
+        match read_discovery() {
+            Some(disc) => (disc.endpoint, disc.index.unwrap_or(default_index)),
+            None => {
+                eprintln!(
+                    "error: no running node found (discovery file missing or stale: {})",
+                    discovery_file_path().display()
+                );
+                process::exit(1);
+            }
+        }
+    } else {
+        (cli.node, default_index)
+    };
+
     let result = match &cli.command {
-        Commands::Discover => discover(&cli.index, cli.json),
-        Commands::Offer => offer(&cli.node, cli.json),
-        Commands::Submit { job } => submit(&cli.node, &agent_id, job, cli.json),
-        Commands::Health => health(&cli.node, cli.json),
+        Commands::Discover => discover(&index, json),
+        Commands::Offer => offer(&node, json),
+        Commands::Submit { job } => submit(&node, &agent_id, job, json),
+        Commands::Health => health(&node, json),
     };
 
     if let Err(e) = result {

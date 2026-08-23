@@ -29,6 +29,8 @@ pub struct Daemons {
     pub offer_index: Option<Child>,
     /// True when the node wasn't spawned because one was already serving.
     pub node_reused: bool,
+    /// Path to the discovery file, if written.
+    discovery_file: Option<PathBuf>,
 }
 
 /// Options for [`start`].
@@ -61,6 +63,31 @@ pub struct StartOptions<'a> {
     /// Bind address for the offer-index (`vtessera-offer-index --bind`).
     /// None = don't spawn the index.
     pub index_bind: Option<String>,
+    /// Path to write the discovery file (node endpoint for agent CLI).
+    /// None = don't write a discovery file.
+    pub discovery_file: Option<PathBuf>,
+    /// Node identity (hex-encoded Ed25519 public key) for the discovery file.
+    pub node_id: Option<String>,
+}
+
+/// Write a discovery file so agents on the same machine can find the node.
+fn write_discovery(path: &Path, endpoint: &str, node_id: &str, index: &str) {
+    let pid = std::process::id();
+    let json = serde_json::json!({
+        "endpoint": endpoint,
+        "node_id": node_id,
+        "index": index,
+        "pid": pid,
+    });
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, serde_json::to_string_pretty(&json).unwrap());
+}
+
+/// Remove the discovery file on shutdown.
+fn remove_discovery(path: &Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// Directory holding the built binaries, when set (local runs). In the
@@ -159,6 +186,7 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
             node: None,
             offer_index,
             node_reused: false,
+            discovery_file: None,
         });
     }
 
@@ -202,11 +230,27 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
         }
     };
 
+    // Write discovery file so agents on the same machine can find the node.
+    let discovery_file = if let Some(ref path) = opts.discovery_file {
+        let endpoint = &opts.bind;
+        let node_id = opts.node_id.as_deref().unwrap_or("unknown");
+        let index = opts
+            .index_bind
+            .as_deref()
+            .map(|b| format!("http://127.0.0.1:{}", &b[b.rfind(':').unwrap() + 1..]))
+            .unwrap_or_default();
+        write_discovery(path, endpoint, node_id, &index);
+        Some(path.clone())
+    } else {
+        None
+    };
+
     Ok(Daemons {
         meter,
         node,
         offer_index,
         node_reused,
+        discovery_file,
     })
 }
 
@@ -290,5 +334,9 @@ pub fn stop(daemons: &mut Daemons, on_line: &impl Fn(String)) {
     }
     if killed {
         on_line("node stopped".into());
+    }
+    // Remove the discovery file so agents don't find a dead node.
+    if let Some(ref path) = daemons.discovery_file {
+        remove_discovery(path);
     }
 }

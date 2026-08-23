@@ -12,5 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
+libc = "0.2"
