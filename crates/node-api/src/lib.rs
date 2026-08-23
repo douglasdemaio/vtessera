@@ -272,6 +272,7 @@ pub fn dispatch(state: &NodeState, req: HttpRequest) -> HttpResponse {
         (HttpMethod::Get, "/.well-known/agent.json") => handle_agent_card(state),
         (HttpMethod::Post, "/jobs") => handle_jobs(state, req),
         (HttpMethod::Get, "/healthz") => HttpResponse::text(200, "ok"),
+        (HttpMethod::Get, "/metrics") => handle_metrics(),
         _ => HttpResponse::text(404, "not found"),
     }
 }
@@ -285,6 +286,22 @@ pub fn parse_signed_offer(raw: &str) -> Result<SignedOffer, String> {
 
 fn handle_offer(state: &NodeState) -> HttpResponse {
     HttpResponse::json(200, vtessera_offer::to_json(&state.offer))
+}
+
+fn handle_metrics() -> HttpResponse {
+    let body = vtessera_metrics::render();
+    let body_bytes = body.into_bytes();
+    HttpResponse {
+        status: 200,
+        headers: vec![
+            (
+                "content-type".into(),
+                "text/plain; version=0.0.4; charset=utf-8".into(),
+            ),
+            ("content-length".into(), body_bytes.len().to_string()),
+        ],
+        body: body_bytes,
+    }
 }
 
 fn handle_mcp_manifest(state: &NodeState) -> HttpResponse {
@@ -1040,6 +1057,33 @@ mod tests {
             let s = state_with_runner(PriceQuote::Free, FakeRunner);
             let r = dispatch(&s, job_req(vec![]));
             assert_eq!(r.status, 200);
+        }
+
+        #[test]
+        fn metrics_endpoint_returns_prometheus_format() {
+            let s = state(PriceQuote::Free);
+            let r = dispatch(&s, req(HttpMethod::Get, "/metrics", vec![]));
+            assert_eq!(r.status, 200);
+            let content_type = r
+                .headers
+                .iter()
+                .find(|(k, _)| k == "content-type")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
+            assert!(
+                content_type.contains("text/plain"),
+                "expected text/plain, got {content_type}"
+            );
+            // Response should be valid Prometheus text exposition format.
+            let body = String::from_utf8(r.body).unwrap();
+            // Empty body is acceptable if no metrics are registered yet.
+            // If metrics exist, they should have HELP/TYPE lines.
+            if !body.is_empty() {
+                assert!(
+                    body.contains("# HELP") || body.contains("# TYPE"),
+                    "expected Prometheus format markers in: {body}"
+                );
+            }
         }
     }
 }

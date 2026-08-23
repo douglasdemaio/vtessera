@@ -442,6 +442,21 @@ pub fn dispatch(state: &mut IndexState, req: Request, now_unix: u64) -> Response
 
     match (req.method, path) {
         (Method::Get, "/healthz") => Response::text(200, "ok"),
+        (Method::Get, "/metrics") => {
+            let body = vtessera_metrics::render();
+            let body_bytes = body.into_bytes();
+            Response {
+                status: 200,
+                headers: vec![
+                    (
+                        "content-type".into(),
+                        "text/plain; version=0.0.4; charset=utf-8".into(),
+                    ),
+                    ("content-length".into(), body_bytes.len().to_string()),
+                ],
+                body: body_bytes,
+            }
+        }
         (Method::Get, "/offers") => handle_list(state, query, now_unix),
         (Method::Post, "/offers") => handle_register(state, &req.body, now_unix),
         _ => match path.strip_prefix("/offers/") {
@@ -1294,5 +1309,38 @@ mod tests {
             NOW + 2,
         );
         assert_eq!(r.status, 429);
+    }
+
+    #[test]
+    fn dispatch_metrics_returns_prometheus_format() {
+        let mut state = IndexState::new();
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Get,
+                path: "/metrics".into(),
+                headers: vec![],
+                body: vec![],
+            },
+            NOW,
+        );
+        assert_eq!(r.status, 200);
+        let content_type = r
+            .headers
+            .iter()
+            .find(|(k, _)| k == "content-type")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert!(
+            content_type.contains("text/plain"),
+            "expected text/plain, got {content_type}"
+        );
+        let body = String::from_utf8(r.body).unwrap();
+        if !body.is_empty() {
+            assert!(
+                body.contains("# HELP") || body.contains("# TYPE"),
+                "expected Prometheus format markers in: {body}"
+            );
+        }
     }
 }

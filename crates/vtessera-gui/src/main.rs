@@ -697,7 +697,6 @@ fn start_node(ui: &Ui, state: &NodeState) {
             "offer written to {}",
             settings::offer_path().display()
         ));
-
     }
 
     refresh_status(ui, state);

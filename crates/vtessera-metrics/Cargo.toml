@@ -1,0 +1,11 @@
+[package]
+name = "vtessera-metrics"
+description = "Vtessera metrics — zero-dep Prometheus text format registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "vtessera_metrics"
+path = "src/lib.rs"
