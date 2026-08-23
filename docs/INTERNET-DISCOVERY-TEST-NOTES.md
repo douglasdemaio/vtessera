@@ -101,3 +101,29 @@ this off the shelf:
 | IP changes | Requires restart | Live path migration |
 | Authentication | None | Ed25519 key-based |
 | Encryption | None (plaintext relay) | QUIC end-to-end |
+
+## Implementation Status (2026-08-23)
+
+### Completed
+- **iroh sidecar** (`crates/transport/src/iroh_sidecar.rs`): `IrohEndpoint`
+  wraps `iroh::Endpoint`, maps vtessera's Ed25519 identity to QUIC auth
+- **Node binary wired**: `start_iroh_endpoint()` creates endpoint on
+  dedicated tokio runtime, `spawn_iroh_router()` handles accept loop
+- **Accept loop**: `VtesseraHandler` implements `iroh::protocol::Router`,
+  accepts QUIC connections, reads HTTP from bi-directional streams,
+  dispatches through same handler as TCP
+- **Heartbeat uses live candidates**: iroh endpoint provides relay + direct
+  addresses, re-gathered every 30s
+- **7 transport tests pass**: endpoint creation, relay connection, relay
+  candidates, full QUIC echo roundtrip through relay
+- **Dead code removed**: `vtessera-relay` crate, hand-rolled STUN client,
+  mDNS registration from GUI
+
+### Remaining
+- **Agent-side iroh client**: agents need to connect to nodes via iroh.
+  x402-client is excluded from workspace (pins solana-sdk 1.18); better
+  implemented as separate `vtessera-agent` crate or workspace example
+- **Self-hosted relays**: Number 0's public relays work for now; may want
+  to run our own for production
+- **Offer-index stores EndpointId**: the index currently stores candidate
+  lists; should store `EndpointId` for iroh dial-by-key
