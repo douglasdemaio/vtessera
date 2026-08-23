@@ -1020,17 +1020,37 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
         &self,
         connection: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
+        let remote = connection.remote_id().to_string();
+        eprintln!("vtessera-node: iroh connection from {remote}");
+
         // Accept the bi-directional stream (blocks until peer writes data)
         let (mut send, mut recv) = connection.accept_bi().await?;
 
         // Read the full HTTP request from the QUIC stream
         // 256 KiB limit matches the TCP path's request size cap
-        let request_bytes = match recv.read_to_end(256 * 1024).await {
-            Ok(b) => b,
-            Err(e) => {
+        let request_bytes = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            recv.read_to_end(256 * 1024),
+        )
+        .await
+        {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
+                eprintln!("vtessera-node: iroh read error from {remote}: {e}");
                 let body = format!("{{\"error\":\"read failed: {e}\"}}");
                 let resp = format!(
                     "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = send.write_all(resp.as_bytes()).await;
+                send.finish()?;
+                return Ok(());
+            }
+            Err(_) => {
+                eprintln!("vtessera-node: iroh read timeout from {remote}");
+                let body = r#"{"error":"read timeout"}"#;
+                let resp = format!(
+                    "HTTP/1.1 408 Request Timeout\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = send.write_all(resp.as_bytes()).await;
@@ -1043,6 +1063,7 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
         let request = match parse_quic_http_request(&request_bytes) {
             Ok(r) => r,
             Err(e) => {
+                eprintln!("vtessera-node: iroh bad request from {remote}: {e}");
                 let body = format!("{{\"error\":\"bad request: {e}\"}}");
                 let resp = format!(
                     "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -1054,19 +1075,37 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
             }
         };
 
+        eprintln!(
+            "vtessera-node: iroh {remote} {} {}",
+            match request.method {
+                HttpMethod::Get => "GET",
+                HttpMethod::Post => "POST",
+                _ => "OTHER",
+            },
+            request.path
+        );
+
         // Dispatch through the same handler as TCP requests
         let resp = dispatch(&self.state, request);
 
         // Write the HTTP response back to the QUIC stream
-        let status_text = status_text(resp.status);
+        let status = status_text(resp.status);
         let header = format!(
-            "HTTP/1.1 {} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            "HTTP/1.1 {} {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
             resp.status,
             resp.body.len()
         );
-        let _ = send.write_all(header.as_bytes()).await;
-        let _ = send.write_all(&resp.body).await;
-        send.finish()?;
+        if let Err(e) = send.write_all(header.as_bytes()).await {
+            eprintln!("vtessera-node: iroh write header error from {remote}: {e}");
+            return Ok(());
+        }
+        if let Err(e) = send.write_all(&resp.body).await {
+            eprintln!("vtessera-node: iroh write body error from {remote}: {e}");
+            return Ok(());
+        }
+        if let Err(e) = send.finish() {
+            eprintln!("vtessera-node: iroh finish error from {remote}: {e}");
+        }
 
         Ok(())
     }
