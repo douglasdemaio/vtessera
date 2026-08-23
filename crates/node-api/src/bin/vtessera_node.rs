@@ -880,12 +880,13 @@ fn spawn_publisher(index_url: String, offer_json: String, interval: Duration) {
     });
 }
 
-/// POST a heartbeat with candidates to the index. Non-fatal: caller logs
-/// and retries on the next tick.
+/// POST a heartbeat with candidates and endpoint_id to the index.
+/// Non-fatal: caller logs and retries on the next tick.
 fn post_heartbeat(
     index_url: &str,
     node_id: &str,
     candidates: &[vtessera_transport::Candidate],
+    endpoint_id: Option<&str>,
 ) -> Result<(), String> {
     let url = format!(
         "{}/offers/{node_id}/heartbeat",
@@ -893,6 +894,7 @@ fn post_heartbeat(
     );
     let body = serde_json::json!({
         "candidates": candidates,
+        "endpoint_id": endpoint_id,
     });
     let resp = ureq::Agent::new_with_defaults()
         .post(&url)
@@ -920,17 +922,16 @@ fn spawn_heartbeat_with_iroh(
         let interval = Duration::from_secs(DEFAULT_HEARTBEAT_SECS);
         // Send first heartbeat immediately so the index reflects this node
         // from the moment the server starts accepting connections.
-        let candidates = get_iroh_candidates(&iroh_ep);
-        match post_heartbeat(&index_url, &node_id, &candidates) {
+        let (candidates, endpoint_id) = get_iroh_info(&iroh_ep);
+        match post_heartbeat(&index_url, &node_id, &candidates, endpoint_id.as_deref()) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: initial heartbeat failed (will retry): {e}"),
         }
         loop {
             thread::sleep(interval);
-            // Fetch fresh candidates from the iroh endpoint — addresses
-            // change as the endpoint discovers LAN peers and relay paths.
-            let candidates = get_iroh_candidates(&iroh_ep);
-            match post_heartbeat(&index_url, &node_id, &candidates) {
+            // Fetch fresh candidates and endpoint_id from the iroh endpoint.
+            let (candidates, endpoint_id) = get_iroh_info(&iroh_ep);
+            match post_heartbeat(&index_url, &node_id, &candidates, endpoint_id.as_deref()) {
                 Ok(()) => {}
                 Err(e) => eprintln!("vtessera-node: heartbeat failed (will retry): {e}"),
             }
@@ -938,21 +939,22 @@ fn spawn_heartbeat_with_iroh(
     });
 }
 
-/// Fetch current candidates from the iroh endpoint.
+/// Fetch current candidates and endpoint_id from the iroh endpoint.
 ///
-/// Returns at minimum a LAN host candidate (from the bind address)
-/// plus any relay candidates iroh has discovered. Falls back to
-/// an empty list if the endpoint hasn't initialized yet.
-fn get_iroh_candidates(
+/// Returns (candidates, endpoint_id). The endpoint_id is the hex-encoded
+/// Ed25519 public key that agents use to connect via iroh.
+fn get_iroh_info(
     iroh_ep: &Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>,
-) -> Vec<vtessera_transport::Candidate> {
+) -> (Vec<vtessera_transport::Candidate>, Option<String>) {
     // Try to read the endpoint — non-blocking, returns empty if not ready.
     if let Ok(guard) = iroh_ep.try_read() {
         if let Some(ep) = guard.as_ref() {
-            return ep.candidates();
+            let candidates = ep.candidates();
+            let endpoint_id = ep.node_id().to_string();
+            return (candidates, Some(endpoint_id));
         }
     }
-    vec![]
+    (vec![], None)
 }
 
 /// Start the iroh endpoint in a background tokio runtime.
@@ -1020,17 +1022,37 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
         &self,
         connection: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
+        let remote = connection.remote_id().to_string();
+        eprintln!("vtessera-node: iroh connection from {remote}");
+
         // Accept the bi-directional stream (blocks until peer writes data)
         let (mut send, mut recv) = connection.accept_bi().await?;
 
         // Read the full HTTP request from the QUIC stream
         // 256 KiB limit matches the TCP path's request size cap
-        let request_bytes = match recv.read_to_end(256 * 1024).await {
-            Ok(b) => b,
-            Err(e) => {
+        let request_bytes = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            recv.read_to_end(256 * 1024),
+        )
+        .await
+        {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
+                eprintln!("vtessera-node: iroh read error from {remote}: {e}");
                 let body = format!("{{\"error\":\"read failed: {e}\"}}");
                 let resp = format!(
                     "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = send.write_all(resp.as_bytes()).await;
+                send.finish()?;
+                return Ok(());
+            }
+            Err(_) => {
+                eprintln!("vtessera-node: iroh read timeout from {remote}");
+                let body = r#"{"error":"read timeout"}"#;
+                let resp = format!(
+                    "HTTP/1.1 408 Request Timeout\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = send.write_all(resp.as_bytes()).await;
@@ -1043,6 +1065,7 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
         let request = match parse_quic_http_request(&request_bytes) {
             Ok(r) => r,
             Err(e) => {
+                eprintln!("vtessera-node: iroh bad request from {remote}: {e}");
                 let body = format!("{{\"error\":\"bad request: {e}\"}}");
                 let resp = format!(
                     "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -1054,19 +1077,37 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
             }
         };
 
+        eprintln!(
+            "vtessera-node: iroh {remote} {} {}",
+            match request.method {
+                HttpMethod::Get => "GET",
+                HttpMethod::Post => "POST",
+                _ => "OTHER",
+            },
+            request.path
+        );
+
         // Dispatch through the same handler as TCP requests
         let resp = dispatch(&self.state, request);
 
         // Write the HTTP response back to the QUIC stream
-        let status_text = status_text(resp.status);
+        let status = status_text(resp.status);
         let header = format!(
-            "HTTP/1.1 {} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            "HTTP/1.1 {} {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
             resp.status,
             resp.body.len()
         );
-        let _ = send.write_all(header.as_bytes()).await;
-        let _ = send.write_all(&resp.body).await;
-        send.finish()?;
+        if let Err(e) = send.write_all(header.as_bytes()).await {
+            eprintln!("vtessera-node: iroh write header error from {remote}: {e}");
+            return Ok(());
+        }
+        if let Err(e) = send.write_all(&resp.body).await {
+            eprintln!("vtessera-node: iroh write body error from {remote}: {e}");
+            return Ok(());
+        }
+        if let Err(e) = send.finish() {
+            eprintln!("vtessera-node: iroh finish error from {remote}: {e}");
+        }
 
         Ok(())
     }
