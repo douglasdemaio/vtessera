@@ -19,7 +19,12 @@ rand = { workspace = true, optional = true }
 rand_core = { version = "0.6", optional = true }
 tokio = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 
 [features]
 default = []
-serve = ["dep:ureq", "dep:iroh", "dep:rand", "dep:rand_core", "dep:tokio", "dep:base64"]
+serve = ["dep:ureq", "dep:iroh", "dep:rand", "dep:rand_core", "dep:tokio", "dep:base64", "dep:hex"]
+
+[[example]]
+name = "iroh_client"
+required-features = ["serve"]
