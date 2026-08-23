@@ -1094,8 +1094,8 @@ mod tests {
         let mut state = IndexState::new();
         let node = register_one(&mut state, 1);
         let candidates = vec![vtessera_transport::Candidate {
-            kind: vtessera_transport::CandidateKind::ServerReflexive,
-            transport: vtessera_transport::TransportKind::QuicDirect,
+            kind: vtessera_transport::CandidateKind::Host,
+            transport: vtessera_transport::TransportKind::IrohQuic,
             addr: "203.0.113.1:8402".into(),
             priority: 100,
         }];
@@ -1147,7 +1147,7 @@ mod tests {
             .register(offer(&node, paid(), 1), "push".into(), NOW)
             .unwrap();
 
-        let body = r#"{"candidates":[{"kind":"server_reflexive","transport":"quic_direct","addr":"203.0.113.1:8402","priority":100}]}"#;
+        let body = r#"{"candidates":[{"kind":"host","transport":"iroh_quic","addr":"203.0.113.1:8402","priority":100}]}"#;
         let r = dispatch(
             &mut state,
             Request {
@@ -1186,7 +1186,7 @@ mod tests {
         let node = register_one(&mut state, 1);
         let candidates = vec![vtessera_transport::Candidate {
             kind: vtessera_transport::CandidateKind::Host,
-            transport: vtessera_transport::TransportKind::QuicDirect,
+            transport: vtessera_transport::TransportKind::IrohQuic,
             addr: "192.168.1.100:8402".into(),
             priority: 200,
         }];

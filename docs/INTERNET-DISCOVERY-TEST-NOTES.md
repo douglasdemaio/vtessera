@@ -9,7 +9,7 @@
 | Node ID | `18fa157a9e975b4441cb9a4c2773d120` |
 | STUN reflexive | `47.65.242.243:48956` |
 
-## Result: ❌ Unreachable
+## Result: Unreachable
 
 The node is behind a mobile hotspot NAT. Three connection attempts failed:
 
@@ -23,99 +23,81 @@ The node is behind a mobile hotspot NAT. Three connection attempts failed:
 
 STUN discovers the reflexive address but cannot create a port mapping
 through the hotspot's NAT. The random port `48956` isn't forwarded to
-`172.20.10.2:8402`. This is the expected behavior — STUN only works when:
+`172.20.10.2:8402`. Additionally, the reflexive port changed constantly
+(32825 -> 34310 -> 44596) confirming **symmetric NAT** — each new STUN
+probe gets a different port mapping, making UDP hole punching impossible.
 
-1. The NAT is cone-based (not symmetric) AND
-2. The application sends a packet outward to "punch" a hole
+## Review Findings (2026-08-22)
 
-Vtessera's current transport layer probes STUN for the reflexive address
-but never actually punches a hole. The candidate is advertised but not
-routable.
+A code review identified the following issues with the hand-rolled
+approach:
 
-## What's Missing for Internet Connectivity
+### Critical bugs in existing code
 
-### Must-have (v0 can ship without, but must document)
+1. **Candidates gathered once at startup** — when a node changes networks
+   it advertises stale addresses until restart. Must re-gather inside the
+   heartbeat loop.
+2. **Heartbeats are unauthenticated** — any client can POST heartbeats
+   with forged candidates, overwriting a node's real address list and
+   redirecting traffic.
+3. **Relay is unauthenticated** — `vtessera-relay` accepts plain string
+   REGISTER with no auth. Any client can claim or evict any node.
+4. **Relay has no per-node lock** — concurrent agent requests can
+   interleave writes, delivering plaintext to the wrong agent.
+5. **Offer endpoint is 127.0.0.1** — agents actually use this to submit
+   jobs, so it must be a reachable address.
 
-1. **Public index** — a shared REST server where nodes register and agents
-   discover. The code exists (`vtessera-offer-index`), just needs deployment
-   at a stable public URL.
+### Architectural decision: adopt iroh
 
-2. **Port forwarding / UPnP** — for home routers, auto-discover the gateway
-   and open a port. Not possible on mobile hotspots.
+The hand-rolled STUN/relay/QUIC stack was never going to work for nodes
+behind symmetric NAT. Rather than building our own TURN relay, hole
+punching, and QUIC transport, we adopt **iroh** which provides all of
+this off the shelf:
 
-3. **TURN relay fallback** — when direct connection fails, proxy through a
-   public server. This is the only reliable solution for symmetric NAT
-   (mobile hotspots, corporate networks, CGNAT).
+| What we hand-rolled | What iroh provides |
+|---------------------|--------------------|
+| `stun_probe()` (90 lines) | Built-in NAT traversal |
+| `vtessera-relay` TCP tunnel | Relay servers (public + self-hostable) |
+| Candidate/transport model | `EndpointAddr` with live path migration |
+| Planned QUIC + key pinning | QUIC with Ed25519 key identity |
+| Planned hole punching | DCUtR hole punching |
+| Planned TURN fallback | Relay fallback (automatic) |
 
-### Nice-to-have (v1)
+### What stays unchanged
 
-4. **UDP hole punching** — both agent and relay connect to a rendezvous
-   server simultaneously. Works for cone NAT but not symmetric.
+- **Offer-index** — signed offers, claims, TTL heartbeats (centralized-first
+  per ROADMAP, sound design)
+- **Ed25519 identity** — maps 1:1 to iroh's `EndpointId`
+- **x402 payment flow** — on-chain escrow, no changes needed
+- **mini-http server** — iroh is a sidecar, not a replacement for the
+  HTTP surface
 
-5. **Tailscale/ WireGuard transport** — overlay network that bypasses NAT
-   entirely. Requires both parties to run a daemon.
+### What gets removed
 
-6. **QUIC transport** — faster connection setup, better NAT traversal than
-   TCP. Currently advertised but not implemented.
+- `stun_probe()`, `discover_reflexive_addr()`, `DEFAULT_STUN_SERVERS` —
+  replaced by iroh endpoint discovery
+- `vtessera-relay` binary — replaced by iroh relay infrastructure
+- `CandidateKind::ServerReflexive`, `CandidateKind::Relayed` — iroh
+  manages connectivity transparently
+- `gather_candidates()` — iroh endpoint tracks live addresses
+- mDNS `_vtessera._tcp` registration — dead code, nothing browses it
 
-## Recommendations for GitHub
+### What gets added
 
-### Issue: Internet connectivity only works for directly-reachable nodes
-
-**Labels:** `enhancement`, `internet-connectivity`
-
-The current implementation:
-- ✅ Discovers reflexive addresses via STUN
-- ✅ Advertises candidates in heartbeats
-- ✅ Index aggregates offers from multiple nodes
-- ❌ Cannot actually connect to nodes behind NAT
-- ❌ No TURN relay
-- ❌ No UDP hole punching
-- ❌ No port forwarding/UPnP
-
-**Impact:** Nodes on mobile hotspots, CGNAT, or corporate networks are
-advertised in the index but unreachable. Agents will discover them,
-attempt to connect, and fail silently.
-
-**Suggested fix:** Either:
-(a) Implement TURN relay as a v0.5 step before full internet launch
-(b) Clearly document that internet mode requires port forwarding or a
-    VPS deployment
-(c) Add a "connectivity check" that verifies the node is actually
-    reachable before publishing its reflexive candidate
-
-### Issue: Offer endpoint should be the reachable address
-
-**Labels:** `bug`, `marketplace`
-
-The offer's `endpoint` field is set to `http://127.0.0.1:8402` regardless
-of network configuration. Agents that use the endpoint (rather than the
-candidates) will always fail to connect.
-
-**Suggested fix:** Auto-detect the outbound IP and use it as the endpoint,
-or use the best candidate address.
-
-### Issue: No public index deployment
-
-**Labels:** `infrastructure`, `marketplace`
-
-The offer-index binary exists but there's no hosted instance. For internet
-discovery to work, there needs to be a stable URL that both nodes and
-agents can reach.
-
-**Options:**
-- Host on a VPS (cheapest: Hetzner ~€5/mo)
-- Bundle with the GUI (mDNS for LAN, public index for internet)
-- Use a decentralized approach (DNS-SD, DHT) — more complex
+- `iroh` crate as a connectivity sidecar in `crates/transport/`
+- iroh `Endpoint` creation using the existing Ed25519 `SecretKey`
+- `EndpointId` stored in the offer-index (replaces candidate list)
+- Node connects to iroh relay on startup, maintains connection
+- Agent dials by `EndpointId`, iroh handles relay + hole punching
+- Live path migration when node changes networks (no restart needed)
 
 ## Summary
 
-| Capability | Status |
-|------------|--------|
-| LAN discovery (same subnet) | ✅ Working |
-| LAN job submission (x402) | ✅ Working |
-| Internet discovery (different networks) | ❌ No routable path |
-| Internet job submission | ❌ Blocked by NAT |
-| STUN reflexive discovery | ✅ Working (but useless without hole punching) |
-| TURN relay | ❌ Not implemented |
-| Public index | ❌ Not deployed |
+| Capability | Before (hand-rolled) | After (iroh) |
+|------------|---------------------|--------------|
+| LAN discovery | Working | Working (iroh LAN candidate) |
+| Internet discovery | Broken (STUN only) | Working (relay + hole punch) |
+| Symmetric NAT | Unreachable | Relay fallback |
+| IP changes | Requires restart | Live path migration |
+| Authentication | None | Ed25519 key-based |
+| Encryption | None (plaintext relay) | QUIC end-to-end |

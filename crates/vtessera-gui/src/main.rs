@@ -689,7 +689,6 @@ fn start_node(ui: &Ui, state: &NodeState) {
         state_dir: settings::state_dir(),
         spawn_node: accepting,
         publish,
-        relay: None,
         index_bind: Some(index_bind),
     };
     let mut daemons = match daemon::start(&opts) {
@@ -990,7 +989,7 @@ fn build_ui(app: &gtk4::Application) {
 
     let local_network_hint = gtk4::Label::new(Some(
         "ON = operate on a private LAN only (no internet discovery, no marketplace \
-         publishing). OFF = public internet mode with offer-index and STUN.",
+         publishing). OFF = public internet mode with offer-index and iroh connectivity.",
     ));
     local_network_hint.set_wrap(true);
     local_network_hint.set_xalign(0.0);

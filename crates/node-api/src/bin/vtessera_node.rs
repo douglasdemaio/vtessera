@@ -54,7 +54,6 @@
 
 use std::env;
 use std::fs;
-use std::io::BufReader;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -73,7 +72,9 @@ use vtessera_settlement::SigningKey;
 use vtessera_settlement::{
     derive_node_id, load_node_key, sign_job_receipt, JobReceipt, JOB_RECEIPT_SCHEMA_VER,
 };
-use vtessera_transport::gather_candidates;
+
+#[cfg(feature = "serve")]
+use vtessera_transport::iroh_sidecar::{self, IrohEndpoint};
 
 const DEFAULT_PUBLISH_INTERVAL_SECS: u64 = 60;
 const DEFAULT_HEARTBEAT_SECS: u64 = 30;
@@ -111,7 +112,6 @@ struct Args {
     publish: Option<String>,
     publish_interval: Duration,
     rpc_url: String,
-    relay: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,7 +221,6 @@ fn parse_args() -> Args {
     let mut publish: Option<String> = None;
     let mut publish_interval: u64 = DEFAULT_PUBLISH_INTERVAL_SECS;
     let mut rpc_url = "https://api.devnet.solana.com".to_string();
-    let mut relay: Option<String> = None;
     let mut it = env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -267,7 +266,6 @@ fn parse_args() -> Args {
                     rpc_url = s;
                 }
             }
-            "--relay" => relay = it.next(),
             "--backend" => {
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 backend = BackendChoice::parse(&raw).unwrap_or_else(|| usage_and_exit());
@@ -296,7 +294,6 @@ fn parse_args() -> Args {
             publish,
             publish_interval: Duration::from_secs(publish_interval),
             rpc_url,
-            relay,
         },
         _ => usage_and_exit(),
     }
@@ -749,6 +746,10 @@ fn main() {
         vtessera_offer::PriceQuote::Paid { payout_id, .. } => payout_id.clone(),
     };
 
+    // Clone the signing key before moving it into NodeIdentity, so we can
+    // create the iroh endpoint from the same secret key.
+    let signing_key_for_iroh = signing_key.clone();
+
     let identity = NodeIdentity {
         signing_key,
         node_id: node_id.clone(),
@@ -767,6 +768,17 @@ fn main() {
     // Offer-index wiring: register the offer with the index now, then keep
     // refreshing it on an interval. Registration failures are logged, never
     // fatal — the index keeps the last good offer meanwhile.
+
+    // Start iroh endpoint early so both heartbeat and accept loops can use it.
+    // The endpoint connects to the default relay servers so nodes behind NAT
+    // can be reached by agents through the relay.
+    let iroh_endpoint: Option<Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>> =
+        if args.publish.is_some() {
+            Some(start_iroh_endpoint(&signing_key_for_iroh))
+        } else {
+            None
+        };
+
     let index: Option<Arc<dyn IndexClient>> = match &args.publish {
         Some(url) => {
             let client = UreqIndexClient::new(url.clone(), node_id.clone());
@@ -776,17 +788,11 @@ fn main() {
                 Err(e) => eprintln!("vtessera-node: publish to {url} failed (will retry): {e}"),
             }
             spawn_publisher(url.clone(), offer_json, args.publish_interval);
-            // Gather candidates (LAN + STUN reflexive) and start heartbeating
-            // them to the index so agents know how to reach this node.
-            let lan_ip = args.bind.split(':').next().unwrap_or("0.0.0.0").to_string();
-            let port: u16 = args
-                .bind
-                .rsplit(':')
-                .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(8402);
-            let candidates = gather_candidates(&lan_ip, port);
-            spawn_heartbeat(url.clone(), node_id.clone(), candidates, lan_ip, port);
+
+            if let Some(ref ep) = iroh_endpoint {
+                spawn_heartbeat_with_iroh(url.clone(), node_id.clone(), ep.clone());
+            }
+
             Some(Arc::new(client) as Arc<dyn IndexClient>)
         }
         None => None,
@@ -806,15 +812,6 @@ fn main() {
         index,
     };
 
-    // Relay client: connect outbound to the relay so nodes behind NAT can
-    // be reached by agents through the relay's public endpoint.
-    if let Some(relay_addr) = &args.relay {
-        let node_id_clone = node_id.clone();
-        let relay_addr = relay_addr.clone();
-        let state_clone = state.clone();
-        thread::spawn(move || run_relay_client(&relay_addr, &node_id_clone, state_clone));
-    }
-
     let listener = TcpListener::bind(&args.bind).unwrap_or_else(|e| {
         eprintln!("bind {}: {e}", args.bind);
         process::exit(1);
@@ -832,6 +829,16 @@ fn main() {
     // Thread-per-connection with a hard cap lives in mini-http: a slow or
     // idle client must not stall every other request, and overload is
     // refused up front with 503.
+    //
+    // In parallel, the iroh Router accepts incoming QUIC connections from
+    // agents that discovered this node via the offer-index. Each connection
+    // carries an HTTP request over a bi-directional QUIC stream, which is
+    // dispatched to the same handler as TCP requests.
+
+    if let Some(ref ep) = iroh_endpoint {
+        spawn_iroh_router(ep, Arc::new(state.clone()));
+    }
+
     serve(
         listener,
         move |req: MiniRequest| {
@@ -899,34 +906,30 @@ fn post_heartbeat(
 }
 
 /// Background loop that sends heartbeats with candidate addresses to the
-/// index on an interval. Candidates include STUN reflexive addresses so
-/// agents outside the LAN can reach this node.
+/// index on an interval. With iroh integration, the endpoint manages
+/// live connectivity and the heartbeat sends the current iroh EndpointId.
 ///
-/// Candidates are re-gathered every cycle so the node picks up IP changes
-/// (DHCP renewal, VPN toggle) and re-probes STUN for a fresh reflexive
-/// address. The first heartbeat fires immediately on startup so the index
+/// The first heartbeat fires immediately on startup so the index
 /// isn't stale for the first 30 seconds.
-fn spawn_heartbeat(
+fn spawn_heartbeat_with_iroh(
     index_url: String,
     node_id: String,
-    initial_candidates: Vec<vtessera_transport::Candidate>,
-    lan_ip: String,
-    port: u16,
+    iroh_ep: Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>,
 ) {
     thread::spawn(move || {
         let interval = Duration::from_secs(DEFAULT_HEARTBEAT_SECS);
-        let mut candidates = initial_candidates;
         // Send first heartbeat immediately so the index reflects this node
         // from the moment the server starts accepting connections.
+        let candidates = get_iroh_candidates(&iroh_ep);
         match post_heartbeat(&index_url, &node_id, &candidates) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: initial heartbeat failed (will retry): {e}"),
         }
         loop {
             thread::sleep(interval);
-            // Re-gather candidates to pick up IP changes and fresh STUN
-            // reflexive addresses.
-            candidates = gather_candidates(&lan_ip, port);
+            // Fetch fresh candidates from the iroh endpoint — addresses
+            // change as the endpoint discovers LAN peers and relay paths.
+            let candidates = get_iroh_candidates(&iroh_ep);
             match post_heartbeat(&index_url, &node_id, &candidates) {
                 Ok(()) => {}
                 Err(e) => eprintln!("vtessera-node: heartbeat failed (will retry): {e}"),
@@ -935,137 +938,154 @@ fn spawn_heartbeat(
     });
 }
 
-/// Connect to a relay server and serve proxied requests.
+/// Fetch current candidates from the iroh endpoint.
 ///
-/// Protocol over the persistent TCP connection:
-///   Node → Relay: REGISTER <node_id>\n
-///   Node ← Relay: (connection accepted)
-///   Node ← Relay: HEARTBEAT\n (every 30s from relay, or periodically)
-///   Node → Relay: HEARTBEAT_ACK\n
-///   Node ← Relay: REQUEST <json>\n<body-bytes>
-///   Node → Relay: RESPONSE <json>\n<body-bytes>
+/// Returns at minimum a LAN host candidate (from the bind address)
+/// plus any relay candidates iroh has discovered. Falls back to
+/// an empty list if the endpoint hasn't initialized yet.
+fn get_iroh_candidates(
+    iroh_ep: &Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>,
+) -> Vec<vtessera_transport::Candidate> {
+    // Try to read the endpoint — non-blocking, returns empty if not ready.
+    if let Ok(guard) = iroh_ep.try_read() {
+        if let Some(ep) = guard.as_ref() {
+            return ep.candidates();
+        }
+    }
+    vec![]
+}
+
+/// Start the iroh endpoint in a background tokio runtime.
 ///
-/// The REQUEST json contains: method, path, headers, body_len.
-/// The RESPONSE json contains: status, body (base64).
-fn run_relay_client(relay_addr: &str, node_id: &str, state: NodeState) {
-    use std::io::{BufRead, BufReader, Write};
+/// Creates an iroh `Endpoint` from the node's Ed25519 secret key,
+/// which connects to the default relay servers (Number 0). Returns
+/// a shared handle so the heartbeat thread can query candidates.
+fn start_iroh_endpoint(signing_key: &SigningKey) -> Arc<tokio::sync::RwLock<Option<IrohEndpoint>>> {
+    let handle = Arc::new(tokio::sync::RwLock::new(None));
+    let handle_clone = handle.clone();
+    let key_bytes: [u8; 32] = signing_key.to_bytes();
 
-    loop {
-        eprintln!("vtessera-node: connecting to relay {relay_addr}");
-        let stream = match std::net::TcpStream::connect(relay_addr) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("vtessera-node: relay connect failed: {e}, retrying in 10s");
-                std::thread::sleep(Duration::from_secs(10));
-                continue;
-            }
-        };
+    thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
+            eprintln!("vtessera-node: failed to create tokio runtime for iroh: {e}");
+            // Return a minimal runtime so the thread can still signal failure.
+            std::process::exit(1);
+        });
 
-        if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(90))) {
-            eprintln!("vtessera-node: set read timeout: {e}");
-            continue;
-        }
-
-        let mut writer = match stream.try_clone() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("vtessera-node: clone stream: {e}");
-                continue;
-            }
-        };
-
-        // Send REGISTER
-        if writer
-            .write_all(format!("REGISTER {node_id}\n").as_bytes())
-            .is_err()
-        {
-            eprintln!("vtessera-node: failed to send REGISTER, reconnecting");
-            std::thread::sleep(Duration::from_secs(5));
-            continue;
-        }
-        eprintln!("vtessera-node: registered with relay as {node_id}");
-
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
-                    eprintln!("vtessera-node: relay disconnected");
-                    break;
+        rt.block_on(async move {
+            match iroh_sidecar::create_endpoint(&key_bytes).await {
+                Ok(ep) => {
+                    let node_id = ep.node_id();
+                    let relay = ep.endpoint_addr();
+                    eprintln!("vtessera-node: iroh endpoint online, node_id={node_id}");
+                    eprintln!("  endpoint_addr={relay:?}");
+                    *handle_clone.write().await = Some(ep);
                 }
-                Ok(_) => {}
                 Err(e) => {
-                    eprintln!("vtessera-node: relay read error: {e}");
-                    break;
+                    eprintln!("vtessera-node: iroh endpoint failed: {e}");
+                    eprintln!("  falling back to LAN-only candidates");
                 }
             }
+        });
 
-            let trimmed = line.trim();
-            if trimmed == "HEARTBEAT" {
-                let _ = writer.write_all(b"HEARTBEAT_ACK\n");
-                continue;
-            }
-
-            if let Some(json_str) = trimmed.strip_prefix("REQUEST ") {
-                handle_relay_request(&mut reader, &mut writer, json_str, &state);
-                continue;
-            }
-
-            eprintln!("vtessera-node: unknown relay message: {trimmed}");
+        // Keep the runtime alive so the endpoint stays connected.
+        // The thread sleeps forever; the runtime drops on process exit.
+        loop {
+            thread::sleep(Duration::from_secs(3600));
         }
+    });
 
-        eprintln!("vtessera-node: reconnecting to relay in 5s");
-        std::thread::sleep(Duration::from_secs(5));
+    handle
+}
+
+/// Handler that bridges iroh QUIC connections to vtessera's dispatch().
+///
+/// Each incoming connection gets a bi-directional stream. The agent writes
+/// an HTTP request, we dispatch it, and write the HTTP response back.
+#[cfg(feature = "serve")]
+struct VtesseraHandler {
+    state: Arc<NodeState>,
+}
+
+#[cfg(feature = "serve")]
+impl std::fmt::Debug for VtesseraHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VtesseraHandler").finish()
     }
 }
 
-fn handle_relay_request(
-    reader: &mut BufReader<std::net::TcpStream>,
-    writer: &mut std::net::TcpStream,
-    json_str: &str,
-    state: &NodeState,
-) {
-    use base64::Engine;
-    use std::io::{Read, Write};
+#[cfg(feature = "serve")]
+impl iroh::protocol::ProtocolHandler for VtesseraHandler {
+    async fn accept(
+        &self,
+        connection: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
+        // Accept the bi-directional stream (blocks until peer writes data)
+        let (mut send, mut recv) = connection.accept_bi().await?;
 
-    let req_json: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(e) => {
-            let resp = serde_json::json!({"error": format!("bad request json: {e}")});
-            let _ = writer.write_all(format!("RESPONSE {resp}\n").as_bytes());
-            return;
-        }
-    };
+        // Read the full HTTP request from the QUIC stream
+        // 256 KiB limit matches the TCP path's request size cap
+        let request_bytes = match recv.read_to_end(256 * 1024).await {
+            Ok(b) => b,
+            Err(e) => {
+                let body = format!("{{\"error\":\"read failed: {e}\"}}");
+                let resp = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = send.write_all(resp.as_bytes()).await;
+                send.finish()?;
+                return Ok(());
+            }
+        };
 
-    let method_str = req_json["method"].as_str().unwrap_or("GET");
-    let path = req_json["path"].as_str().unwrap_or("/");
-    let body_len = req_json["body_len"].as_u64().unwrap_or(0) as usize;
+        // Parse HTTP request (simple format: METHOD PATH HTTP/1.1\r\nHeaders...\r\n\r\nBody)
+        let request = match parse_quic_http_request(&request_bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                let body = format!("{{\"error\":\"bad request: {e}\"}}");
+                let resp = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = send.write_all(resp.as_bytes()).await;
+                send.finish()?;
+                return Ok(());
+            }
+        };
 
-    let inner_headers: Vec<(String, String)> = req_json["headers"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|pair| {
-                    let a = pair.as_array()?;
-                    if a.len() >= 2 {
-                        Some((a[0].as_str()?.to_string(), a[1].as_str()?.to_string()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        // Dispatch through the same handler as TCP requests
+        let resp = dispatch(&self.state, request);
 
-    // Read body bytes
-    let mut body = vec![0u8; body_len];
-    if body_len > 0 && reader.read_exact(&mut body).is_err() {
-        let resp = serde_json::json!({"error": "failed to read request body"});
-        let _ = writer.write_all(format!("RESPONSE {resp}\n").as_bytes());
-        return;
+        // Write the HTTP response back to the QUIC stream
+        let status_text = status_text(resp.status);
+        let header = format!(
+            "HTTP/1.1 {} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            resp.status,
+            resp.body.len()
+        );
+        let _ = send.write_all(header.as_bytes()).await;
+        let _ = send.write_all(&resp.body).await;
+        send.finish()?;
+
+        Ok(())
     }
+}
+
+/// Parse a simple HTTP request from a QUIC stream.
+///
+/// Format: METHOD PATH HTTP/1.1\r\nHeader: Value\r\n...\r\n\r\nBody
+#[cfg(feature = "serve")]
+fn parse_quic_http_request(
+    buf: &[u8],
+) -> Result<HttpRequest, Box<dyn std::error::Error + Send + Sync>> {
+    let text = std::str::from_utf8(buf)?;
+    let mut lines = text.split("\r\n");
+
+    let request_line = lines.next().ok_or("empty request")?;
+    let mut parts = request_line.split_whitespace();
+    let method_str = parts.next().ok_or("missing method")?;
+    let path = parts.next().ok_or("missing path")?.to_string();
 
     let method = match method_str {
         "GET" => HttpMethod::Get,
@@ -1073,20 +1093,86 @@ fn handle_relay_request(
         _ => HttpMethod::Other,
     };
 
-    let http_req = HttpRequest {
+    let mut headers = Vec::new();
+    let mut body_start = false;
+    let mut body = Vec::new();
+
+    for line in lines {
+        if line.is_empty() {
+            body_start = true;
+            continue;
+        }
+        if body_start {
+            body = line.as_bytes().to_vec();
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            headers.push((key.trim().to_string(), value.trim().to_string()));
+        }
+    }
+
+    Ok(HttpRequest {
         method,
-        path: path.to_string(),
-        headers: inner_headers,
+        path,
+        headers,
         body,
-    };
+    })
+}
 
-    let http_resp = dispatch(state, http_req);
+/// Map HTTP status code to status text.
+#[cfg(feature = "serve")]
+fn status_text(code: u16) -> &'static str {
+    match code {
+        200 => "OK",
+        202 => "Accepted",
+        400 => "Bad Request",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        409 => "Conflict",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
+        _ => "Unknown",
+    }
+}
 
-    let body_b64 = base64::engine::general_purpose::STANDARD.encode(&http_resp.body);
-    let resp_json = serde_json::json!({
-        "status": http_resp.status,
-        "body": body_b64,
+/// Spawn an iroh Router that accepts incoming QUIC connections.
+///
+/// The router runs on the iroh endpoint's tokio runtime and dispatches
+/// each connection to `VtesseraHandler`, which bridges to the same
+/// `dispatch()` function used by the TCP path.
+#[cfg(feature = "serve")]
+fn spawn_iroh_router(
+    iroh_handle: &Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>,
+    state: Arc<NodeState>,
+) {
+    let handle = iroh_handle.clone();
+    thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            // Wait for the iroh endpoint to come online
+            let ep = loop {
+                {
+                    let guard = handle.read().await;
+                    if let Some(ep) = guard.as_ref() {
+                        break ep.iroh_endpoint().clone();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+
+            let handler = VtesseraHandler { state };
+            let _router = iroh::protocol::Router::builder(ep)
+                .accept(iroh_sidecar::VTESSERA_ALPN, handler)
+                .spawn();
+
+            eprintln!("vtessera-node: iroh accept loop active (Router)");
+
+            // Keep the runtime alive — router runs in background tasks
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
     });
-
-    let _ = writer.write_all(format!("RESPONSE {resp_json}\n").as_bytes());
 }
