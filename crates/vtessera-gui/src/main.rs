@@ -55,6 +55,7 @@ struct Ui {
     network_custom_entry: gtk4::Entry,
     local_network_switch: gtk4::Switch,
     marketplace_url_entry: gtk4::Entry,
+    detect_marketplace_btn: gtk4::Button,
     cidr_entry: gtk4::Entry,
     interval_spin: gtk4::SpinButton,
     backend_dd: gtk4::DropDown,
@@ -634,8 +635,13 @@ fn start_node(ui: &Ui, state: &NodeState) {
     let index_port: u16 = 8403;
     let index_bind = format!("0.0.0.0:{index_port}");
 
-    // Publish URL points to the offer-index, auto-detected from LAN IP.
-    let publish = Some(format!("http://{lan_ip}:{index_port}"));
+    // Publish URL: use the user-supplied marketplace URL if set,
+    // otherwise auto-detect from the LAN IP.
+    let publish = if !settings.marketplace_url.is_empty() {
+        Some(settings.marketplace_url.clone())
+    } else {
+        Some(format!("http://{lan_ip}:{index_port}"))
+    };
 
     let bin_dir = daemon::bin_dir();
     let opts = daemon::StartOptions {
@@ -809,6 +815,7 @@ fn build_ui(app: &gtk4::Application) {
         network_custom_entry: gtk4::Entry::new(),
         local_network_switch: gtk4::Switch::new(),
         marketplace_url_entry: gtk4::Entry::new(),
+        detect_marketplace_btn: gtk4::Button::with_label("Detect"),
         cidr_entry: gtk4::Entry::new(),
         interval_spin: gtk4::SpinButton::new(
             Some(&gtk4::Adjustment::new(60.0, 1.0, 3600.0, 1.0, 10.0, 0.0)),
@@ -961,10 +968,14 @@ fn build_ui(app: &gtk4::Application) {
     let marketplace_caption = gtk4::Label::new(Some("Marketplace URL"));
     marketplace_caption.set_xalign(0.0);
     grid.attach(&marketplace_caption, 0, row, 1, 1);
+    let marketplace_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
     ui.marketplace_url_entry
-        .set_placeholder_text(Some("http://<index-ip>:8443"));
+        .set_placeholder_text(Some("http://<index-ip>:8403"));
     ui.marketplace_url_entry.set_hexpand(true);
-    grid.attach(&ui.marketplace_url_entry, 1, row, 1, 1);
+    marketplace_row.append(&ui.marketplace_url_entry);
+    ui.detect_marketplace_btn.set_halign(gtk4::Align::End);
+    marketplace_row.append(&ui.detect_marketplace_btn);
+    grid.attach(&marketplace_row, 1, row, 1, 1);
     row += 1;
 
     let cidr_caption = gtk4::Label::new(Some("Allowed CIDRs"));
@@ -1250,6 +1261,16 @@ fn build_ui(app: &gtk4::Application) {
             if let Some(ip) = detect_lan_ip() {
                 let port = ui.port_spin.value() as u16;
                 ui.endpoint_entry.set_text(&format!("http://{ip}:{port}"));
+            }
+        }
+    });
+
+    ui.detect_marketplace_btn.connect_clicked({
+        let ui = ui.clone();
+        move |_| {
+            if let Some(ip) = detect_lan_ip() {
+                ui.marketplace_url_entry
+                    .set_text(&format!("http://{ip}:8403"));
             }
         }
     });
