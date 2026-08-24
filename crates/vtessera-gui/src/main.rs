@@ -49,6 +49,7 @@ struct Ui {
     currency_dd: gtk4::DropDown,
     port_spin: gtk4::SpinButton,
     endpoint_entry: gtk4::Entry,
+    detect_btn: gtk4::Button,
     escrow_entry: gtk4::Entry,
     network_dd: gtk4::DropDown,
     network_custom_entry: gtk4::Entry,
@@ -802,6 +803,7 @@ fn build_ui(app: &gtk4::Application) {
             0,
         ),
         endpoint_entry: gtk4::Entry::new(),
+        detect_btn: gtk4::Button::with_label("Detect"),
         escrow_entry: gtk4::Entry::new(),
         network_dd: gtk4::DropDown::from_strings(&["Solana Devnet", "Solana Mainnet", "Custom"]),
         network_custom_entry: gtk4::Entry::new(),
@@ -905,10 +907,14 @@ fn build_ui(app: &gtk4::Application) {
     let endpoint_caption = gtk4::Label::new(Some("Advertised endpoint"));
     endpoint_caption.set_xalign(0.0);
     grid.attach(&endpoint_caption, 0, row, 1, 1);
+    let endpoint_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
     ui.endpoint_entry
         .set_placeholder_text(Some("http://your-public-ip:8402"));
     ui.endpoint_entry.set_hexpand(true);
-    grid.attach(&ui.endpoint_entry, 1, row, 1, 1);
+    endpoint_row.append(&ui.endpoint_entry);
+    ui.detect_btn.set_halign(gtk4::Align::End);
+    endpoint_row.append(&ui.detect_btn);
+    grid.attach(&endpoint_row, 1, row, 1, 1);
     row += 1;
 
     let escrow_caption = gtk4::Label::new(Some("Escrow account"));
@@ -1236,6 +1242,16 @@ fn build_ui(app: &gtk4::Application) {
     ui.stop_btn.connect_clicked({
         let ui = ui.clone();
         move |_| stop_node(&ui, &state_for_stop)
+    });
+
+    ui.detect_btn.connect_clicked({
+        let ui = ui.clone();
+        move |_| {
+            if let Some(ip) = detect_lan_ip() {
+                let port = ui.port_spin.value() as u16;
+                ui.endpoint_entry.set_text(&format!("http://{ip}:{port}"));
+            }
+        }
     });
 
     // Drain the shared log buffer into the log tab (worker threads push
