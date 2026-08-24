@@ -4497,7 +4497,7 @@ dependencies = [
 
 [[package]]
 name = "vtessera-gui"
-version = "0.1.0"
+version = "0.80.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "gtk4",
