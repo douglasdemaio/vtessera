@@ -6,8 +6,11 @@
 //!   cargo run -p vtessera-node-api --example gen_offer -- free --key-out key.bin
 //!   cargo run -p vtessera-node-api --example gen_offer -- free \
 //!     --seed 1 --endpoint http://127.0.0.1:8402 --key-out key.bin
+//!   cargo run -p vtessera-node-api --example gen_offer -- free \
+//!     --key /path/to/identity.key --endpoint http://192.168.1.5:8402
 
 use ed25519_dalek::SigningKey;
+use std::time::{SystemTime, UNIX_EPOCH};
 use vtessera_offer::{
     derive_node_id, sign, to_json, AdvertisedDevice, Currency, OfferBody, PriceQuote,
     OFFER_SCHEMA_VER,
@@ -16,14 +19,23 @@ use vtessera_offer::{
 fn main() {
     let mut mode = None;
     let mut key_out: Option<std::path::PathBuf> = None;
+    let mut key_in: Option<std::path::PathBuf> = None;
     let mut seed: u8 = 42;
     let mut endpoint = "http://127.0.0.1:8402".to_string();
+    let mut vcpus: u32 = 4;
+    let mut mem_mb: u32 = 16 * 1024;
+    let mut payout_id = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string();
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--key-out" => {
                 if let Some(p) = it.next() {
                     key_out = Some(p.into());
+                }
+            }
+            "--key" => {
+                if let Some(p) = it.next() {
+                    key_in = Some(p.into());
                 }
             }
             "--seed" => {
@@ -36,6 +48,21 @@ fn main() {
                     endpoint = e;
                 }
             }
+            "--vcpus" => {
+                if let Some(v) = it.next() {
+                    vcpus = v.parse().unwrap_or(4);
+                }
+            }
+            "--mem-mb" => {
+                if let Some(m) = it.next() {
+                    mem_mb = m.parse().unwrap_or(16384);
+                }
+            }
+            "--payout" => {
+                if let Some(p) = it.next() {
+                    payout_id = p;
+                }
+            }
             other if !other.starts_with("--") && mode.is_none() => mode = Some(other.to_string()),
             other => {
                 eprintln!("unexpected argument: {other}");
@@ -44,9 +71,30 @@ fn main() {
         }
     }
     let mode = mode.unwrap_or_else(|| "free".into());
-    // Deterministic key for reproducible examples (--seed derives distinct
-    // node identities for multi-node demos) — never use in production.
-    let key = SigningKey::from_bytes(&[seed; 32]);
+
+    // Load or generate the signing key.
+    let key = if let Some(path) = &key_in {
+        let raw = std::fs::read(path).unwrap_or_else(|e| {
+            eprintln!("failed to read key {}: {e}", path.display());
+            std::process::exit(1);
+        });
+        if raw.len() != 32 {
+            eprintln!(
+                "key {} has wrong length: expected 32, got {}",
+                path.display(),
+                raw.len()
+            );
+            std::process::exit(1);
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&raw);
+        SigningKey::from_bytes(&arr)
+    } else {
+        // Deterministic key for reproducible examples (--seed derives distinct
+        // node identities for multi-node demos) — never use in production.
+        SigningKey::from_bytes(&[seed; 32])
+    };
+
     let node_id = derive_node_id(&key.verifying_key().to_bytes());
 
     if let Some(path) = key_out {
@@ -74,7 +122,7 @@ fn main() {
         "paid" => PriceQuote::Paid {
             currency: Currency::Usdc,
             per_device_second_micros: 100,
-            payout_id: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".into(),
+            payout_id,
         },
         other => {
             eprintln!("expected 'free' or 'paid', got {other}");
@@ -82,17 +130,19 @@ fn main() {
         }
     };
 
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     let body = OfferBody {
         schema_ver: OFFER_SCHEMA_VER,
         node_id,
         endpoint,
-        device: AdvertisedDevice::Cpu {
-            vcpus: 4,
-            mem_mb: 16 * 1024,
-        },
+        device: AdvertisedDevice::Cpu { vcpus, mem_mb },
         price,
-        issued_unix: 1_700_000_000,
-        expires_unix: 2_000_000_000,
+        issued_unix: now,
+        expires_unix: now + 30 * 24 * 3600,
     };
     let signed = sign(body, &key);
     print!("{}", to_json(&signed));

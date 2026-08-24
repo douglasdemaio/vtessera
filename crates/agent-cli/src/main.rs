@@ -147,7 +147,14 @@ fn discover(index: &str, json: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    let offers = resp.as_array().ok_or("unexpected response: not an array")?;
+    let offers = if resp.is_array() {
+        resp.as_array().cloned().unwrap_or_default()
+    } else {
+        resp["offers"]
+            .as_array()
+            .cloned()
+            .ok_or("unexpected response: no offers array")?
+    };
 
     if offers.is_empty() {
         println!("no free nodes available");
@@ -156,10 +163,11 @@ fn discover(index: &str, json: bool) -> Result<(), String> {
 
     println!("{:<20} {:<15} {:<40}", "NODE_ID", "DEVICE", "ENDPOINT");
     println!("{}", "-".repeat(75));
-    for o in offers {
-        let node_id = o["node_id"].as_str().unwrap_or("?");
-        let device = o["device"]["kind"].as_str().unwrap_or("?");
-        let endpoint = o["endpoint"].as_str().unwrap_or("?");
+    for o in &offers {
+        let body = &o["offer"]["body"];
+        let node_id = body["node_id"].as_str().unwrap_or("?");
+        let device = body["device"]["kind"].as_str().unwrap_or("?");
+        let endpoint = body["endpoint"].as_str().unwrap_or("?");
         println!("{node_id:<20} {device:<15} {endpoint:<40}");
     }
     Ok(())
@@ -179,10 +187,10 @@ fn offer(node: &str, json: bool) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&resp).unwrap());
     } else {
         let body = &resp["body"];
-        let node_id = resp["pubkey_hex"].as_str().unwrap_or("?");
+        let node_id = body["node_id"].as_str().unwrap_or("?");
         let endpoint = body["endpoint"].as_str().unwrap_or("?");
         let device = body["device"]["kind"].as_str().unwrap_or("?");
-        let price = if body["price"]["free"].as_bool().unwrap_or(false) {
+        let price = if body["price"]["mode"].as_str() == Some("free") {
             "free".to_string()
         } else {
             format!(

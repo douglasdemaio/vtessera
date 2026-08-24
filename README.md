@@ -94,6 +94,7 @@ vtessera/
 │   └── adversarial/                # excluded: fuzz + adversarial test suite for escrow
 ├── packaging/                      # RPM spec, systemd unit, AppArmor, example config, Flatpak
 ├── scripts/
+│   ├── local-stack.sh              # one-command dev stack: start|stop|status
 │   ├── x402-demo.sh                # one-command agent demo against devnet
 │   ├── build-initramfs.sh          # builds the CH executor's guest initramfs
 │   ├── offer-index-demo.sh         # end-to-end: two nodes, claims, MCP discover
@@ -266,6 +267,66 @@ host kernel's `fuse.ko`/`virtiofs.ko` modules):
 sudo scripts/build-initramfs.sh
 ```
 
+## Local dev stack (one command)
+
+The fastest way to run the full stack locally — offer-index, vtessera-node,
+and marketplace-server — with one command. Mirrors the Flatpak GUI's
+"Start" button from the CLI:
+
+```bash
+./scripts/local-stack.sh start    # start all services
+./scripts/local-stack.sh status   # check which are running
+./scripts/local-stack.sh stop     # stop all services
+```
+
+What it does automatically:
+- **Auto-detects LAN IP** for the advertised endpoint (same as the GUI's
+  `detect_lan_ip()`) so agents on the same network can reach the node
+- **Generates or reuses** an Ed25519 identity key
+- **Auto-registers** the node pubkey in the marketplace key registry
+  (hex → base58, same as the GUI's `register_node_in_marketplace()`)
+- **Writes a discovery file** to `~/.local/share/vtessera/node-discovery.json`
+  so `vtessera-agent --local` works out of the box
+
+Environment overrides:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `VTESSERA_LOCAL_ONLY=1` | `0` | Bind everything to `127.0.0.1` |
+| `VTESSERA_MODE=free` | `free` | `free` or `paid` |
+| `VTESSERA_PORT=8402` | `8402` | Node HTTP port |
+
+Test the running stack:
+
+```bash
+# Health check
+curl http://127.0.0.1:8402/healthz
+
+# Fetch the signed offer
+curl http://127.0.0.1:8402/offer
+
+# Submit a free job
+curl -X POST http://127.0.0.1:8402/jobs \
+  -H 'Content-Type: application/json' \
+  -H 'x-agent-id: my-agent' \
+  -d '{
+    "job_id": "test-001",
+    "image": "busybox",
+    "command": ["echo", "hello"],
+    "env": [],
+    "devices": {"class": {"kind": "cpu"}, "vcpus": 1, "mem_kb": 65536, "min_vram_mb": 0},
+    "max_duration_secs": 60
+  }'
+
+# Discover nodes via the local offer-index
+curl http://127.0.0.1:8403/offers?available=1
+
+# Use the agent CLI with local discovery
+vtessera-agent --local health
+vtessera-agent --local offer
+vtessera-agent --local submit --job job.json
+```
+
 ## Quickstart — smoke test (no systemd)
 
 The fastest way to confirm the v0 daemon works on your box:
@@ -389,6 +450,24 @@ The node serves an HTTP API on `127.0.0.1:8402` (default). An agent
 installing the Flatpak gets a running node with no extra setup — just
 toggle "Accept workloads from others" in the GUI.
 
+### Quick start with vtessera-agent
+
+```bash
+# Build the agent CLI
+cargo build -p vtessera-agent
+
+# Auto-discover a running node on the same machine
+vtessera-agent --local health
+vtessera-agent --local offer
+vtessera-agent --local submit --job job.json
+
+# Or point to a specific node
+vtessera-agent --node http://192.168.1.100:8402 health
+
+# Discover nodes via an offer-index
+vtessera-agent discover --index http://127.0.0.1:8403
+```
+
 ### Endpoints
 
 | Method | Path | What it does |
@@ -480,6 +559,51 @@ stops.
 For paid nodes, the agent must pay via x402 — the node returns `402`
 with payment terms, the agent signs a stablecoin transfer, and retries.
 See `scripts/x402-demo.sh` for a working example against devnet.
+
+## Marketplace server (reference implementation)
+
+A standalone Axum-based marketplace server that stores signed receipts
+and serves them via an authenticated REST API. Used for internal
+/private deployments where nodes submit receipts to a central store.
+
+```bash
+# Build
+cargo build -p marketplace-server
+
+# Run (requires config.toml + key registry)
+cargo run -p marketplace-server -- path/to/server.toml
+
+# POST a signed receipt
+curl -X POST http://127.0.0.1:8443/receipts \
+  -H 'Content-Type: application/json' \
+  -d '{"job_id":"...","pubkey":"...","signature":"...","received_at":...}'
+```
+
+See `scripts/local-stack.sh` which starts the marketplace server
+alongside the offer-index and node.
+
+## Observability (metrics + Grafana)
+
+Every service exposes a Prometheus-compatible `/metrics` endpoint:
+
+```bash
+curl http://127.0.0.1:8402/metrics   # node
+curl http://127.0.0.1:8403/metrics   # offer-index
+curl http://127.0.0.1:8443/metrics   # marketplace-server
+```
+
+Metric types (zero-dep, implemented in `crates/vtessera-metrics/`):
+- **Counter** — `# HELP` / `# TYPE` + per-label lines (requests, settle_ok, etc.)
+- **Gauge** — `jobs_running`, `jobs_claimed`, `cache_hits`, etc.
+
+To spin up a full observability stack with Prometheus + Grafana:
+
+```bash
+cd packaging/observability
+podman-compose up -d
+# or: docker compose up -d
+# Grafana at http://localhost:3000 (admin/admin)
+```
 
 ## Install as a systemd service
 
