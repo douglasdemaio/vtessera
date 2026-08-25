@@ -78,6 +78,7 @@ use vtessera_transport::iroh_sidecar::{self, IrohEndpoint};
 
 const DEFAULT_PUBLISH_INTERVAL_SECS: u64 = 60;
 const DEFAULT_HEARTBEAT_SECS: u64 = 30;
+const DEFAULT_MARKETPLACE_INTERVAL_SECS: u64 = 3600;
 const INDEX_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn usage_and_exit() -> ! {
@@ -91,7 +92,9 @@ fn usage_and_exit() -> ! {
         [--net-backend tap|macvtap] [--net-bridge <name>] \
         [--net-enforcement guest|host|both] \
         [--rpc-url <solana-rpc>] \
-        [--publish <index-url>] [--publish-interval <secs>]"
+        [--publish <index-url>] [--publish-interval <secs>] \
+        [--marketplace <owner/repo>] [--marketplace-token <token>] \
+        [--marketplace-interval <secs>]"
     );
     process::exit(2);
 }
@@ -112,6 +115,13 @@ struct Args {
     publish: Option<String>,
     publish_interval: Duration,
     rpc_url: String,
+    /// GitHub `owner/repo` for the marketplace registry (e.g. `douglasdemaio/vtessera`).
+    /// When set, the node detects its external IP and registers with the GitHub Pages marketplace.
+    marketplace: Option<String>,
+    /// GitHub personal access token for repository_dispatch (needs `repo` scope).
+    marketplace_token: Option<String>,
+    /// How often to re-register with the marketplace (default: 3600s).
+    marketplace_interval: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +231,9 @@ fn parse_args() -> Args {
     let mut publish: Option<String> = None;
     let mut publish_interval: u64 = DEFAULT_PUBLISH_INTERVAL_SECS;
     let mut rpc_url = "https://api.devnet.solana.com".to_string();
+    let mut marketplace: Option<String> = None;
+    let mut marketplace_token: Option<String> = None;
+    let mut marketplace_interval: u64 = DEFAULT_MARKETPLACE_INTERVAL_SECS;
     let mut it = env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -266,6 +279,13 @@ fn parse_args() -> Args {
                     rpc_url = s;
                 }
             }
+            "--marketplace" => marketplace = it.next(),
+            "--marketplace-token" => marketplace_token = it.next(),
+            "--marketplace-interval" => {
+                if let Some(s) = it.next() {
+                    marketplace_interval = s.parse().unwrap_or(DEFAULT_MARKETPLACE_INTERVAL_SECS);
+                }
+            }
             "--backend" => {
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 backend = BackendChoice::parse(&raw).unwrap_or_else(|| usage_and_exit());
@@ -294,6 +314,9 @@ fn parse_args() -> Args {
             publish,
             publish_interval: Duration::from_secs(publish_interval),
             rpc_url,
+            marketplace,
+            marketplace_token,
+            marketplace_interval: Duration::from_secs(marketplace_interval),
         },
         _ => usage_and_exit(),
     }
@@ -798,6 +821,26 @@ fn main() {
         None => None,
     };
 
+    // Marketplace registration: detect external IP and register with GitHub Pages.
+    if let (Some(owner_repo), Some(token)) = (&args.marketplace, &args.marketplace_token) {
+        // Parse port from bind address.
+        let port = args.bind.rsplit(':').next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(8402);
+
+        match register_with_marketplace(owner_repo, token, &offer, port) {
+            Ok(()) => {}
+            Err(e) => eprintln!("vtessera-node: marketplace registration failed (will retry): {e}"),
+        }
+        spawn_marketplace_registration(
+            owner_repo.clone(),
+            token.clone(),
+            offer.clone(),
+            port,
+            args.marketplace_interval,
+        );
+    }
+
     let verifier: Option<Arc<dyn PaymentVerifier>> = Some(Arc::new(SolanaPaymentVerifier {
         rpc_url: args.rpc_url.clone(),
     }));
@@ -875,6 +918,103 @@ fn spawn_publisher(index_url: String, offer_json: String, interval: Duration) {
             match publish_offer(&client, &offer_json) {
                 Ok(()) => {}
                 Err(e) => eprintln!("vtessera-node: publish refresh failed (will retry): {e}"),
+            }
+        }
+    });
+}
+
+/// Detect the external/public IP address by querying a public service.
+/// Returns None if detection fails (firewall, no internet, etc.).
+fn detect_external_ip() -> Option<String> {
+    let services = [
+        "https://ifconfig.me",
+        "https://api.ipify.org",
+        "https://icanhazip.com",
+    ];
+    let agent = ureq::Agent::new_with_defaults();
+    for url in &services {
+        match agent.get(*url).call() {
+            Ok(resp) => {
+                if let Ok(ip) = resp.into_body().read_to_string() {
+                    let ip = ip.trim().to_string();
+                    // Validate it looks like an IP address.
+                    if !ip.is_empty() && ip.len() <= 45 && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                        return Some(ip);
+                    }
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// Register the node's offer with the GitHub Pages marketplace via repository_dispatch.
+///
+/// Sends a signed offer to the GitHub Actions workflow which validates it
+/// and appends to marketplace/nodes.json served by GitHub Pages.
+fn register_with_marketplace(
+    owner_repo: &str,
+    token: &str,
+    offer: &vtessera_offer::SignedOffer,
+    port: u16,
+) -> Result<(), String> {
+    // Detect external IP.
+    let external_ip = detect_external_ip()
+        .ok_or_else(|| "failed to detect external IP".to_string())?;
+
+    // Override the endpoint with the external IP.
+    let mut offer_clone = offer.clone();
+    offer_clone.body.endpoint = format!("http://{external_ip}:{port}");
+
+    let offer_json = vtessera_offer::to_json(&offer_clone);
+
+    // Build the repository_dispatch payload.
+    let payload = serde_json::json!({
+        "offer": serde_json::from_str::<serde_json::Value>(&offer_json)
+            .map_err(|e| e.to_string())?,
+        "sig_hex": offer.sig_hex,
+    });
+
+    let url = format!("https://api.github.com/repos/{owner_repo}/dispatches");
+    let agent = ureq::Agent::new_with_defaults();
+
+    match agent
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send(serde_json::to_string(&payload).unwrap().as_str())
+    {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if status == 204 {
+                eprintln!(
+                    "vtessera-node: registered with marketplace {owner_repo} (IP: {external_ip})"
+                );
+                Ok(())
+            } else {
+                Err(format!("unexpected status {status}"))
+            }
+        }
+        Err(e) => Err(format!("request failed: {e}")),
+    }
+}
+
+/// Background loop that re-registers with the marketplace on an interval.
+/// External IP may change (DHCP, VPN reconnect), so we re-detect and re-register.
+fn spawn_marketplace_registration(
+    owner_repo: String,
+    token: String,
+    offer: vtessera_offer::SignedOffer,
+    port: u16,
+    interval: Duration,
+) {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(interval);
+            if let Err(e) = register_with_marketplace(&owner_repo, &token, &offer, port) {
+                eprintln!("vtessera-node: marketplace registration failed (will retry): {e}");
             }
         }
     });

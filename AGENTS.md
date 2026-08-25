@@ -64,7 +64,42 @@ The offer-index response looks like:
 }
 ```
 
-### Method 3: Direct connection
+### Method 3: Public marketplace (GitHub Pages)
+
+Nodes can register with the public marketplace. Agents query it to find nodes on any network:
+
+```bash
+# Find nodes on the public marketplace
+vtessera-agent discover --marketplace https://douglasdemaio.github.io/vtessera/marketplace/nodes.json
+
+# Or with curl
+curl https://douglasdemaio.github.io/vtessera/marketplace/nodes.json
+```
+
+The marketplace response looks like:
+```json
+{
+  "version": 1,
+  "updated_at": 1234567890,
+  "nodes": [
+    {
+      "node_id": "abc123...",
+      "offer": {
+        "body": {
+          "node_id": "abc123...",
+          "endpoint": "http://203.0.113.1:8402",
+          "device": {"kind": "cpu", "vcpus": 8, "mem_mb": 16384},
+          "price": {"mode": "free"}
+        }
+      },
+      "sig_hex": "...",
+      "updated_at": 1234567890
+    }
+  ]
+}
+```
+
+### Method 4: Direct connection
 
 If you know the node's IP and port:
 

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vtessera Marketplace</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }
+    h1 { color: #58a6ff; margin-bottom: 0.5rem; }
+    .subtitle { color: #8b949e; margin-bottom: 2rem; }
+    .stats { color: #8b949e; margin-bottom: 1rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 0.75rem; border-bottom: 2px solid #30363d; color: #58a6ff; }
+    td { padding: 0.75rem; border-bottom: 1px solid #21262d; }
+    tr:hover { background: #161b22; }
+    .mode-free { color: #3fb950; }
+    .mode-paid { color: #d29922; }
+    .device { color: #8b949e; }
+    .endpoint { color: #58a6ff; word-break: break-all; }
+    .updated { color: #8b949e; font-size: 0.85rem; }
+    #error { color: #f85149; }
+    #loading { color: #8b949e; }
+  </style>
+</head>
+<body>
+  <h1>Vtessera Marketplace</h1>
+  <p class="subtitle">Live compute nodes on the network</p>
+  <p class="stats" id="stats"></p>
+  <p id="loading">Loading nodes...</p>
+  <p id="error"></p>
+  <table id="nodes" style="display:none">
+    <thead>
+      <tr>
+        <th>Node ID</th>
+        <th>Mode</th>
+        <th>Device</th>
+        <th>Price</th>
+        <th>Endpoint</th>
+        <th>Updated</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <script>
+    const PROXY = 'https://api.allorigins.win/raw?url=';
+    const URL = 'https://douglasdemaio.github.io/vtessera/marketplace/nodes.json';
+
+    async function load() {
+      try {
+        const res = await fetch(PROXY + encodeURIComponent(URL));
+        if (!res.ok) throw new Error(res.status);
+        const data = await res.json();
+
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('stats').textContent =
+          `${data.nodes.length} node(s) online · Updated ${new Date(data.updated_at * 1000).toLocaleString()}`;
+
+        if (data.nodes.length === 0) {
+          document.getElementById('stats').textContent += ' · No nodes registered yet';
+          return;
+        }
+
+        const tbody = document.getElementById('tbody');
+        for (const node of data.nodes) {
+          const offer = node.offer?.body || {};
+          const price = offer.price || {};
+          const device = offer.device || {};
+          const mode = price.mode === 'free' ? 'Free' : 'Paid';
+          const modeClass = price.mode === 'free' ? 'mode-free' : 'mode-paid';
+          const priceText = price.mode === 'free'
+            ? 'free'
+            : `${(price.per_device_second_micros / 1_000_000).toFixed(6)}/s ${price.currency}`;
+
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td title="${node.node_id}">${node.node_id?.slice(0, 12)}…</td>
+            <td class="${modeClass}">${mode}</td>
+            <td class="device">${device.kind || '?'} (${device.vcpus || '?'} vCPU, ${device.mem_mb || '?'} MB)</td>
+            <td>${priceText}</td>
+            <td class="endpoint">${offer.endpoint || '?'}</td>
+            <td class="updated">${timeAgo(node.updated_at)}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+        document.getElementById('nodes').style.display = 'table';
+      } catch (e) {
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('error').textContent = 'Failed to load: ' + e.message;
+      }
+    }
+
+    function timeAgo(ts) {
+      const diff = Math.floor(Date.now() / 1000) - ts;
+      if (diff < 60) return 'just now';
+      if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+      if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+      return Math.floor(diff / 86400) + 'd ago';
+    }
+
+    load();
+    setInterval(load, 60000);
+  </script>
+</body>
+</html>

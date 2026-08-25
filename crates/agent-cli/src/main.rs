@@ -19,6 +19,10 @@ struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:8403", global = true)]
     index: String,
 
+    /// GitHub Pages marketplace URL (e.g. https://douglasdemaio.github.io/vtessera/marketplace/nodes.json)
+    #[arg(long, global = true)]
+    marketplace: Option<String>,
+
     /// Agent identity for claim gate
     #[arg(long, global = true)]
     agent_id: Option<String>,
@@ -34,7 +38,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Query offer-index for available free nodes
+    /// Query offer-index or marketplace for available free nodes
     Discover,
     /// Fetch a node's signed offer
     Offer,
@@ -116,7 +120,7 @@ fn main() {
     };
 
     let result = match &cli.command {
-        Commands::Discover => discover(&index, json),
+        Commands::Discover => discover(&index, cli.marketplace.as_deref(), json),
         Commands::Offer => offer(&node, json),
         Commands::Submit { job } => submit(&node, &agent_id, job, json),
         Commands::Health => health(&node, json),
@@ -132,44 +136,93 @@ fn agent() -> ureq::Agent {
     ureq::Agent::new_with_defaults()
 }
 
-fn discover(index: &str, json: bool) -> Result<(), String> {
-    let url = format!("{index}/offers?available=1&mode=free");
-    let resp: serde_json::Value = agent()
-        .get(&url)
+fn discover(index: &str, marketplace: Option<&str>, json: bool) -> Result<(), String> {
+    // Try the local offer-index first.
+    let local_url = format!("{index}/offers?available=1&mode=free");
+    let local_result = agent()
+        .get(&local_url)
         .call()
-        .map_err(|e| format!("request failed: {e}"))?
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("failed to read response: {e}"))?;
+        .ok()
+        .and_then(|mut resp| resp.body_mut().read_json::<serde_json::Value>().ok());
+
+    // Try the marketplace if provided.
+    let market_result = marketplace.and_then(|url| {
+        agent()
+            .get(url)
+            .call()
+            .ok()
+            .and_then(|mut resp| resp.body_mut().read_json::<serde_json::Value>().ok())
+    });
+
+    // Merge results: local index takes priority, marketplace fills in.
+    let mut offers: Vec<serde_json::Value> = Vec::new();
+    let mut seen_endpoints: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Process local index results.
+    if let Some(resp) = &local_result {
+        let arr = if resp.is_array() {
+            resp.as_array().cloned().unwrap_or_default()
+        } else {
+            resp["offers"].as_array().cloned().unwrap_or_default()
+        };
+        for o in arr {
+            if let Some(ep) = o["offer"]["body"]["endpoint"].as_str() {
+                if seen_endpoints.insert(ep.to_string()) {
+                    offers.push(o);
+                }
+            }
+        }
+    }
+
+    // Process marketplace results.
+    if let Some(resp) = &market_result {
+        if let Some(nodes) = resp["nodes"].as_array() {
+            for node in nodes {
+                if let Some(offer) = node.get("offer") {
+                    if let Some(ep) = offer["body"]["endpoint"].as_str() {
+                        if seen_endpoints.insert(ep.to_string()) {
+                            offers.push(offer.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        let merged = serde_json::json!({
+            "local_index": local_result,
+            "marketplace": market_result,
+            "merged_count": offers.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&merged).unwrap());
         return Ok(());
     }
 
-    let offers = if resp.is_array() {
-        resp.as_array().cloned().unwrap_or_default()
-    } else {
-        resp["offers"]
-            .as_array()
-            .cloned()
-            .ok_or("unexpected response: no offers array")?
-    };
-
     if offers.is_empty() {
         println!("no free nodes available");
+        if marketplace.is_some() {
+            println!("(checked local index and marketplace)");
+        } else {
+            println!("(tip: use --marketplace <url> to also search the public marketplace)");
+        }
         return Ok(());
     }
 
     println!("{:<20} {:<15} {:<40}", "NODE_ID", "DEVICE", "ENDPOINT");
     println!("{}", "-".repeat(75));
     for o in &offers {
-        let body = &o["offer"]["body"];
+        let body = if o.get("offer").is_some() {
+            &o["offer"]["body"]
+        } else {
+            &o["body"]
+        };
         let node_id = body["node_id"].as_str().unwrap_or("?");
         let device = body["device"]["kind"].as_str().unwrap_or("?");
         let endpoint = body["endpoint"].as_str().unwrap_or("?");
         println!("{node_id:<20} {device:<15} {endpoint:<40}");
     }
+    println!("\n{} node(s) found", offers.len());
     Ok(())
 }
 

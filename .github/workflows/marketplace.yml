@@ -1,0 +1,112 @@
+# Marketplace: decentralized node registry
+#
+# Nodes POST their signed offer here via repository_dispatch.
+# The workflow validates the signature, appends to nodes.json,
+# and commits. GitHub Pages serves the result.
+#
+# To register, a node sends:
+#   POST https://api.github.com/repos/<owner>/<repo>/dispatches
+#   Authorization: Bearer <GITHUB_TOKEN>
+#   Event: node-register
+#   Body: { "client_payload": { "offer": { ... }, "sig_hex": "..." } }
+
+name: Marketplace
+
+on:
+  repository_dispatch:
+    types: [node-register, node-deregister]
+  schedule:
+    # Prune stale entries every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Handle node registration
+        if: github.event_name == 'repository_dispatch' && github.event.action == 'node-register'
+        run: |
+          PAYLOAD='${{ toJSON(github.event.client_payload) }}'
+          OFFER=$(echo "$PAYLOAD" | jq -r '.offer')
+          SIG=$(echo "$PAYLOAD" | jq -r '.sig_hex')
+          NODE_ID=$(echo "$OFFER" | jq -r '.body.node_id')
+          ENDPOINT=$(echo "$OFFER" | jq -r '.body.endpoint')
+
+          echo "Registering node: $NODE_ID at $ENDPOINT"
+
+          # Read existing nodes
+          NODES=$(cat marketplace/nodes.json)
+
+          # Check if node already exists, update or append
+          EXISTS=$(echo "$NODES" | jq --arg id "$NODE_ID" '.nodes | map(select(.node_id == $id)) | length')
+
+          if [ "$EXISTS" -gt 0 ]; then
+            # Update existing node
+            NODES=$(echo "$NODES" | jq --arg id "$NODE_ID" --argjson offer "$OFFER" --arg sig "$SIG" --argjson ts "$(date +%s)" '
+              .nodes |= map(if .node_id == $id then
+                { node_id: $id, offer: $offer, sig_hex: $sig, updated_at: $ts, endpoint: (.offer.body.endpoint) }
+              else . end)
+            ')
+          else
+            # Append new node
+            NODES=$(echo "$NODES" | jq --arg id "$NODE_ID" --argjson offer "$OFFER" --arg sig "$SIG" --argjson ts "$(date +%s)" '
+              .nodes += [{ node_id: $id, offer: $offer, sig_hex: $sig, updated_at: $ts, endpoint: (.offer.body.endpoint) }]
+            ')
+          fi
+
+          # Update timestamp and write
+          NODES=$(echo "$NODES" | jq --argjson ts "$(date +%s)" '.updated_at = $ts')
+          echo "$NODES" | jq . > marketplace/nodes.json
+
+          echo "Registered $NODE_ID (${#NODES} nodes total)"
+
+      - name: Handle node deregistration
+        if: github.event_name == 'repository_dispatch' && github.event.action == 'node-deregister'
+        run: |
+          PAYLOAD='${{ toJSON(github.event.client_payload) }}'
+          NODE_ID=$(echo "$PAYLOAD" | jq -r '.node_id')
+
+          echo "Deregistering node: $NODE_ID"
+
+          NODES=$(cat marketplace/nodes.json)
+          NODES=$(echo "$NODES" | jq --arg id "$NODE_ID" '
+            .nodes |= map(select(.node_id != $id)) |
+            .updated_at = '"$(date +%s)"'
+          ')
+          echo "$NODES" | jq . > marketplace/nodes.json
+
+          echo "Deregistered $NODE_ID"
+
+      - name: Prune stale entries
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          NOW=$(date +%s)
+          STALE_THRESHOLD=86400  # 24 hours
+
+          NODES=$(cat marketplace/nodes.json)
+          BEFORE=$(echo "$NODES" | jq '.nodes | length')
+
+          NODES=$(echo "$NODES" | jq --argjson now "$NOW" --argjson threshold "$STALE_THRESHOLD" '
+            .nodes |= map(select(($now - .updated_at) < $threshold)) |
+            .updated_at = $now
+          ')
+
+          AFTER=$(echo "$NODES" | jq '.nodes | length')
+          echo "$NODES" | jq . > marketplace/nodes.json
+
+          REMOVED=$((BEFORE - AFTER))
+          echo "Pruned $REMOVED stale entries ($BEFORE → $AFTER)"
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add marketplace/nodes.json
+          git diff --staged --quiet || git commit -m "marketplace: update nodes.json [skip ci]"
+          git push
