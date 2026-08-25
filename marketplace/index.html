@@ -43,14 +43,14 @@
     <tbody id="tbody"></tbody>
   </table>
   <script>
-    const PROXY = 'https://api.allorigins.win/raw?url=';
-    const URL = 'https://douglasdemaio.github.io/vtessera/marketplace/nodes.json';
+    const URL = 'https://douglasdemaio.github.io/vtessera/nodes.json';
 
     async function load() {
       try {
-        const res = await fetch(PROXY + encodeURIComponent(URL));
-        if (!res.ok) throw new Error(res.status);
-        const data = await res.json();
+        const res = await fetch(URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const data = JSON.parse(text);
 
         document.getElementById('loading').style.display = 'none';
         document.getElementById('stats').textContent =

@@ -70,10 +70,10 @@ Nodes can register with the public marketplace. Agents query it to find nodes on
 
 ```bash
 # Find nodes on the public marketplace
-vtessera-agent discover --marketplace https://douglasdemaio.github.io/vtessera/marketplace/nodes.json
+vtessera-agent discover --marketplace https://douglasdemaio.github.io/vtessera/nodes.json
 
 # Or with curl
-curl https://douglasdemaio.github.io/vtessera/marketplace/nodes.json
+curl https://douglasdemaio.github.io/vtessera/nodes.json
 ```
 
 The marketplace response looks like:
