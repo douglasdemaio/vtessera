@@ -824,7 +824,10 @@ fn main() {
     // Marketplace registration: detect external IP and register with GitHub Pages.
     if let (Some(owner_repo), Some(token)) = (&args.marketplace, &args.marketplace_token) {
         // Parse port from bind address.
-        let port = args.bind.rsplit(':').next()
+        let port = args
+            .bind
+            .rsplit(':')
+            .next()
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(8402);
 
@@ -938,7 +941,10 @@ fn detect_external_ip() -> Option<String> {
                 if let Ok(ip) = resp.into_body().read_to_string() {
                     let ip = ip.trim().to_string();
                     // Validate it looks like an IP address.
-                    if !ip.is_empty() && ip.len() <= 45 && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    if !ip.is_empty()
+                        && ip.len() <= 45
+                        && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+                    {
                         return Some(ip);
                     }
                 }
@@ -960,8 +966,8 @@ fn register_with_marketplace(
     port: u16,
 ) -> Result<(), String> {
     // Detect external IP.
-    let external_ip = detect_external_ip()
-        .ok_or_else(|| "failed to detect external IP".to_string())?;
+    let external_ip =
+        detect_external_ip().ok_or_else(|| "failed to detect external IP".to_string())?;
 
     // Override the endpoint with the external IP.
     let mut offer_clone = offer.clone();
@@ -1010,12 +1016,10 @@ fn spawn_marketplace_registration(
     port: u16,
     interval: Duration,
 ) {
-    thread::spawn(move || {
-        loop {
-            thread::sleep(interval);
-            if let Err(e) = register_with_marketplace(&owner_repo, &token, &offer, port) {
-                eprintln!("vtessera-node: marketplace registration failed (will retry): {e}");
-            }
+    thread::spawn(move || loop {
+        thread::sleep(interval);
+        if let Err(e) = register_with_marketplace(&owner_repo, &token, &offer, port) {
+            eprintln!("vtessera-node: marketplace registration failed (will retry): {e}");
         }
     });
 }
