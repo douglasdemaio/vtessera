@@ -978,9 +978,12 @@ fn register_with_marketplace(
 
     // Build the repository_dispatch payload.
     let payload = serde_json::json!({
-        "offer": serde_json::from_str::<serde_json::Value>(&offer_json)
-            .map_err(|e| e.to_string())?,
-        "sig_hex": offer.sig_hex,
+        "event_type": "node-register",
+        "client_payload": {
+            "offer": serde_json::from_str::<serde_json::Value>(&offer_json)
+                .map_err(|e| e.to_string())?,
+            "sig_hex": offer.sig_hex,
+        }
     });
 
     let url = format!("https://api.github.com/repos/{owner_repo}/dispatches");
@@ -990,19 +993,18 @@ fn register_with_marketplace(
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
+        .header("Content-Type", "application/json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send(serde_json::to_string(&payload).unwrap().as_str())
     {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            if status == 204 {
-                eprintln!(
-                    "vtessera-node: registered with marketplace {owner_repo} (IP: {external_ip})"
-                );
-                Ok(())
-            } else {
-                Err(format!("unexpected status {status}"))
-            }
+        Ok(_resp) => {
+            eprintln!(
+                "vtessera-node: registered with marketplace {owner_repo} (IP: {external_ip})"
+            );
+            Ok(())
+        }
+        Err(ureq::Error::StatusCode(status)) => {
+            Err(format!("GitHub API returned {status}"))
         }
         Err(e) => Err(format!("request failed: {e}")),
     }
