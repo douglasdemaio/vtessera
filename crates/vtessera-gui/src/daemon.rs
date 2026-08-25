@@ -68,6 +68,11 @@ pub struct StartOptions<'a> {
     pub discovery_file: Option<PathBuf>,
     /// Node identity (hex-encoded Ed25519 public key) for the discovery file.
     pub node_id: Option<String>,
+    /// GitHub `owner/repo` for marketplace registration (e.g. `douglasdemaio/vtessera`).
+    /// None = don't register with marketplace.
+    pub marketplace: Option<String>,
+    /// GitHub personal access token for marketplace registration.
+    pub marketplace_token: Option<String>,
 }
 
 /// Write a discovery file so agents on the same machine can find the node.
@@ -215,6 +220,12 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
             .args(["--state-dir", opts.state_dir.to_str().unwrap_or_default()]);
         if let Some(url) = &opts.publish {
             node_cmd.args(["--publish", url]);
+        }
+        if let Some(repo) = &opts.marketplace {
+            node_cmd.args(["--marketplace", repo]);
+        }
+        if let Some(token) = &opts.marketplace_token {
+            node_cmd.args(["--marketplace-token", token]);
         }
         match node_cmd.spawn() {
             Ok(child) => Some(child),
