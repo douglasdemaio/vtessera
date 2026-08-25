@@ -665,8 +665,16 @@ fn start_node(ui: &Ui, state: &NodeState) {
         index_bind: Some(index_bind),
         discovery_file: Some(settings::discovery_file_path()),
         node_id: Some(node_id.clone()),
-        marketplace: !settings.marketplace_repo.is_empty()
-            && !settings.marketplace_token.is_empty(),
+        marketplace: if settings.marketplace_repo.is_empty() {
+            None
+        } else {
+            Some(settings.marketplace_repo.clone())
+        },
+        marketplace_token: if settings.marketplace_token.is_empty() {
+            None
+        } else {
+            Some(settings.marketplace_token.clone())
+        },
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,
