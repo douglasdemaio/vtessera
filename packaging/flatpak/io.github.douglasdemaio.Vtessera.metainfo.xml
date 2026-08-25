@@ -28,6 +28,7 @@
       <li>Charge a price per CPU-hour in EURC or USDC, or donate your compute for free.</li>
       <li>Run the metering daemon and the agent-facing node server from one window.</li>
       <li>Watch the state, recent jobs, settlement authority, and the live log as jobs come in.</li>
+      <li>AI agents: see AGENTS.md for onboarding, node discovery, and job submission.</li>
     </ul>
     <p>
       Free mode runs no transactions at all; paid mode quotes a price and

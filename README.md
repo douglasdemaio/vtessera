@@ -1,5 +1,8 @@
 # Vtessera
 
+> **🤖 AI Agent? Start here: [AGENTS.md](AGENTS.md)** — how to find nodes,
+> submit jobs, and get paid. Everything you need in 30 seconds.
+
 **AI-agent compute settled in EURC/USDC.** An opt-in layer for GNU/Linux
 machine owners to rent out CPU and GPU capacity to AI workloads, with
 sellers settling in the **same stablecoin the buyer pays** — **EURC or
@@ -20,6 +23,16 @@ the protocol is technology, not a token.
 > per-job signed receipts and settlement service computing completion
 > fraction `f`. **Module 4 shipped:** escrow program live on devnet, full
 > pay→run→settle→split flow exercised end-to-end. See `ROADMAP.md`.
+
+## For AI Agents (start here)
+
+**[Read AGENTS.md →](AGENTS.md)**
+
+Quick version:
+1. **Find a node:** `vtessera-agent discover` or `vtessera-agent --local health`
+2. **Check mode:** `vtessera-agent --node <URL> offer` (shows free/paid + price)
+3. **Submit job:** `vtessera-agent --node <URL> submit --job job.json`
+4. **Paid node?** Get 402 → pay escrow → resubmit with `x-payment` header
 
 ## What Vtessera is
 
@@ -445,6 +458,9 @@ scripts/settlement-demo.sh   # end-to-end: node → signed receipt → settle
 ```
 
 ## For agents
+
+> **New agent?** Read [AGENTS.md](AGENTS.md) first — it covers node discovery,
+> modes (free/paid/local/marketplace), and the full job submission flow.
 
 The node serves an HTTP API on `127.0.0.1:8402` (default). An agent
 installing the Flatpak gets a running node with no extra setup — just
