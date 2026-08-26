@@ -1,0 +1,10 @@
+name = "vtessera-register"
+main = "index.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+GITHUB_OWNER = "douglasdemaio"
+GITHUB_REPO = "vtessera"
+
+# Set GITHUB_TOKEN as a secret:
+#   wrangler secret put GITHUB_TOKEN
