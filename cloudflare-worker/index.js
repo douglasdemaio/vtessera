@@ -35,7 +35,7 @@ export default {
     }
 
     // Forward to GitHub repository_dispatch
-    const ghUrl = `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/dispatches`;
+    const ghUrl = `https://api.github.com/repos/douglasdemaio/vtessera/dispatches`;
     const ghResp = await fetch(ghUrl, {
       method: "POST",
       headers: {
