@@ -147,8 +147,7 @@ mod tests {
             accept_workloads: false,
             consent_version: crate::settings::CURRENT_CONSENT_VERSION,
             marketplace_url: String::new(),
-            marketplace_repo: String::new(),
-            marketplace_token: String::new(),
+            marketplace_enabled: false,
             local_network: false,
             allowed_cidrs: Vec::new(),
         }
