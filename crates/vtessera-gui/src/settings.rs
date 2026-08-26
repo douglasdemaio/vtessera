@@ -119,7 +119,7 @@ impl Default for Settings {
             accept_workloads: false,
             consent_version: 0,
             marketplace_url: String::new(),
-            marketplace_repo: "douglasdemaio/vtessera".into(),
+            marketplace_repo: String::new(),
             marketplace_token: String::new(),
         }
     }
@@ -292,7 +292,7 @@ mod tests {
             accept_workloads: false,
             consent_version: CURRENT_CONSENT_VERSION,
             marketplace_url: String::new(),
-            marketplace_repo: "douglasdemaio/vtessera".into(),
+            marketplace_repo: String::new(),
             marketplace_token: String::new(),
             local_network: false,
             allowed_cidrs: Vec::new(),

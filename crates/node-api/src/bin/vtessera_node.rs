@@ -770,8 +770,9 @@ fn main() {
     };
 
     // Clone the signing key before moving it into NodeIdentity, so we can
-    // create the iroh endpoint from the same secret key.
+    // create the iroh endpoint from the same secret key and re-sign for marketplace.
     let signing_key_for_iroh = signing_key.clone();
+    let signing_key_for_marketplace = signing_key.clone();
 
     let identity = NodeIdentity {
         signing_key,
@@ -832,14 +833,21 @@ fn main() {
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(8402);
 
-        match register_with_marketplace(owner_repo, token, &offer, port) {
+        match register_with_marketplace(
+            owner_repo,
+            token,
+            &offer,
+            &signing_key_for_marketplace,
+            port,
+        ) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: marketplace registration failed (will retry): {e}"),
         }
         spawn_marketplace_registration(
             owner_repo.clone(),
             token.clone(),
-            offer.clone(),
+            offer.body.clone(),
+            signing_key_for_marketplace,
             port,
             args.marketplace_interval,
         );
@@ -964,17 +972,19 @@ fn register_with_marketplace(
     owner_repo: &str,
     token: &str,
     offer: &vtessera_offer::SignedOffer,
+    signing_key: &SigningKey,
     port: u16,
 ) -> Result<(), String> {
     // Detect external IP.
     let external_ip =
         detect_external_ip().ok_or_else(|| "failed to detect external IP".to_string())?;
 
-    // Override the endpoint with the external IP.
-    let mut offer_clone = offer.clone();
-    offer_clone.body.endpoint = format!("http://{external_ip}:{port}");
+    // Override the endpoint with the external IP and re-sign.
+    let mut offer_body = offer.body.clone();
+    offer_body.endpoint = format!("http://{external_ip}:{port}");
+    let re_signed = vtessera_offer::sign(offer_body, signing_key);
 
-    let offer_json = vtessera_offer::to_json(&offer_clone);
+    let offer_json = vtessera_offer::to_json(&re_signed);
 
     // Build the repository_dispatch payload.
     let payload = serde_json::json!({
@@ -982,7 +992,7 @@ fn register_with_marketplace(
         "client_payload": {
             "offer": serde_json::from_str::<serde_json::Value>(&offer_json)
                 .map_err(|e| e.to_string())?,
-            "sig_hex": offer.sig_hex,
+            "sig_hex": re_signed.sig_hex,
         }
     });
 
@@ -1013,13 +1023,16 @@ fn register_with_marketplace(
 fn spawn_marketplace_registration(
     owner_repo: String,
     token: String,
-    offer: vtessera_offer::SignedOffer,
+    offer_body: vtessera_offer::OfferBody,
+    signing_key: SigningKey,
     port: u16,
     interval: Duration,
 ) {
     thread::spawn(move || loop {
         thread::sleep(interval);
-        if let Err(e) = register_with_marketplace(&owner_repo, &token, &offer, port) {
+        let signed = vtessera_offer::sign(offer_body.clone(), &signing_key);
+        if let Err(e) = register_with_marketplace(&owner_repo, &token, &signed, &signing_key, port)
+        {
             eprintln!("vtessera-node: marketplace registration failed (will retry): {e}");
         }
     });
