@@ -1003,9 +1003,7 @@ fn register_with_marketplace(
             );
             Ok(())
         }
-        Err(ureq::Error::StatusCode(status)) => {
-            Err(format!("GitHub API returned {status}"))
-        }
+        Err(ureq::Error::StatusCode(status)) => Err(format!("GitHub API returned {status}")),
         Err(e) => Err(format!("request failed: {e}")),
     }
 }
