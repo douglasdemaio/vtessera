@@ -9,7 +9,10 @@
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }
     h1 { color: #58a6ff; margin-bottom: 0.5rem; }
     .subtitle { color: #8b949e; margin-bottom: 2rem; }
-    .stats { color: #8b949e; margin-bottom: 1rem; }
+    .stats { color: #8b949e; margin-bottom: 1rem; display: flex; gap: 1rem; align-items: center; }
+    .stats span { flex: 1; }
+    #refresh-btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+    #refresh-btn:hover { background: #30363d; }
     table { width: 100%; border-collapse: collapse; }
     th { text-align: left; padding: 0.75rem; border-bottom: 2px solid #30363d; color: #58a6ff; }
     td { padding: 0.75rem; border-bottom: 1px solid #21262d; }
@@ -19,6 +22,7 @@
     .device { color: #8b949e; }
     .endpoint { color: #58a6ff; word-break: break-all; }
     .updated { color: #8b949e; font-size: 0.85rem; }
+    .node-id { font-family: monospace; font-size: 0.85rem; }
     #error { color: #f85149; }
     #loading { color: #8b949e; }
   </style>
@@ -26,7 +30,10 @@
 <body>
   <h1>Vtessera Marketplace</h1>
   <p class="subtitle">Live compute nodes on the network</p>
-  <p class="stats" id="stats"></p>
+  <div class="stats">
+    <span id="stats"></span>
+    <button id="refresh-btn" onclick="load()">Refresh</button>
+  </div>
   <p id="loading">Loading nodes...</p>
   <p id="error"></p>
   <table id="nodes" style="display:none">
@@ -43,25 +50,26 @@
     <tbody id="tbody"></tbody>
   </table>
   <script>
-    const URL = 'https://douglasdemaio.github.io/vtessera/nodes.json';
+    const DATA_URL = 'https://douglasdemaio.github.io/vtessera/nodes.json';
 
     async function load() {
       try {
-        const res = await fetch(URL);
+        const res = await fetch(DATA_URL + '?t=' + Date.now());
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const text = await res.text();
         const data = JSON.parse(text);
 
         document.getElementById('loading').style.display = 'none';
         document.getElementById('stats').textContent =
-          `${data.nodes.length} node(s) online · Updated ${new Date(data.updated_at * 1000).toLocaleString()}`;
+          `${data.nodes.length} node(s) online \u00b7 Updated ${new Date(data.updated_at * 1000).toLocaleString()}`;
 
         if (data.nodes.length === 0) {
-          document.getElementById('stats').textContent += ' · No nodes registered yet';
+          document.getElementById('stats').textContent += ' \u00b7 No nodes registered yet';
           return;
         }
 
         const tbody = document.getElementById('tbody');
+        tbody.innerHTML = '';
         for (const node of data.nodes) {
           const offer = node.offer?.body || {};
           const price = offer.price || {};
@@ -74,7 +82,7 @@
 
           const tr = document.createElement('tr');
           tr.innerHTML = `
-            <td title="${node.node_id}">${node.node_id?.slice(0, 12)}…</td>
+            <td class="node-id" title="${node.node_id}">${node.node_id?.slice(0, 16)}\u2026</td>
             <td class="${modeClass}">${mode}</td>
             <td class="device">${device.kind || '?'} (${device.vcpus || '?'} vCPU, ${device.mem_mb || '?'} MB)</td>
             <td>${priceText}</td>

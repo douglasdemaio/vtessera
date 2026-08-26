@@ -1015,6 +1015,19 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&ui.marketplace_token_entry, 1, row, 1, 1);
     row += 1;
 
+    let marketplace_hint = gtk4::Label::new(Some(
+        "To list your node on the marketplace:\n\
+         1. Fork douglasdemaio/vtessera on GitHub\n\
+         2. Enable Pages (Settings → Pages → Source: GitHub Actions)\n\
+         3. Create a PAT with 'repo' scope (Settings → Developer settings → Tokens)\n\
+         4. Enter your fork as 'owner/repo' and paste the token above",
+    ));
+    marketplace_hint.set_wrap(true);
+    marketplace_hint.set_xalign(0.0);
+    marketplace_hint.add_css_class("dim-label");
+    grid.attach(&marketplace_hint, 0, row, 2, 1);
+    row += 1;
+
     let cidr_caption = gtk4::Label::new(Some("Allowed CIDRs"));
     cidr_caption.set_xalign(0.0);
     grid.attach(&cidr_caption, 0, row, 1, 1);
