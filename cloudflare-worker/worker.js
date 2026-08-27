@@ -6,6 +6,12 @@
 
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/health") {
+      return cors({ status: "ok" });
+    }
+
     if (request.method === "OPTIONS") {
       return cors(null, 204);
     }
@@ -14,15 +20,12 @@ export default {
       return cors({ error: "method not allowed" }, 405);
     }
 
-    const url = new URL(request.url);
     let action;
 
     if (url.pathname === "/register") {
       action = "node-register";
     } else if (url.pathname === "/deregister") {
       action = "node-deregister";
-    } else if (url.pathname === "/health") {
-      return cors({ status: "ok" });
     } else {
       return cors({ error: "not found" }, 404);
     }
@@ -42,6 +45,7 @@ export default {
         "Authorization": `Bearer ${env.GITHUB_TOKEN}`,
         "Accept": "application/vnd.github+json",
         "Content-Type": "application/json",
+        "User-Agent": "vtessera-marketplace",
         "X-GitHub-Api-Version": "2022-11-28",
       },
       body: JSON.stringify({
