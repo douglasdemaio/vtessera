@@ -1,6 +1,11 @@
 name = "vtessera-register"
 main = "index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-08-25"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = true
 
 [vars]
 GITHUB_OWNER = "douglasdemaio"
