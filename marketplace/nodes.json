@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1787816775,
+  "updated_at": 1787820380,
   "nodes": [
     {
       "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
@@ -27,8 +27,8 @@
         "sig_hex": "0b5558ed5c428525762e6e45c060e008f67ba1fa48f5832a562b7039cf9976f94a0e5ea7902ec45b3fb9994c20c24c2a06d638be931131cb5d27bda805ee3307"
       },
       "sig_hex": "0b5558ed5c428525762e6e45c060e008f67ba1fa48f5832a562b7039cf9976f94a0e5ea7902ec45b3fb9994c20c24c2a06d638be931131cb5d27bda805ee3307",
-      "updated_at": 1787816775,
-      "endpoint": "http://80.245.77.198:8402"
+      "updated_at": 1787820380,
+      "endpoint": "http://146.70.238.26:8402"
     }
   ]
 }
