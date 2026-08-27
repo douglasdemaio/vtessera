@@ -1,15 +1,8 @@
-name = "vtessera-register"
-main = "index.js"
+name = "vtessera"
+main = "worker.js"
 compatibility_date = "2026-08-25"
 
 [assets]
 directory = "./dist"
 binding = "ASSETS"
 run_worker_first = true
-
-[vars]
-GITHUB_OWNER = "douglasdemaio"
-GITHUB_REPO = "vtessera"
-
-# Set GITHUB_TOKEN as a secret:
-#   wrangler secret put GITHUB_TOKEN
