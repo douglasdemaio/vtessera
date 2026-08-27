@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1787849657,
+  "updated_at": 1787849731,
   "nodes": [
     {
       "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
@@ -57,26 +57,6 @@
       "sig_hex": "9eefa927a35f21ae5d12ac28a4ae3423469fd585164f827a55efdaa21d746a5a93bfa1e1d818ee94c858f3d2f773e8de66b63b6f8bcbbf553ab9282394874d07",
       "updated_at": 1787824211,
       "endpoint": "http://80.245.77.198:8402"
-    },
-    {
-      "node_id": "probe-123",
-      "offer": {
-        "body": {
-          "device": {
-            "kind": "cpu",
-            "mem_mb": 1024,
-            "vcpus": 1
-          },
-          "endpoint": "http://127.0.0.1:8402",
-          "node_id": "probe-123",
-          "price": {
-            "mode": "free"
-          }
-        }
-      },
-      "sig_hex": "deadbeef",
-      "updated_at": 1787849657,
-      "endpoint": null
     }
   ]
 }
