@@ -57,6 +57,7 @@ struct Ui {
     marketplace_url_entry: gtk4::Entry,
     detect_marketplace_btn: gtk4::Button,
     marketplace_switch: gtk4::Switch,
+    upnp_switch: gtk4::Switch,
     cidr_entry: gtk4::Entry,
     interval_spin: gtk4::SpinButton,
     backend_dd: gtk4::DropDown,
@@ -165,6 +166,7 @@ impl Ui {
             consent_version: self.settings.borrow().consent_version,
             marketplace_url: self.marketplace_url_entry.text().trim().to_string(),
             marketplace_enabled: self.marketplace_switch.is_active(),
+            upnp_enabled: self.upnp_switch.is_active(),
             local_network: self.local_network_switch.is_active(),
             allowed_cidrs: cidr_list_from_entry(&self.cidr_entry),
         };
@@ -194,6 +196,7 @@ impl Ui {
         self.local_network_switch.set_active(s.local_network);
         self.marketplace_url_entry.set_text(&s.marketplace_url);
         self.marketplace_switch.set_active(s.marketplace_enabled);
+        self.upnp_switch.set_active(s.upnp_enabled);
         self.cidr_entry.set_text(&s.allowed_cidrs.join(", "));
         self.sync_network_sensitivity();
         self.interval_spin.set_value(s.sample_interval_secs as f64);
@@ -663,6 +666,7 @@ fn start_node(ui: &Ui, state: &NodeState) {
         discovery_file: Some(settings::discovery_file_path()),
         node_id: Some(node_id.clone()),
         marketplace: settings.marketplace_enabled,
+        upnp: settings.upnp_enabled,
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,
@@ -821,6 +825,7 @@ fn build_ui(app: &gtk4::Application) {
         marketplace_url_entry: gtk4::Entry::new(),
         detect_marketplace_btn: gtk4::Button::with_label("Detect"),
         marketplace_switch: gtk4::Switch::new(),
+        upnp_switch: gtk4::Switch::new(),
         cidr_entry: gtk4::Entry::new(),
         interval_spin: gtk4::SpinButton::new(
             Some(&gtk4::Adjustment::new(60.0, 1.0, 3600.0, 1.0, 10.0, 0.0)),
@@ -998,6 +1003,24 @@ fn build_ui(app: &gtk4::Application) {
     marketplace_hint.set_xalign(0.0);
     marketplace_hint.add_css_class("dim-label");
     grid.attach(&marketplace_hint, 0, row, 2, 1);
+    row += 1;
+
+    let upnp_caption = gtk4::Label::new(Some("UPnP port forward"));
+    upnp_caption.set_xalign(0.0);
+    grid.attach(&upnp_caption, 0, row, 1, 1);
+    ui.upnp_switch.set_halign(gtk4::Align::Start);
+    ui.upnp_switch.set_valign(gtk4::Align::Center);
+    grid.attach(&ui.upnp_switch, 1, row, 1, 1);
+    row += 1;
+
+    let upnp_hint = gtk4::Label::new(Some(
+        "Automatically forward port on your router via UPnP so agents\n\
+         on the internet can reach this node. Recommended for paid mode.",
+    ));
+    upnp_hint.set_wrap(true);
+    upnp_hint.set_xalign(0.0);
+    upnp_hint.add_css_class("dim-label");
+    grid.attach(&upnp_hint, 0, row, 2, 1);
     row += 1;
 
     let cidr_caption = gtk4::Label::new(Some("Allowed CIDRs"));

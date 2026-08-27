@@ -39,6 +39,7 @@ serve = [
     "dep:ureq",
     "dep:tokio",
     "dep:futures-util",
+    "dep:igd-next",
     # Production CPU backend (ROADMAP.md §1): Cloud Hypervisor microVM. The
     # feature only pulls serde_json in the executor crate; it spawns the
     # `cloud-hypervisor` binary at runtime.
@@ -74,6 +75,10 @@ futures-util = { workspace = true, optional = true }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# UPnP IGD port forwarding so paid nodes behind a home router are reachable
+# from the internet without manual router/config. Blocking API (default
+# features = minimal dep tree), used for the `serve` binaries only.
+igd-next = { version = "0.17", optional = true }
 
 [dev-dependencies]
 # Test-only: build a deterministic SigningKey to construct test offers.

@@ -71,6 +71,9 @@ pub struct StartOptions<'a> {
     /// Register with the public GitHub Pages marketplace on startup.
     /// Detects external IP and POSTs to the Cloudflare Worker (no token needed).
     pub marketplace: bool,
+    /// Auto-forward the node's port on the home router via UPnP so a paid
+    /// node is reachable from the internet without a manual port-forward.
+    pub upnp: bool,
 }
 
 /// Write a discovery file so agents on the same machine can find the node.
@@ -221,6 +224,9 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
         }
         if opts.marketplace {
             node_cmd.arg("--marketplace");
+        }
+        if opts.upnp {
+            node_cmd.arg("--upnp");
         }
         match node_cmd.spawn() {
             Ok(child) => Some(child),

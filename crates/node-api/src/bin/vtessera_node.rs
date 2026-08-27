@@ -23,6 +23,10 @@
 //!     -- --bind 127.0.0.1:8402 --offer offer.json --escrow <PDA> \
 //!        --network solana-devnet [--backend noop-cpu|local-cpu]
 //!
+//! Add `--marketplace` to register with the public marketplace (GitHub
+//! Pages) and `--upnp` to auto-forward the port on a UPnP home router so
+//! the node is reachable from the internet without a manual port-forward.
+//!
 //! Where `offer.json` is the JSON output of `vtessera_offer::to_json`.
 //!
 //! `--backend` selects the executor:
@@ -93,7 +97,8 @@ fn usage_and_exit() -> ! {
         [--net-enforcement guest|host|both] \
         [--rpc-url <solana-rpc>] \
         [--publish <index-url>] [--publish-interval <secs>] \
-        [--marketplace] [--marketplace-interval <secs>]"
+        [--marketplace] [--marketplace-interval <secs>] \
+        [--upnp]"
     );
     process::exit(2);
 }
@@ -119,6 +124,9 @@ struct Args {
     marketplace: bool,
     /// How often to re-register with the marketplace (default: 3600s).
     marketplace_interval: Duration,
+    /// Auto-forward the bind port on the home router via UPnP IGD so the
+    /// node is reachable from the internet without a manual port-forward.
+    upnp: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +238,7 @@ fn parse_args() -> Args {
     let mut rpc_url = "https://api.devnet.solana.com".to_string();
     let mut marketplace = false;
     let mut marketplace_interval: u64 = DEFAULT_MARKETPLACE_INTERVAL_SECS;
+    let mut upnp = false;
     let mut it = env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -281,6 +290,7 @@ fn parse_args() -> Args {
                     marketplace_interval = s.parse().unwrap_or(DEFAULT_MARKETPLACE_INTERVAL_SECS);
                 }
             }
+            "--upnp" => upnp = true,
             "--backend" => {
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 backend = BackendChoice::parse(&raw).unwrap_or_else(|| usage_and_exit());
@@ -311,6 +321,7 @@ fn parse_args() -> Args {
             rpc_url,
             marketplace,
             marketplace_interval: Duration::from_secs(marketplace_interval),
+            upnp,
         },
         _ => usage_and_exit(),
     }
@@ -816,6 +827,26 @@ fn main() {
         None => None,
     };
 
+    // If UPnP is requested, discover the router's IGD (Internet Gateway
+    // Device) and add a port forward for the node's port *before* binding or
+    // registering with any marketplace. This makes a paid node behind a home
+    // NAT reachable from the internet without a manual port-forward. The
+    // returned external IP (if any) is what agents on other networks use.
+    let upnp_external_ip: Option<String> = if args.upnp {
+        match upnp_add_port_forward(&args.bind) {
+            Ok(ip) => {
+                eprintln!("vtessera-node: UPnP port forward OK (external IP: {ip})");
+                Some(ip)
+            }
+            Err(e) => {
+                eprintln!("vtessera-node: UPnP port forward failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Marketplace registration: detect external IP and register via Cloudflare Worker.
     if args.marketplace {
         // Parse port from bind address.
@@ -826,7 +857,27 @@ fn main() {
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(8402);
 
-        match register_with_marketplace(&offer, &signing_key_for_marketplace, port) {
+        // Prefer the IP that UPnP learned from the router (it also confirms
+        // the port is forwarded); fall back to detecting it via an echo
+        // service. Registration succeeds regardless.
+        let external_ip = upnp_external_ip
+            .clone()
+            .or_else(detect_external_ip)
+            .unwrap_or_default();
+
+        let external_ip = if external_ip.is_empty() {
+            eprintln!("vtessera-node: could not determine external IP for marketplace");
+            None
+        } else {
+            Some(external_ip)
+        };
+
+        match register_with_marketplace_with_ip(
+            &offer,
+            &signing_key_for_marketplace,
+            port,
+            external_ip.clone(),
+        ) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: marketplace registration failed (will retry): {e}"),
         }
@@ -835,6 +886,7 @@ fn main() {
             signing_key_for_marketplace,
             port,
             args.marketplace_interval,
+            external_ip,
         );
     }
 
@@ -949,20 +1001,90 @@ fn detect_external_ip() -> Option<String> {
     None
 }
 
+/// Local non-loopback IPv4 of the first active interface, used as the
+/// internal endpoint of a UPnP port forward when the node binds to `0.0.0.0`.
+fn detect_local_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // A UDP "send" to a public address never actually transmits on Linux, but
+    // it makes the kernel pick the local source address for that route.
+    socket.connect("8.8.8.8:53").ok()?;
+    let local = socket.local_addr().ok()?;
+    match local.ip() {
+        std::net::IpAddr::V4(v4) => Some(v4),
+        _ => None,
+    }
+}
+
+/// Discover the router's UPnP IGD and add a TCP port forward for the node's
+/// bind port. Returns the router's reported WAN (external) IP on success.
+///
+/// Requires a UPnP-enabled home router on the LAN. Failure is non-fatal —
+/// the caller logs and carries on (the node can still be reached on the LAN,
+/// or via iroh relay / a manual port-forward).
+fn upnp_add_port_forward(bind: &str) -> Result<String, String> {
+    use igd_next::{PortMappingProtocol, SearchOptions};
+
+    // Parse the local port to forward from the bind address.
+    let bind_port = bind
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid --bind {bind} (expected host:port)"))?;
+
+    // The node binds to 0.0.0.0; resolve the LAN IP we should forward to.
+    let local_ip = detect_local_ipv4().ok_or_else(|| "no LAN interface IP found".to_string())?;
+
+    // Search for the router's IGD. Bound to the chosen interface so discovery
+    // reaches the gateway's SSDP multicast address.
+    let gateway = igd_next::search_gateway(SearchOptions {
+        bind_addr: std::net::SocketAddr::new(std::net::IpAddr::V4(local_ip), 0),
+        ..Default::default()
+    })
+    .map_err(|e| format!("gateway discovery failed: {e}"))?;
+
+    let local = std::net::SocketAddr::new(std::net::IpAddr::V4(local_ip), bind_port);
+
+    // Add a permanent (0 = infinite lease) TCP mapping: external 8402 -> local.
+    gateway
+        .add_port(
+            PortMappingProtocol::TCP,
+            bind_port,
+            local,
+            0,
+            "vtessera-node",
+        )
+        .map_err(|e| format!("add port mapping failed: {e}"))?;
+
+    // Query the router for our WAN IP to confirm reachability / for the offer.
+    let external_ip = gateway
+        .get_external_ip()
+        .map_err(|e| format!("get external ip failed: {e}"))?;
+
+    Ok(external_ip.to_string())
+}
+
 /// Register the node's offer with the marketplace via Cloudflare Worker.
 ///
 /// The worker holds the GitHub token server-side — nodes don't need one.
 /// Just POST to the worker URL.
+///
+/// `external_ip` overrides the IP the offer was signed with: it may come from
+/// a UPnP router query (preferred, confirms the port is forwarded) or from an
+/// IP-echo service. `None` falls back to detecting it at this moment.
 const MARKETPLACE_WORKER_URL: &str = "https://vtessera.douglasdemaio.workers.dev";
 
-fn register_with_marketplace(
+/// Internal helper that takes an optional pre-detected external IP.
+fn register_with_marketplace_with_ip(
     offer: &vtessera_offer::SignedOffer,
     signing_key: &SigningKey,
     port: u16,
+    external_ip: Option<String>,
 ) -> Result<(), String> {
-    // Detect external IP.
-    let external_ip =
-        detect_external_ip().ok_or_else(|| "failed to detect external IP".to_string())?;
+    // Detect external IP if not provided.
+    let external_ip = match external_ip {
+        Some(ip) => ip,
+        None => detect_external_ip().ok_or_else(|| "failed to detect external IP".to_string())?,
+    };
 
     // Override the endpoint with the external IP and re-sign.
     let mut offer_body = offer.body.clone();
@@ -1002,11 +1124,14 @@ fn spawn_marketplace_registration(
     signing_key: SigningKey,
     port: u16,
     interval: Duration,
+    external_ip: Option<String>,
 ) {
     thread::spawn(move || loop {
         thread::sleep(interval);
         let signed = vtessera_offer::sign(offer_body.clone(), &signing_key);
-        if let Err(e) = register_with_marketplace(&signed, &signing_key, port) {
+        if let Err(e) =
+            register_with_marketplace_with_ip(&signed, &signing_key, port, external_ip.clone())
+        {
             eprintln!("vtessera-node: marketplace registration failed (will retry): {e}");
         }
     });

@@ -507,6 +507,21 @@ port-forward). STUN discovers the reflexive address but without hole
 punching or TURN, agents behind symmetric NAT cannot connect. Full
 NAT traversal (hole punching, TURN relay, QUIC with key pinning) is v1.
 
+To make a paid node behind a home router/UPnP reachable from the internet
+without a manual port-forward, vtessera-node can open the port itself:
+
+```bash
+vtessera-node --bind 0.0.0.0:8402 ... --marketplace --upnp
+```
+
+`--upnp` discovers the router's UPnP IGD, adds a TCP port forward for the
+node's bind port, and reads the router's reported WAN IP. When `--marketplace`
+is also set, that same WAN IP + forwarded port is what gets signed into the
+offer's endpoint — so agents anywhere reach the node directly. Requires a
+UPnP-enabled router on the LAN; failures are logged, never fatal (the node
+still works on the LAN and over iroh). Available from the GUI as the
+"UPnP port forward" toggle.
+
 ---
 
 ## 10. Threat Model

@@ -148,6 +148,7 @@ mod tests {
             consent_version: crate::settings::CURRENT_CONSENT_VERSION,
             marketplace_url: String::new(),
             marketplace_enabled: false,
+            upnp_enabled: false,
             local_network: false,
             allowed_cidrs: Vec::new(),
         }

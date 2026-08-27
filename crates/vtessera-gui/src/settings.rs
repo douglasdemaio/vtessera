@@ -85,6 +85,11 @@ pub struct Settings {
     /// Detects external IP and POSTs to the Cloudflare Worker (no token needed).
     #[serde(default)]
     pub marketplace_enabled: bool,
+    /// Auto-forward the node's port on the home router via UPnP so a paid
+    /// node is reachable from the internet without a manual port-forward.
+    /// Best used together with `marketplace_enabled`.
+    #[serde(default)]
+    pub upnp_enabled: bool,
 }
 
 fn default_backend() -> String {
@@ -116,6 +121,7 @@ impl Default for Settings {
             consent_version: 0,
             marketplace_url: String::new(),
             marketplace_enabled: false,
+            upnp_enabled: false,
         }
     }
 }
@@ -288,6 +294,7 @@ mod tests {
             consent_version: CURRENT_CONSENT_VERSION,
             marketplace_url: String::new(),
             marketplace_enabled: false,
+            upnp_enabled: false,
             local_network: false,
             allowed_cidrs: Vec::new(),
         }
