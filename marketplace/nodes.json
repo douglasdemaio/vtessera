@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1787867342,
+  "updated_at": 1787887140,
   "nodes": [
     {
       "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
@@ -12,22 +12,22 @@
             "vcpus": 16
           },
           "endpoint": "http://146.70.238.26:8402",
-          "expires_unix": 1790441792,
-          "issued_unix": 1787849792,
+          "expires_unix": 1790479117,
+          "issued_unix": 1787887117,
           "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
           "price": {
             "currency": "usdc",
             "mode": "paid",
             "payout_id": "34Wxj37y8yCynoxsqkvZ5o2Wj3xH36XFkQ1AVUpawCZB",
-            "per_device_second_micros": 2792
+            "per_device_second_micros": 5569
           },
           "schema_ver": 1
         },
         "pubkey_hex": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-        "sig_hex": "a15701fa564fcac511de9303050fdfa6b032080418e41fb000c9562e28b98b1137b1b0636c478e1a93a5f7b3afe4eff0fe2b3f061938d5341ea0a17c6de24a0c"
+        "sig_hex": "867f00ae6441a64d53f51046618f377747298c2789d464fcf781111aef06f0e209fdfbdb0d8c798aa2b9d19b45364c5042262780d4481b0e1b310816da4f720e"
       },
-      "sig_hex": "a15701fa564fcac511de9303050fdfa6b032080418e41fb000c9562e28b98b1137b1b0636c478e1a93a5f7b3afe4eff0fe2b3f061938d5341ea0a17c6de24a0c",
-      "updated_at": 1787853414,
+      "sig_hex": "867f00ae6441a64d53f51046618f377747298c2789d464fcf781111aef06f0e209fdfbdb0d8c798aa2b9d19b45364c5042262780d4481b0e1b310816da4f720e",
+      "updated_at": 1787887140,
       "endpoint": "http://146.70.238.26:8402"
     },
     {
