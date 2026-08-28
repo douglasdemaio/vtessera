@@ -34,7 +34,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borsh::BorshSerialize;
 use sha2::{Digest, Sha256};
@@ -49,7 +49,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use spl_associated_token_account::{
-    get_associated_token_address, instruction::create_associated_token_account,
+    get_associated_token_address, instruction::create_associated_token_account_idempotent,
 };
 use spl_token::state::{Account as TokenAccount, Mint};
 
@@ -259,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Buyer is the agent (payer). Create/find their ATA and, for the test
     // mint, fund them 10.000000.
     let buyer_ata = get_associated_token_address(&payer.pubkey(), &mint_pk);
-    let mut ixs: Vec<Instruction> = vec![create_associated_token_account(
+    let mut ixs: Vec<Instruction> = vec![create_associated_token_account_idempotent(
         &payer.pubkey(),
         &payer.pubkey(),
         &mint_pk,
@@ -305,7 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seller_ata = get_associated_token_address(&seller_pubkey, &mint_pk);
     send_tx(
         &rpc,
-        &[create_associated_token_account(
+        &[create_associated_token_account_idempotent(
             &payer.pubkey(),
             &seller_pubkey,
             &mint_pk,
@@ -318,12 +318,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("seller: {seller_pubkey}  ATA: {seller_ata}");
 
     // job_id is agent-chosen entropy; the contract PDA is derived from it.
+    // Mix in the current time (micros since epoch) so every run derives a
+    // fresh contract PDA — the escrow program cannot re-allocate an
+    // already-initialised contract account from a prior run.
     let job_id: [u8; 32] = {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros())
+            .unwrap_or(0);
         let mut h = Sha256::new();
         h.update(b"vtessera-x402-client:");
         h.update(payer.pubkey().as_ref());
         h.update(mint_pk.as_ref());
         h.update(buyer_ata.as_ref());
+        h.update(nonce.to_le_bytes());
         let d = h.finalize();
         let mut out = [0u8; 32];
         out.copy_from_slice(&d);
@@ -337,7 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     send_tx(
         &rpc,
-        &[create_associated_token_account(
+        &[create_associated_token_account_idempotent(
             &payer.pubkey(),
             &contract_pda,
             &mint_pk,

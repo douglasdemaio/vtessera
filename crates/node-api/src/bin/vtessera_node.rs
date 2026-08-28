@@ -572,17 +572,125 @@ where
 
 #[derive(serde::Deserialize)]
 struct TransactionMeta {
-    #[serde(default)]
-    pre_balances: Vec<u64>,
-    #[serde(default)]
-    post_balances: Vec<u64>,
     err: Option<serde_json::Value>,
+    #[serde(default, rename = "innerInstructions")]
+    inner_instructions: Vec<InnerInstructionSet>,
+    /// Accounts pulled in at runtime via address-lookup tables (and CPI),
+    /// not present in the static `message.accountKeys`. Inner-instruction
+    /// account indices index into `static_keys ++ loaded.writable ++
+    /// loaded.readonly`, so these must be appended for correct resolution.
+    #[serde(default, rename = "loadedAddresses")]
+    loaded_addresses: LoadedAddresses,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LoadedAddresses {
+    #[serde(default)]
+    writable: Vec<String>,
+    #[serde(default)]
+    readonly: Vec<String>,
+}
+
+/// The set of instructions a top-level instruction produced. jsonParsed
+/// returns them grouped per outer instruction; we scan the whole tx, so the
+/// parent index is not needed (serde ignores fields we don't bind).
+#[derive(serde::Deserialize, Debug)]
+struct InnerInstructionSet {
+    #[serde(default)]
+    instructions: Vec<InnerInstruction>,
+}
+
+/// A single (inner) instruction in `encoding: json` (base58) form from
+/// `getTransaction`. The program is identified by `programIdIndex` (an index
+/// into the account keys); `accounts` are indices into the same list; `data`
+/// is the raw base58 instruction data. (`jsonParsed` returns `accounts`/
+/// `data` as null, so we must request `json` form to inspect CPI internals.)
+#[derive(serde::Deserialize, Debug)]
+struct InnerInstruction {
+    #[serde(default, rename = "programId")]
+    program_id: Option<String>,
+    #[serde(default, rename = "programIdIndex")]
+    program_id_index: Option<u8>,
+    #[serde(default)]
+    accounts: Vec<u8>,
+    #[serde(default)]
+    data: String,
 }
 
 #[derive(serde::Deserialize)]
 struct ProofPayload {
     tx: String,
+    #[serde(rename = "amount_micros")]
     amount_micros: u64,
+    /// The 32-byte per-job contract seed (hex-encoded). This is the `job_id`
+    /// the agent derived from its payer/mint/ATA and used to create the
+    /// escrow contract PDA — *not* the human `job_id` in the job body.
+    #[serde(default)]
+    job_id: Option<String>,
+    /// The stablecoin mint the buyer paid with (base58).
+    #[serde(default)]
+    mint: Option<String>,
+}
+
+/// The legacy SPL Token program (`spl_token::id()`). The escrow program's
+/// `pay_for_compute` deposits the price with a plain `token::transfer` CPI,
+/// so the inner instruction we look for is a `Transfer` on this program.
+const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// SPL Token `Transfer` instruction discriminant (`TokenInstruction::Transfer`).
+const SPL_TRANSFER_TAG: u8 = 3;
+
+/// Parse a 64-char hex string into the 32 bytes it encodes.
+fn hex_to_bytes32(s: &str) -> Result<[u8; 32], String> {
+    let mut out = [0u8; 32];
+    let bytes = hex::decode(s).map_err(|e| format!("job_id not valid hex ({e})"))?;
+    if bytes.len() != 32 {
+        return Err("job_id must decode to 32 bytes".into());
+    }
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// The SPL Token `Transfer` instruction data is `[discriminant:u8,
+/// amount:u64 LE]`. Decode the (base58) instruction data and, if it is a
+/// Transfer whose destination account (resolved via `accounts[1]` against
+/// the transaction's account keys) is the given escrow ATA, return the
+/// transferred amount.
+fn transfer_amount_into_escrow(
+    instr: &InnerInstruction,
+    account_keys: &[String],
+    escrow_ata: &[u8; 32],
+) -> Option<u64> {
+    if instr.accounts.len() < 3 {
+        return None;
+    }
+    // Resolve the program id: either inline (`programId`, jsonParsed) or via
+    // an index into the account keys (`programIdIndex`, json form).
+    let prog = if let Some(p) = &instr.program_id {
+        Some(p.as_str())
+    } else {
+        let idx = instr.program_id_index? as usize;
+        account_keys.get(idx).map(|s| s.as_str())
+    };
+    if prog != Some(SPL_TOKEN_PROGRAM_ID) {
+        return None;
+    }
+    // Transfer accounts: [from, to, owner] — index 1 is the destination.
+    let to_idx = *instr.accounts.get(1)? as usize;
+    let to_pubkey = account_keys.get(to_idx)?;
+    // account_keys are base58-encoded pubkeys; compare against the
+    // base58 encoding of the derived escrow ATA.
+    let escrow_ata_b58 = bs58::encode(escrow_ata).into_string();
+    if *to_pubkey != escrow_ata_b58 {
+        return None;
+    }
+    let data = bs58::decode(&instr.data).into_vec().ok()?;
+    if data.len() < 9 || data[0] != SPL_TRANSFER_TAG {
+        return None;
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&data[1..9]);
+    Some(u64::from_le_bytes(buf))
 }
 
 impl SolanaPaymentVerifier {
@@ -638,7 +746,7 @@ impl PaymentVerifier for SolanaPaymentVerifier {
             "getTransaction",
             serde_json::json!([
                 payload.tx,
-                { "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0 }
+                { "encoding": "json", "maxSupportedTransactionVersion": 0 }
             ]),
         )?;
         let tx_info: TransactionInfo = serde_json::from_value(result)
@@ -685,13 +793,29 @@ impl PaymentVerifier for SolanaPaymentVerifier {
         }
 
         // 4. Check that the escrow account is in the transaction's account keys.
-        let account_keys = tx_info
+        //    Build the *full* key list the inner-instruction indices reference:
+        //    static `message.accountKeys` followed by the runtime-loaded
+        //    addresses (writable, then readonly).
+        let static_keys = tx_info
             .transaction
             .as_ref()
             .and_then(|t| t.message.as_ref())
             .map(|m| &m.account_keys)
             .cloned()
             .unwrap_or_default();
+        let (loaded_writable, loaded_readonly) = tx_info
+            .meta
+            .as_ref()
+            .map(|m| {
+                (
+                    m.loaded_addresses.writable.clone(),
+                    m.loaded_addresses.readonly.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let mut account_keys = static_keys;
+        account_keys.extend(loaded_writable);
+        account_keys.extend(loaded_readonly);
         if !account_keys.iter().any(|k| k == escrow_account) {
             return Err(PaymentVerifyError::EscrowMismatch {
                 expected: escrow_account.to_string(),
@@ -699,36 +823,95 @@ impl PaymentVerifier for SolanaPaymentVerifier {
             });
         }
 
-        // 5. Check token transfer amount by looking at balance changes
-        //    for the escrow account. SPL token transfers change the
-        //    account's lamport balance by the rent-exempt minimum delta,
-        //    but the real check is the inner instructions. For simplicity,
-        //    we check that the escrow account's balance increased (the
-        //    token was deposited into it).
+        // 5. Derive the escrow ATA for *this* job and verify the SPL Token
+        //    transfer that funded it actually landed there.
         //
-        //    A more rigorous check would parse inner instructions for
-        //    SPL Token `Transfer` / `TransferChecked` — left as a
-        //    follow-up enhancement.
-        if let Some(meta) = &tx_info.meta {
-            let escrow_idx = account_keys.iter().position(|k| k == escrow_account);
-            if let Some(idx) = escrow_idx {
-                if idx < meta.pre_balances.len() && idx < meta.post_balances.len() {
-                    let delta = meta.post_balances[idx] as i64 - meta.pre_balances[idx] as i64;
-                    if delta <= 0 {
-                        return Err(PaymentVerifyError::InsufficientAmount {
-                            expected: payload.amount_micros,
-                            found: 0,
-                        });
-                    }
-                }
+        //    `pay_for_compute` creates a per-job contract PDA
+        //    (`[b"contract", job_id]`) and deposits the price into that
+        //    contract's associated token account (the "escrow ATA") via a
+        //    plain SPL Token `Transfer` CPI. The node names the job through
+        //    the proof's `job_id` (the 32-byte contract seed) and `mint`.
+        //
+        //    A malicious buyer could put any amount in the proof, so we must
+        //    parse the actual on-chain transfer and require it to be >= the
+        //    claimed amount. Matching the *derived* ATA — which embeds both
+        //    the job's contract PDA and the mint — is what pins this payment
+        //    to this job and this stablecoin.
+        let job_id_hex = payload
+            .job_id
+            .ok_or_else(|| PaymentVerifyError::MalformedProof("missing job_id".into()))?;
+        let mint = payload
+            .mint
+            .ok_or_else(|| PaymentVerifyError::MalformedProof("missing mint".into()))?;
+        let job_id = hex_to_bytes32(&job_id_hex)
+            .map_err(|e| PaymentVerifyError::MalformedProof(e))?;
+        let mint_b58 =
+            bs58::decode(&mint)
+                .into_vec()
+                .map_err(|_| PaymentVerifyError::MalformedProof("mint is not base58".into()))?;
+        let mint_bytes: [u8; 32] = {
+            if mint_b58.len() != 32 {
+                return Err(PaymentVerifyError::MalformedProof(
+                    "mint must be a 32-byte pubkey".into(),
+                ));
             }
+            let mut m = [0u8; 32];
+            m.copy_from_slice(&mint_b58);
+            m
+        };
+        let program_id: [u8; 32] = {
+            let b = bs58::decode(escrow_account)
+                .into_vec()
+                .map_err(|_| PaymentVerifyError::EscrowMismatch {
+                    expected: escrow_account.to_string(),
+                    found: account_keys.clone(),
+                })?;
+            if b.len() != 32 {
+                return Err(PaymentVerifyError::EscrowMismatch {
+                    expected: escrow_account.to_string(),
+                    found: account_keys.clone(),
+                });
+            }
+            let mut p = [0u8; 32];
+            p.copy_from_slice(&b);
+            p
+        };
+        let (contract_pda, _bump) =
+            vtessera_node_api::solana_derivation::contract_pda(&job_id, &program_id).ok_or_else(
+                || {
+                    PaymentVerifyError::TransactionNotFound(
+                        "could not derive contract PDA for job".into(),
+                    )
+                },
+            )?;
+        let escrow_ata = vtessera_node_api::solana_derivation::get_associated_token_address(
+            &contract_pda,
+            &mint_bytes,
+        );
+
+        let total_deposited = tx_info
+            .meta
+            .as_ref()
+            .map(|m| {
+                m.inner_instructions
+                    .iter()
+                    .flat_map(|set| set.instructions.iter())
+                    .filter_map(|instr| transfer_amount_into_escrow(instr, &account_keys, &escrow_ata))
+                    .sum::<u64>()
+            })
+            .unwrap_or(0);
+
+        if total_deposited < payload.amount_micros {
+            return Err(PaymentVerifyError::InsufficientAmount {
+                expected: payload.amount_micros,
+                found: total_deposited,
+            });
         }
 
-        // 6. Return the mint and amount from the proof.
-        //    The mint is not in the proof — we return a placeholder.
-        //    In a full implementation, we'd parse inner instructions
-        //    for the SPL Token mint.
-        Ok(("unknown".to_string(), payload.amount_micros))
+        // 6. Confirm deposit exactly matches the claimed amount.
+        //    (A buyer may over-pay; under-claiming a lower amount is rejected
+        //    above, so a short payment never passes.)
+        Ok((mint, payload.amount_micros))
     }
 }
 
@@ -1365,6 +1548,11 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
         if let Err(e) = send.finish() {
             eprintln!("vtessera-node: iroh finish error from {remote}: {e}");
         }
+
+        // Wait for the client to finish reading the response before dropping
+        // the connection. Without this, iroh may reset the connection while
+        // the agent is still reading its last bytes over the relay path.
+        connection.closed().await;
 
         Ok(())
     }
