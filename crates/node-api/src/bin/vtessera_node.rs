@@ -843,8 +843,7 @@ impl PaymentVerifier for SolanaPaymentVerifier {
         let mint = payload
             .mint
             .ok_or_else(|| PaymentVerifyError::MalformedProof("missing mint".into()))?;
-        let job_id =
-            hex_to_bytes32(&job_id_hex).map_err(|e| PaymentVerifyError::MalformedProof(e))?;
+        let job_id = hex_to_bytes32(&job_id_hex).map_err(PaymentVerifyError::MalformedProof)?;
         let mint_b58 = bs58::decode(&mint)
             .into_vec()
             .map_err(|_| PaymentVerifyError::MalformedProof("mint is not base58".into()))?;
