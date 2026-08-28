@@ -101,12 +101,8 @@ fn usage_and_exit() -> ! {
         "usage: vtessera-x402-client [--node <url>] [--mint <addr>] \
          [--seconds <n>] [--seller <pubkey>]"
     );
-    eprintln!(
-        "  --node    vtessera-node base URL (default {DEFAULT_NODE})"
-    );
-    eprintln!(
-        "  --mint    pay a real devnet stablecoin mint instead of minting a test one"
-    );
+    eprintln!("  --node    vtessera-node base URL (default {DEFAULT_NODE})");
+    eprintln!("  --mint    pay a real devnet stablecoin mint instead of minting a test one");
     eprintln!("  --seconds agreed device-seconds for the job (default {DEFAULT_SECONDS})");
     eprintln!("  --seller  where the seller's earned slice lands (default: fresh keypair)");
     std::process::exit(2);
@@ -211,11 +207,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let job_id_hex = {
         let mut h = Sha256::new();
         h.update(payer.pubkey().as_ref());
-        h.update(format!("{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()));
-        hex_string(h.finalize().as_slice())
+        h.update(format!(
+            "{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let d = h.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&d);
+        hex_string(&out)
     };
     let job_spec = format!(
         "{{\"job_id\":\"{}\",\"image\":\"busybox\",\"command\":[\"echo\",\"x402 test\"],\
@@ -251,7 +253,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             let kp = Keypair::new();
-            println!("creating test stablecoin mint (no faucet needed): {}", kp.pubkey());
+            println!(
+                "creating test stablecoin mint (no faucet needed): {}",
+                kp.pubkey()
+            );
             (kp.pubkey(), Some(kp), Some(payer.pubkey()))
         }
     };
@@ -277,13 +282,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &spl_token::id(),
             ),
         );
-        ixs.insert(1, spl_token::instruction::initialize_mint(
-            &spl_token::id(),
-            &mint_pk,
-            &authority,
-            None,
-            6,
-        )?);
+        ixs.insert(
+            1,
+            spl_token::instruction::initialize_mint(
+                &spl_token::id(),
+                &mint_pk,
+                &authority,
+                None,
+                6,
+            )?,
+        );
         ixs.push(spl_token::instruction::mint_to(
             &spl_token::id(),
             &mint_pk,
@@ -403,7 +411,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // rent exemption (0-byte account needs 890,880 lamports), so on devnet
     // top it up if it doesn't exist yet. On mainnet the operator funds it.
     match rpc.get_account(&fee_wallet) {
-        Ok(acct) if acct.lamports >= rpc.get_minimum_balance_for_rent_exemption(acct.data.len())? => {}
+        Ok(acct)
+            if acct.lamports >= rpc.get_minimum_balance_for_rent_exemption(acct.data.len())? => {}
         _ => {
             let sig = rpc.request_airdrop(&fee_wallet, 1_000_000_000)?;
             rpc.confirm_transaction(&sig)?;
@@ -440,18 +449,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
         data: pay_data,
     };
-    println!(
-        "pay_for_compute: {price_micros} micros into escrow (fee wallet {fee_wallet})"
-    );
+    println!("pay_for_compute: {price_micros} micros into escrow (fee wallet {fee_wallet})");
     let pay_sig = send_tx(&rpc, &[pay_ix], &[&payer], &payer, "pay_for_compute")?;
 
     let escrow_balance = token_balance(&rpc, &escrow_ata)?;
     println!("escrow balance after deposit: {escrow_balance} micros");
     if escrow_balance != price_micros {
-        return Err(format!(
-            "escrow balance {escrow_balance} != price {price_micros}"
-        )
-        .into());
+        return Err(format!("escrow balance {escrow_balance} != price {price_micros}").into());
     }
 
     // Wait for the transaction to finalize (devnet can take 30+ seconds).
@@ -468,7 +472,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  finalized after {attempt} attempts");
                 break;
             } else if attempt == 30 {
-                return Err(format!("transaction did not finalize in time, status: {confirmed}").into());
+                return Err(
+                    format!("transaction did not finalize in time, status: {confirmed}").into(),
+                );
             } else {
                 if attempt % 5 == 0 {
                     println!("  status: {confirmed} (waiting...)");
@@ -504,22 +510,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !accept_body.is_empty() {
         println!("  body: {accept_body}");
     }
-    if let Some((_, err)) = accept_resp.headers.iter().find(|(k, _)| k == "x-payment-error") {
+    if let Some((_, err)) = accept_resp
+        .headers
+        .iter()
+        .find(|(k, _)| k == "x-payment-error")
+    {
         println!("  payment error: {err}");
     }
     match accept_resp.status {
-        200 => println!(
-            "  (paid job accepted and executed — full x402 flow succeeded)"
-        ),
+        200 => println!("  (paid job accepted and executed — full x402 flow succeeded)"),
         501 => println!(
             "  (expected in v0: execution is not wired, so the node refuses. \
              The payment is in the escrow; finalize releases it.)"
         ),
         other => {
-            return Err(format!(
-                "expected 200 or 501, got {other} — is vtessera-node up to date?"
-            )
-            .into());
+            return Err(
+                format!("expected 200 or 501, got {other} — is vtessera-node up to date?").into(),
+            );
         }
     }
 
@@ -530,7 +537,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // completion → f = 1.0, seller gets the whole escrow.
     println!("\n--- 5. finalize_pro_rata (f = 1.0) ---");
     let fin_disc = anchor_disc("finalize_pro_rata");
-    let fin_args = FinalizeProRataArgs { f_micros: 1_000_000 };
+    let fin_args = FinalizeProRataArgs {
+        f_micros: 1_000_000,
+    };
     let mut fin_data = fin_disc.to_vec();
     fin_data.extend_from_slice(&fin_args.try_to_vec()?);
 
@@ -571,7 +580,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     assert_eq!(escrow_after, 0, "escrow should be drained after finalize");
-    assert_eq!(seller_after, price_micros, "seller should get the full price at f=1.0");
+    assert_eq!(
+        seller_after, price_micros,
+        "seller should get the full price at f=1.0"
+    );
 
     println!("\nsuccess: paid {price_micros} micros into the escrow program, node accepted the job, seller paid out.");
     println!("explorer:");
@@ -589,13 +601,15 @@ fn http_request(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> Result<HttpResponse, String> {
-    let url = base.strip_prefix("http://").ok_or("base URL must be http://")?;
+    let url = base
+        .strip_prefix("http://")
+        .ok_or("base URL must be http://")?;
     let (host, port) = match url.split_once(':') {
         Some((h, p)) => (h, p.parse::<u16>().map_err(|e| format!("bad port: {e}"))?),
         None => (url, 80u16),
     };
-    let mut stream = TcpStream::connect((host, port))
-        .map_err(|e| format!("connect {host}:{port}: {e}"))?;
+    let mut stream =
+        TcpStream::connect((host, port)).map_err(|e| format!("connect {host}:{port}: {e}"))?;
     stream.set_read_timeout(Some(READ_TIMEOUT)).ok();
     stream.set_write_timeout(Some(READ_TIMEOUT)).ok();
 
@@ -608,7 +622,9 @@ fn http_request(
     stream
         .write_all(req.as_bytes())
         .map_err(|e| format!("write request: {e}"))?;
-    stream.write_all(body).map_err(|e| format!("write body: {e}"))?;
+    stream
+        .write_all(body)
+        .map_err(|e| format!("write body: {e}"))?;
 
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();

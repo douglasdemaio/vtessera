@@ -843,12 +843,11 @@ impl PaymentVerifier for SolanaPaymentVerifier {
         let mint = payload
             .mint
             .ok_or_else(|| PaymentVerifyError::MalformedProof("missing mint".into()))?;
-        let job_id = hex_to_bytes32(&job_id_hex)
-            .map_err(|e| PaymentVerifyError::MalformedProof(e))?;
-        let mint_b58 =
-            bs58::decode(&mint)
-                .into_vec()
-                .map_err(|_| PaymentVerifyError::MalformedProof("mint is not base58".into()))?;
+        let job_id =
+            hex_to_bytes32(&job_id_hex).map_err(|e| PaymentVerifyError::MalformedProof(e))?;
+        let mint_b58 = bs58::decode(&mint)
+            .into_vec()
+            .map_err(|_| PaymentVerifyError::MalformedProof("mint is not base58".into()))?;
         let mint_bytes: [u8; 32] = {
             if mint_b58.len() != 32 {
                 return Err(PaymentVerifyError::MalformedProof(
@@ -860,12 +859,12 @@ impl PaymentVerifier for SolanaPaymentVerifier {
             m
         };
         let program_id: [u8; 32] = {
-            let b = bs58::decode(escrow_account)
-                .into_vec()
-                .map_err(|_| PaymentVerifyError::EscrowMismatch {
+            let b = bs58::decode(escrow_account).into_vec().map_err(|_| {
+                PaymentVerifyError::EscrowMismatch {
                     expected: escrow_account.to_string(),
                     found: account_keys.clone(),
-                })?;
+                }
+            })?;
             if b.len() != 32 {
                 return Err(PaymentVerifyError::EscrowMismatch {
                     expected: escrow_account.to_string(),
@@ -876,14 +875,13 @@ impl PaymentVerifier for SolanaPaymentVerifier {
             p.copy_from_slice(&b);
             p
         };
-        let (contract_pda, _bump) =
-            vtessera_node_api::solana_derivation::contract_pda(&job_id, &program_id).ok_or_else(
-                || {
-                    PaymentVerifyError::TransactionNotFound(
-                        "could not derive contract PDA for job".into(),
-                    )
-                },
-            )?;
+        let (contract_pda, _bump) = vtessera_node_api::solana_derivation::contract_pda(
+            &job_id,
+            &program_id,
+        )
+        .ok_or_else(|| {
+            PaymentVerifyError::TransactionNotFound("could not derive contract PDA for job".into())
+        })?;
         let escrow_ata = vtessera_node_api::solana_derivation::get_associated_token_address(
             &contract_pda,
             &mint_bytes,
@@ -896,7 +894,9 @@ impl PaymentVerifier for SolanaPaymentVerifier {
                 m.inner_instructions
                     .iter()
                     .flat_map(|set| set.instructions.iter())
-                    .filter_map(|instr| transfer_amount_into_escrow(instr, &account_keys, &escrow_ata))
+                    .filter_map(|instr| {
+                        transfer_amount_into_escrow(instr, &account_keys, &escrow_ata)
+                    })
                     .sum::<u64>()
             })
             .unwrap_or(0);
