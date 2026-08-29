@@ -23,6 +23,12 @@ on:
 permissions:
   contents: write
 
+# Serialize update runs so concurrent `node-register` dispatches (and the
+# node's hourly retries) don't race reading/writing marketplace/nodes.json.
+concurrency:
+  group: marketplace-update
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -40,6 +46,13 @@ jobs:
 
           echo "Registering node: $NODE_ID at $ENDPOINT"
 
+          # Reject malformed/invalid registrations (missing node_id or no offer
+          # body). This prevents garbage payloads from being persisted.
+          if [ -z "$NODE_ID" ] || [ "$NODE_ID" = "null" ] || ! echo "$OFFER" | jq -e '.body != null' >/dev/null 2>&1; then
+            echo "Ignoring invalid registration (missing node_id or offer body)"
+            exit 0
+          fi
+
           # Read existing nodes
           NODES=$(cat marketplace/nodes.json)
 
@@ -50,13 +63,13 @@ jobs:
             # Update existing node
             NODES=$(echo "$NODES" | jq --arg id "$NODE_ID" --argjson offer "$OFFER" --arg sig "$SIG" --argjson ts "$(date +%s)" '
               .nodes |= map(if .node_id == $id then
-                { node_id: $id, offer: $offer, sig_hex: $sig, updated_at: $ts, endpoint: (.offer.body.endpoint) }
+                { node_id: $id, offer: $offer, sig_hex: $sig, updated_at: $ts, endpoint: $offer.body.endpoint }
               else . end)
             ')
           else
             # Append new node
             NODES=$(echo "$NODES" | jq --arg id "$NODE_ID" --argjson offer "$OFFER" --arg sig "$SIG" --argjson ts "$(date +%s)" '
-              .nodes += [{ node_id: $id, offer: $offer, sig_hex: $sig, updated_at: $ts, endpoint: (.offer.body.endpoint) }]
+              .nodes += [{ node_id: $id, offer: $offer, sig_hex: $sig, updated_at: $ts, endpoint: $offer.body.endpoint }]
             ')
           fi
 
