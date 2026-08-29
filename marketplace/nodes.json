@@ -1,5 +1,34 @@
 {
   "version": 1,
-  "updated_at": 1788006006,
-  "nodes": []
+  "updated_at": 1788007764,
+  "nodes": [
+    {
+      "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
+      "offer": {
+        "body": {
+          "device": {
+            "kind": "cpu",
+            "mem_mb": 14738,
+            "vcpus": 16
+          },
+          "endpoint": "http://146.70.238.26:8402",
+          "expires_unix": 1790507288,
+          "issued_unix": 1787915288,
+          "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
+          "price": {
+            "currency": "usdc",
+            "mode": "paid",
+            "payout_id": "34Wxj37y8yCynoxsqkvZ5o2Wj3xH36XFkQ1AVUpawCZB",
+            "per_device_second_micros": 5569
+          },
+          "schema_ver": 1
+        },
+        "pubkey_hex": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
+        "sig_hex": "33345c6fb6a90ba7d0be548fb64658cc53830fde5b8a76cdee0fcf84b12b9dcc57ce0a8cd4f6103d90e3ac8e5a44629ebdf0a22ccf12a5fc014515e647179d05"
+      },
+      "sig_hex": "33345c6fb6a90ba7d0be548fb64658cc53830fde5b8a76cdee0fcf84b12b9dcc57ce0a8cd4f6103d90e3ac8e5a44629ebdf0a22ccf12a5fc014515e647179d05",
+      "updated_at": 1788007764,
+      "endpoint": null
+    }
+  ]
 }
