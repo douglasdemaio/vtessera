@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1788008790,
+  "updated_at": 1788008878,
   "nodes": [
     {
       "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
@@ -28,14 +28,7 @@
       },
       "sig_hex": "fc4ae0656e7314fd2164d46090a641b4069a0cd68316dca6916207b0e060f3a64fd0ecd12d636825899000f5635418af4c815c69b70ea0ee2d38655f7321be04",
       "updated_at": 1788008790,
-      "endpoint": "http://146.70.238.26:8402"
-    },
-    {
-      "node_id": "null",
-      "offer": {},
-      "sig_hex": "00",
-      "updated_at": 1788007779,
-      "endpoint": null
+      "endpoint": "http://146.70.238.25:8402"
     },
     {
       "node_id": "ea0a1265c21740f27fb721018fa5773b",
@@ -60,7 +53,7 @@
       },
       "sig_hex": "a54a5d185bfe61d6345dbc92430d5dedae7d7df71f7706f6c9f63fd9511972f36702f6ae7e5d90c417a7db2b570e4028356890fd5e94c25b62ebc3bda0101f07",
       "updated_at": 1788007814,
-      "endpoint": null
+      "endpoint": "http://157.180.225.110:8402"
     },
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -88,7 +81,7 @@
       },
       "sig_hex": "98088b19511a1d59868ad7d6559825237164140df57a49a833915f57dbe9135391d3bebbcd68b36cb87247cf28a069703417e22ae8f411e6197adf50f7e1df0b",
       "updated_at": 1788007903,
-      "endpoint": null
+      "endpoint": "http://194.15.81.176:8402"
     }
   ]
 }
