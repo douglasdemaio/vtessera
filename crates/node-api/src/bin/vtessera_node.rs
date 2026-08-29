@@ -23,6 +23,10 @@
 //!     -- --bind 127.0.0.1:8402 --offer offer.json --escrow <PDA> \
 //!        --network solana-devnet [--backend noop-cpu|local-cpu]
 //!
+//! Add `--marketplace` to register with the public marketplace (GitHub
+//! Pages) and `--upnp` to auto-forward the port on a UPnP home router so
+//! the node is reachable from the internet without a manual port-forward.
+//!
 //! Where `offer.json` is the JSON output of `vtessera_offer::to_json`.
 //!
 //! `--backend` selects the executor:
@@ -93,8 +97,8 @@ fn usage_and_exit() -> ! {
         [--net-enforcement guest|host|both] \
         [--rpc-url <solana-rpc>] \
         [--publish <index-url>] [--publish-interval <secs>] \
-        [--marketplace <owner/repo>] [--marketplace-token <token>] \
-        [--marketplace-interval <secs>]"
+        [--marketplace] [--marketplace-interval <secs>] \
+        [--upnp]"
     );
     process::exit(2);
 }
@@ -115,13 +119,14 @@ struct Args {
     publish: Option<String>,
     publish_interval: Duration,
     rpc_url: String,
-    /// GitHub `owner/repo` for marketplace registration (e.g. `douglasdemaio/vtessera`).
-    /// When set with --marketplace-token, registers with the GitHub Pages marketplace.
-    marketplace: Option<String>,
-    /// GitHub personal access token for marketplace registration.
-    marketplace_token: Option<String>,
+    /// Register with the public GitHub Pages marketplace on startup.
+    /// Detects external IP and POSTs to the Cloudflare Worker (no token needed).
+    marketplace: bool,
     /// How often to re-register with the marketplace (default: 3600s).
     marketplace_interval: Duration,
+    /// Auto-forward the bind port on the home router via UPnP IGD so the
+    /// node is reachable from the internet without a manual port-forward.
+    upnp: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,9 +236,9 @@ fn parse_args() -> Args {
     let mut publish: Option<String> = None;
     let mut publish_interval: u64 = DEFAULT_PUBLISH_INTERVAL_SECS;
     let mut rpc_url = "https://api.devnet.solana.com".to_string();
-    let mut marketplace: Option<String> = None;
-    let mut marketplace_token: Option<String> = None;
+    let mut marketplace = false;
     let mut marketplace_interval: u64 = DEFAULT_MARKETPLACE_INTERVAL_SECS;
+    let mut upnp = false;
     let mut it = env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -279,13 +284,13 @@ fn parse_args() -> Args {
                     rpc_url = s;
                 }
             }
-            "--marketplace" => marketplace = it.next(),
-            "--marketplace-token" => marketplace_token = it.next(),
+            "--marketplace" => marketplace = true,
             "--marketplace-interval" => {
                 if let Some(s) = it.next() {
                     marketplace_interval = s.parse().unwrap_or(DEFAULT_MARKETPLACE_INTERVAL_SECS);
                 }
             }
+            "--upnp" => upnp = true,
             "--backend" => {
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 backend = BackendChoice::parse(&raw).unwrap_or_else(|| usage_and_exit());
@@ -315,8 +320,8 @@ fn parse_args() -> Args {
             publish_interval: Duration::from_secs(publish_interval),
             rpc_url,
             marketplace,
-            marketplace_token,
             marketplace_interval: Duration::from_secs(marketplace_interval),
+            upnp,
         },
         _ => usage_and_exit(),
     }
@@ -567,17 +572,125 @@ where
 
 #[derive(serde::Deserialize)]
 struct TransactionMeta {
-    #[serde(default)]
-    pre_balances: Vec<u64>,
-    #[serde(default)]
-    post_balances: Vec<u64>,
     err: Option<serde_json::Value>,
+    #[serde(default, rename = "innerInstructions")]
+    inner_instructions: Vec<InnerInstructionSet>,
+    /// Accounts pulled in at runtime via address-lookup tables (and CPI),
+    /// not present in the static `message.accountKeys`. Inner-instruction
+    /// account indices index into `static_keys ++ loaded.writable ++
+    /// loaded.readonly`, so these must be appended for correct resolution.
+    #[serde(default, rename = "loadedAddresses")]
+    loaded_addresses: LoadedAddresses,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LoadedAddresses {
+    #[serde(default)]
+    writable: Vec<String>,
+    #[serde(default)]
+    readonly: Vec<String>,
+}
+
+/// The set of instructions a top-level instruction produced. jsonParsed
+/// returns them grouped per outer instruction; we scan the whole tx, so the
+/// parent index is not needed (serde ignores fields we don't bind).
+#[derive(serde::Deserialize, Debug)]
+struct InnerInstructionSet {
+    #[serde(default)]
+    instructions: Vec<InnerInstruction>,
+}
+
+/// A single (inner) instruction in `encoding: json` (base58) form from
+/// `getTransaction`. The program is identified by `programIdIndex` (an index
+/// into the account keys); `accounts` are indices into the same list; `data`
+/// is the raw base58 instruction data. (`jsonParsed` returns `accounts`/
+/// `data` as null, so we must request `json` form to inspect CPI internals.)
+#[derive(serde::Deserialize, Debug)]
+struct InnerInstruction {
+    #[serde(default, rename = "programId")]
+    program_id: Option<String>,
+    #[serde(default, rename = "programIdIndex")]
+    program_id_index: Option<u8>,
+    #[serde(default)]
+    accounts: Vec<u8>,
+    #[serde(default)]
+    data: String,
 }
 
 #[derive(serde::Deserialize)]
 struct ProofPayload {
     tx: String,
+    #[serde(rename = "amount_micros")]
     amount_micros: u64,
+    /// The 32-byte per-job contract seed (hex-encoded). This is the `job_id`
+    /// the agent derived from its payer/mint/ATA and used to create the
+    /// escrow contract PDA — *not* the human `job_id` in the job body.
+    #[serde(default)]
+    job_id: Option<String>,
+    /// The stablecoin mint the buyer paid with (base58).
+    #[serde(default)]
+    mint: Option<String>,
+}
+
+/// The legacy SPL Token program (`spl_token::id()`). The escrow program's
+/// `pay_for_compute` deposits the price with a plain `token::transfer` CPI,
+/// so the inner instruction we look for is a `Transfer` on this program.
+const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// SPL Token `Transfer` instruction discriminant (`TokenInstruction::Transfer`).
+const SPL_TRANSFER_TAG: u8 = 3;
+
+/// Parse a 64-char hex string into the 32 bytes it encodes.
+fn hex_to_bytes32(s: &str) -> Result<[u8; 32], String> {
+    let mut out = [0u8; 32];
+    let bytes = hex::decode(s).map_err(|e| format!("job_id not valid hex ({e})"))?;
+    if bytes.len() != 32 {
+        return Err("job_id must decode to 32 bytes".into());
+    }
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// The SPL Token `Transfer` instruction data is `[discriminant:u8,
+/// amount:u64 LE]`. Decode the (base58) instruction data and, if it is a
+/// Transfer whose destination account (resolved via `accounts[1]` against
+/// the transaction's account keys) is the given escrow ATA, return the
+/// transferred amount.
+fn transfer_amount_into_escrow(
+    instr: &InnerInstruction,
+    account_keys: &[String],
+    escrow_ata: &[u8; 32],
+) -> Option<u64> {
+    if instr.accounts.len() < 3 {
+        return None;
+    }
+    // Resolve the program id: either inline (`programId`, jsonParsed) or via
+    // an index into the account keys (`programIdIndex`, json form).
+    let prog = if let Some(p) = &instr.program_id {
+        Some(p.as_str())
+    } else {
+        let idx = instr.program_id_index? as usize;
+        account_keys.get(idx).map(|s| s.as_str())
+    };
+    if prog != Some(SPL_TOKEN_PROGRAM_ID) {
+        return None;
+    }
+    // Transfer accounts: [from, to, owner] — index 1 is the destination.
+    let to_idx = *instr.accounts.get(1)? as usize;
+    let to_pubkey = account_keys.get(to_idx)?;
+    // account_keys are base58-encoded pubkeys; compare against the
+    // base58 encoding of the derived escrow ATA.
+    let escrow_ata_b58 = bs58::encode(escrow_ata).into_string();
+    if *to_pubkey != escrow_ata_b58 {
+        return None;
+    }
+    let data = bs58::decode(&instr.data).into_vec().ok()?;
+    if data.len() < 9 || data[0] != SPL_TRANSFER_TAG {
+        return None;
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&data[1..9]);
+    Some(u64::from_le_bytes(buf))
 }
 
 impl SolanaPaymentVerifier {
@@ -633,7 +746,7 @@ impl PaymentVerifier for SolanaPaymentVerifier {
             "getTransaction",
             serde_json::json!([
                 payload.tx,
-                { "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0 }
+                { "encoding": "json", "maxSupportedTransactionVersion": 0 }
             ]),
         )?;
         let tx_info: TransactionInfo = serde_json::from_value(result)
@@ -680,13 +793,29 @@ impl PaymentVerifier for SolanaPaymentVerifier {
         }
 
         // 4. Check that the escrow account is in the transaction's account keys.
-        let account_keys = tx_info
+        //    Build the *full* key list the inner-instruction indices reference:
+        //    static `message.accountKeys` followed by the runtime-loaded
+        //    addresses (writable, then readonly).
+        let static_keys = tx_info
             .transaction
             .as_ref()
             .and_then(|t| t.message.as_ref())
             .map(|m| &m.account_keys)
             .cloned()
             .unwrap_or_default();
+        let (loaded_writable, loaded_readonly) = tx_info
+            .meta
+            .as_ref()
+            .map(|m| {
+                (
+                    m.loaded_addresses.writable.clone(),
+                    m.loaded_addresses.readonly.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let mut account_keys = static_keys;
+        account_keys.extend(loaded_writable);
+        account_keys.extend(loaded_readonly);
         if !account_keys.iter().any(|k| k == escrow_account) {
             return Err(PaymentVerifyError::EscrowMismatch {
                 expected: escrow_account.to_string(),
@@ -694,36 +823,94 @@ impl PaymentVerifier for SolanaPaymentVerifier {
             });
         }
 
-        // 5. Check token transfer amount by looking at balance changes
-        //    for the escrow account. SPL token transfers change the
-        //    account's lamport balance by the rent-exempt minimum delta,
-        //    but the real check is the inner instructions. For simplicity,
-        //    we check that the escrow account's balance increased (the
-        //    token was deposited into it).
+        // 5. Derive the escrow ATA for *this* job and verify the SPL Token
+        //    transfer that funded it actually landed there.
         //
-        //    A more rigorous check would parse inner instructions for
-        //    SPL Token `Transfer` / `TransferChecked` — left as a
-        //    follow-up enhancement.
-        if let Some(meta) = &tx_info.meta {
-            let escrow_idx = account_keys.iter().position(|k| k == escrow_account);
-            if let Some(idx) = escrow_idx {
-                if idx < meta.pre_balances.len() && idx < meta.post_balances.len() {
-                    let delta = meta.post_balances[idx] as i64 - meta.pre_balances[idx] as i64;
-                    if delta <= 0 {
-                        return Err(PaymentVerifyError::InsufficientAmount {
-                            expected: payload.amount_micros,
-                            found: 0,
-                        });
-                    }
-                }
+        //    `pay_for_compute` creates a per-job contract PDA
+        //    (`[b"contract", job_id]`) and deposits the price into that
+        //    contract's associated token account (the "escrow ATA") via a
+        //    plain SPL Token `Transfer` CPI. The node names the job through
+        //    the proof's `job_id` (the 32-byte contract seed) and `mint`.
+        //
+        //    A malicious buyer could put any amount in the proof, so we must
+        //    parse the actual on-chain transfer and require it to be >= the
+        //    claimed amount. Matching the *derived* ATA — which embeds both
+        //    the job's contract PDA and the mint — is what pins this payment
+        //    to this job and this stablecoin.
+        let job_id_hex = payload
+            .job_id
+            .ok_or_else(|| PaymentVerifyError::MalformedProof("missing job_id".into()))?;
+        let mint = payload
+            .mint
+            .ok_or_else(|| PaymentVerifyError::MalformedProof("missing mint".into()))?;
+        let job_id = hex_to_bytes32(&job_id_hex).map_err(PaymentVerifyError::MalformedProof)?;
+        let mint_b58 = bs58::decode(&mint)
+            .into_vec()
+            .map_err(|_| PaymentVerifyError::MalformedProof("mint is not base58".into()))?;
+        let mint_bytes: [u8; 32] = {
+            if mint_b58.len() != 32 {
+                return Err(PaymentVerifyError::MalformedProof(
+                    "mint must be a 32-byte pubkey".into(),
+                ));
             }
+            let mut m = [0u8; 32];
+            m.copy_from_slice(&mint_b58);
+            m
+        };
+        let program_id: [u8; 32] = {
+            let b = bs58::decode(escrow_account).into_vec().map_err(|_| {
+                PaymentVerifyError::EscrowMismatch {
+                    expected: escrow_account.to_string(),
+                    found: account_keys.clone(),
+                }
+            })?;
+            if b.len() != 32 {
+                return Err(PaymentVerifyError::EscrowMismatch {
+                    expected: escrow_account.to_string(),
+                    found: account_keys.clone(),
+                });
+            }
+            let mut p = [0u8; 32];
+            p.copy_from_slice(&b);
+            p
+        };
+        let (contract_pda, _bump) = vtessera_node_api::solana_derivation::contract_pda(
+            &job_id,
+            &program_id,
+        )
+        .ok_or_else(|| {
+            PaymentVerifyError::TransactionNotFound("could not derive contract PDA for job".into())
+        })?;
+        let escrow_ata = vtessera_node_api::solana_derivation::get_associated_token_address(
+            &contract_pda,
+            &mint_bytes,
+        );
+
+        let total_deposited = tx_info
+            .meta
+            .as_ref()
+            .map(|m| {
+                m.inner_instructions
+                    .iter()
+                    .flat_map(|set| set.instructions.iter())
+                    .filter_map(|instr| {
+                        transfer_amount_into_escrow(instr, &account_keys, &escrow_ata)
+                    })
+                    .sum::<u64>()
+            })
+            .unwrap_or(0);
+
+        if total_deposited < payload.amount_micros {
+            return Err(PaymentVerifyError::InsufficientAmount {
+                expected: payload.amount_micros,
+                found: total_deposited,
+            });
         }
 
-        // 6. Return the mint and amount from the proof.
-        //    The mint is not in the proof — we return a placeholder.
-        //    In a full implementation, we'd parse inner instructions
-        //    for the SPL Token mint.
-        Ok(("unknown".to_string(), payload.amount_micros))
+        // 6. Confirm deposit exactly matches the claimed amount.
+        //    (A buyer may over-pay; under-claiming a lower amount is rejected
+        //    above, so a short payment never passes.)
+        Ok((mint, payload.amount_micros))
     }
 }
 
@@ -770,8 +957,9 @@ fn main() {
     };
 
     // Clone the signing key before moving it into NodeIdentity, so we can
-    // create the iroh endpoint from the same secret key.
+    // create the iroh endpoint from the same secret key and re-sign for marketplace.
     let signing_key_for_iroh = signing_key.clone();
+    let signing_key_for_marketplace = signing_key.clone();
 
     let identity = NodeIdentity {
         signing_key,
@@ -821,9 +1009,28 @@ fn main() {
         None => None,
     };
 
-    // Marketplace registration: detect external IP and register with GitHub Pages.
-    // Marketplace registration: detect external IP and register with GitHub Pages.
-    if let (Some(owner_repo), Some(token)) = (&args.marketplace, &args.marketplace_token) {
+    // If UPnP is requested, discover the router's IGD (Internet Gateway
+    // Device) and add a port forward for the node's port *before* binding or
+    // registering with any marketplace. This makes a paid node behind a home
+    // NAT reachable from the internet without a manual port-forward. The
+    // returned external IP (if any) is what agents on other networks use.
+    let upnp_external_ip: Option<String> = if args.upnp {
+        match upnp_add_port_forward(&args.bind) {
+            Ok(ip) => {
+                eprintln!("vtessera-node: UPnP port forward OK (external IP: {ip})");
+                Some(ip)
+            }
+            Err(e) => {
+                eprintln!("vtessera-node: UPnP port forward failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Marketplace registration: detect external IP and register via Cloudflare Worker.
+    if args.marketplace {
         // Parse port from bind address.
         let port = args
             .bind
@@ -832,16 +1039,36 @@ fn main() {
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(8402);
 
-        match register_with_marketplace(owner_repo, token, &offer, port) {
+        // Prefer the IP that UPnP learned from the router (it also confirms
+        // the port is forwarded); fall back to detecting it via an echo
+        // service. Registration succeeds regardless.
+        let external_ip = upnp_external_ip
+            .clone()
+            .or_else(detect_external_ip)
+            .unwrap_or_default();
+
+        let external_ip = if external_ip.is_empty() {
+            eprintln!("vtessera-node: could not determine external IP for marketplace");
+            None
+        } else {
+            Some(external_ip)
+        };
+
+        match register_with_marketplace_with_ip(
+            &offer,
+            &signing_key_for_marketplace,
+            port,
+            external_ip.clone(),
+        ) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: marketplace registration failed (will retry): {e}"),
         }
         spawn_marketplace_registration(
-            owner_repo.clone(),
-            token.clone(),
-            offer.clone(),
+            offer.body.clone(),
+            signing_key_for_marketplace,
             port,
             args.marketplace_interval,
+            external_ip,
         );
     }
 
@@ -956,54 +1183,118 @@ fn detect_external_ip() -> Option<String> {
     None
 }
 
-/// Register the node's offer with the GitHub Pages marketplace via repository_dispatch.
+/// Local non-loopback IPv4 of the first active interface, used as the
+/// internal endpoint of a UPnP port forward when the node binds to `0.0.0.0`.
+fn detect_local_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // A UDP "send" to a public address never actually transmits on Linux, but
+    // it makes the kernel pick the local source address for that route.
+    socket.connect("8.8.8.8:53").ok()?;
+    let local = socket.local_addr().ok()?;
+    match local.ip() {
+        std::net::IpAddr::V4(v4) => Some(v4),
+        _ => None,
+    }
+}
+
+/// Discover the router's UPnP IGD and add a TCP port forward for the node's
+/// bind port. Returns the router's reported WAN (external) IP on success.
 ///
-/// Sends a signed offer to the GitHub Actions workflow which validates it
-/// and appends to marketplace/nodes.json served by GitHub Pages.
-fn register_with_marketplace(
-    owner_repo: &str,
-    token: &str,
+/// Requires a UPnP-enabled home router on the LAN. Failure is non-fatal —
+/// the caller logs and carries on (the node can still be reached on the LAN,
+/// or via iroh relay / a manual port-forward).
+fn upnp_add_port_forward(bind: &str) -> Result<String, String> {
+    use igd_next::{PortMappingProtocol, SearchOptions};
+
+    // Parse the local port to forward from the bind address.
+    let bind_port = bind
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid --bind {bind} (expected host:port)"))?;
+
+    // The node binds to 0.0.0.0; resolve the LAN IP we should forward to.
+    let local_ip = detect_local_ipv4().ok_or_else(|| "no LAN interface IP found".to_string())?;
+
+    // Search for the router's IGD. Bound to the chosen interface so discovery
+    // reaches the gateway's SSDP multicast address.
+    let gateway = igd_next::search_gateway(SearchOptions {
+        bind_addr: std::net::SocketAddr::new(std::net::IpAddr::V4(local_ip), 0),
+        ..Default::default()
+    })
+    .map_err(|e| format!("gateway discovery failed: {e}"))?;
+
+    let local = std::net::SocketAddr::new(std::net::IpAddr::V4(local_ip), bind_port);
+
+    // Add a permanent (0 = infinite lease) TCP mapping: external 8402 -> local.
+    gateway
+        .add_port(
+            PortMappingProtocol::TCP,
+            bind_port,
+            local,
+            0,
+            "vtessera-node",
+        )
+        .map_err(|e| format!("add port mapping failed: {e}"))?;
+
+    // Query the router for our WAN IP to confirm reachability / for the offer.
+    let external_ip = gateway
+        .get_external_ip()
+        .map_err(|e| format!("get external ip failed: {e}"))?;
+
+    Ok(external_ip.to_string())
+}
+
+/// Register the node's offer with the marketplace via Cloudflare Worker.
+///
+/// The worker holds the GitHub token server-side — nodes don't need one.
+/// Just POST to the worker URL.
+///
+/// `external_ip` overrides the IP the offer was signed with: it may come from
+/// a UPnP router query (preferred, confirms the port is forwarded) or from an
+/// IP-echo service. `None` falls back to detecting it at this moment.
+const MARKETPLACE_WORKER_URL: &str = "https://vtessera.douglasdemaio.workers.dev";
+
+/// Internal helper that takes an optional pre-detected external IP.
+fn register_with_marketplace_with_ip(
     offer: &vtessera_offer::SignedOffer,
+    signing_key: &SigningKey,
     port: u16,
+    external_ip: Option<String>,
 ) -> Result<(), String> {
-    // Detect external IP.
-    let external_ip =
-        detect_external_ip().ok_or_else(|| "failed to detect external IP".to_string())?;
+    // Detect external IP if not provided.
+    let external_ip = match external_ip {
+        Some(ip) => ip,
+        None => detect_external_ip().ok_or_else(|| "failed to detect external IP".to_string())?,
+    };
 
-    // Override the endpoint with the external IP.
-    let mut offer_clone = offer.clone();
-    offer_clone.body.endpoint = format!("http://{external_ip}:{port}");
+    // Override the endpoint with the external IP and re-sign.
+    let mut offer_body = offer.body.clone();
+    offer_body.endpoint = format!("http://{external_ip}:{port}");
+    let re_signed = vtessera_offer::sign(offer_body, signing_key);
 
-    let offer_json = vtessera_offer::to_json(&offer_clone);
+    let offer_json = vtessera_offer::to_json(&re_signed);
 
-    // Build the repository_dispatch payload.
+    // Build the registration payload.
     let payload = serde_json::json!({
-        "event_type": "node-register",
-        "client_payload": {
-            "offer": serde_json::from_str::<serde_json::Value>(&offer_json)
-                .map_err(|e| e.to_string())?,
-            "sig_hex": offer.sig_hex,
-        }
+        "offer": serde_json::from_str::<serde_json::Value>(&offer_json)
+            .map_err(|e| e.to_string())?,
+        "sig_hex": re_signed.sig_hex,
     });
 
-    let url = format!("https://api.github.com/repos/{owner_repo}/dispatches");
+    let url = format!("{MARKETPLACE_WORKER_URL}/register");
     let agent = ureq::Agent::new_with_defaults();
 
     match agent
         .post(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
         .header("Content-Type", "application/json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
         .send(serde_json::to_string(&payload).unwrap().as_str())
     {
         Ok(_resp) => {
-            eprintln!(
-                "vtessera-node: registered with marketplace {owner_repo} (IP: {external_ip})"
-            );
+            eprintln!("vtessera-node: registered with marketplace (IP: {external_ip})");
             Ok(())
         }
-        Err(ureq::Error::StatusCode(status)) => Err(format!("GitHub API returned {status}")),
+        Err(ureq::Error::StatusCode(status)) => Err(format!("worker returned {status}")),
         Err(e) => Err(format!("request failed: {e}")),
     }
 }
@@ -1011,15 +1302,18 @@ fn register_with_marketplace(
 /// Background loop that re-registers with the marketplace on an interval.
 /// External IP may change (DHCP, VPN reconnect), so we re-detect and re-register.
 fn spawn_marketplace_registration(
-    owner_repo: String,
-    token: String,
-    offer: vtessera_offer::SignedOffer,
+    offer_body: vtessera_offer::OfferBody,
+    signing_key: SigningKey,
     port: u16,
     interval: Duration,
+    external_ip: Option<String>,
 ) {
     thread::spawn(move || loop {
         thread::sleep(interval);
-        if let Err(e) = register_with_marketplace(&owner_repo, &token, &offer, port) {
+        let signed = vtessera_offer::sign(offer_body.clone(), &signing_key);
+        if let Err(e) =
+            register_with_marketplace_with_ip(&signed, &signing_key, port, external_ip.clone())
+        {
             eprintln!("vtessera-node: marketplace registration failed (will retry): {e}");
         }
     });
@@ -1253,6 +1547,11 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
         if let Err(e) = send.finish() {
             eprintln!("vtessera-node: iroh finish error from {remote}: {e}");
         }
+
+        // Wait for the client to finish reading the response before dropping
+        // the connection. Without this, iroh may reset the connection while
+        // the agent is still reading its last bytes over the relay path.
+        connection.closed().await;
 
         Ok(())
     }

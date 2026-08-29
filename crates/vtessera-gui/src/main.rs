@@ -56,8 +56,8 @@ struct Ui {
     local_network_switch: gtk4::Switch,
     marketplace_url_entry: gtk4::Entry,
     detect_marketplace_btn: gtk4::Button,
-    marketplace_repo_entry: gtk4::Entry,
-    marketplace_token_entry: gtk4::Entry,
+    marketplace_switch: gtk4::Switch,
+    upnp_switch: gtk4::Switch,
     cidr_entry: gtk4::Entry,
     interval_spin: gtk4::SpinButton,
     backend_dd: gtk4::DropDown,
@@ -165,8 +165,8 @@ impl Ui {
             accept_workloads: self.accept_switch.is_active(),
             consent_version: self.settings.borrow().consent_version,
             marketplace_url: self.marketplace_url_entry.text().trim().to_string(),
-            marketplace_repo: self.marketplace_repo_entry.text().trim().to_string(),
-            marketplace_token: self.marketplace_token_entry.text().trim().to_string(),
+            marketplace_enabled: self.marketplace_switch.is_active(),
+            upnp_enabled: self.upnp_switch.is_active(),
             local_network: self.local_network_switch.is_active(),
             allowed_cidrs: cidr_list_from_entry(&self.cidr_entry),
         };
@@ -195,8 +195,8 @@ impl Ui {
             .set_visible(s.network_preset == "custom");
         self.local_network_switch.set_active(s.local_network);
         self.marketplace_url_entry.set_text(&s.marketplace_url);
-        self.marketplace_repo_entry.set_text(&s.marketplace_repo);
-        self.marketplace_token_entry.set_text(&s.marketplace_token);
+        self.marketplace_switch.set_active(s.marketplace_enabled);
+        self.upnp_switch.set_active(s.upnp_enabled);
         self.cidr_entry.set_text(&s.allowed_cidrs.join(", "));
         self.sync_network_sensitivity();
         self.interval_spin.set_value(s.sample_interval_secs as f64);
@@ -665,16 +665,8 @@ fn start_node(ui: &Ui, state: &NodeState) {
         index_bind: Some(index_bind),
         discovery_file: Some(settings::discovery_file_path()),
         node_id: Some(node_id.clone()),
-        marketplace: if settings.marketplace_repo.is_empty() {
-            None
-        } else {
-            Some(settings.marketplace_repo.clone())
-        },
-        marketplace_token: if settings.marketplace_token.is_empty() {
-            None
-        } else {
-            Some(settings.marketplace_token.clone())
-        },
+        marketplace: settings.marketplace_enabled,
+        upnp: settings.upnp_enabled,
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,
@@ -832,8 +824,8 @@ fn build_ui(app: &gtk4::Application) {
         local_network_switch: gtk4::Switch::new(),
         marketplace_url_entry: gtk4::Entry::new(),
         detect_marketplace_btn: gtk4::Button::with_label("Detect"),
-        marketplace_repo_entry: gtk4::Entry::new(),
-        marketplace_token_entry: gtk4::Entry::new(),
+        marketplace_switch: gtk4::Switch::new(),
+        upnp_switch: gtk4::Switch::new(),
         cidr_entry: gtk4::Entry::new(),
         interval_spin: gtk4::SpinButton::new(
             Some(&gtk4::Adjustment::new(60.0, 1.0, 3600.0, 1.0, 10.0, 0.0)),
@@ -996,36 +988,39 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&marketplace_row, 1, row, 1, 1);
     row += 1;
 
-    let marketplace_repo_caption = gtk4::Label::new(Some("Marketplace Repo"));
-    marketplace_repo_caption.set_xalign(0.0);
-    grid.attach(&marketplace_repo_caption, 0, row, 1, 1);
-    ui.marketplace_repo_entry
-        .set_placeholder_text(Some("owner/repo (e.g. douglasdemaio/vtessera)"));
-    ui.marketplace_repo_entry.set_hexpand(true);
-    grid.attach(&ui.marketplace_repo_entry, 1, row, 1, 1);
-    row += 1;
-
-    let marketplace_token_caption = gtk4::Label::new(Some("GitHub Token"));
-    marketplace_token_caption.set_xalign(0.0);
-    grid.attach(&marketplace_token_caption, 0, row, 1, 1);
-    ui.marketplace_token_entry
-        .set_placeholder_text(Some("ghp_xxx (PAT with repo scope)"));
-    ui.marketplace_token_entry.set_hexpand(true);
-    ui.marketplace_token_entry.set_visibility(false);
-    grid.attach(&ui.marketplace_token_entry, 1, row, 1, 1);
+    let marketplace_caption = gtk4::Label::new(Some("Public Marketplace"));
+    marketplace_caption.set_xalign(0.0);
+    grid.attach(&marketplace_caption, 0, row, 1, 1);
+    grid.attach(&ui.marketplace_switch, 1, row, 1, 1);
     row += 1;
 
     let marketplace_hint = gtk4::Label::new(Some(
-        "To list your node on the marketplace:\n\
-         1. Fork douglasdemaio/vtessera on GitHub\n\
-         2. Enable Pages (Settings → Pages → Source: GitHub Actions)\n\
-         3. Create a PAT with 'repo' scope (Settings → Developer settings → Tokens)\n\
-         4. Enter your fork as 'owner/repo' and paste the token above",
+        "Register this node with the public marketplace at\n\
+         https://douglasdemaio.github.io/vtessera/ — agents on any\n\
+         network can discover and rent your compute.",
     ));
     marketplace_hint.set_wrap(true);
     marketplace_hint.set_xalign(0.0);
     marketplace_hint.add_css_class("dim-label");
     grid.attach(&marketplace_hint, 0, row, 2, 1);
+    row += 1;
+
+    let upnp_caption = gtk4::Label::new(Some("UPnP port forward"));
+    upnp_caption.set_xalign(0.0);
+    grid.attach(&upnp_caption, 0, row, 1, 1);
+    ui.upnp_switch.set_halign(gtk4::Align::Start);
+    ui.upnp_switch.set_valign(gtk4::Align::Center);
+    grid.attach(&ui.upnp_switch, 1, row, 1, 1);
+    row += 1;
+
+    let upnp_hint = gtk4::Label::new(Some(
+        "Automatically forward port on your router via UPnP so agents\n\
+         on the internet can reach this node. Recommended for paid mode.",
+    ));
+    upnp_hint.set_wrap(true);
+    upnp_hint.set_xalign(0.0);
+    upnp_hint.add_css_class("dim-label");
+    grid.attach(&upnp_hint, 0, row, 2, 1);
     row += 1;
 
     let cidr_caption = gtk4::Label::new(Some("Allowed CIDRs"));

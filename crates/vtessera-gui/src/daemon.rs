@@ -68,11 +68,12 @@ pub struct StartOptions<'a> {
     pub discovery_file: Option<PathBuf>,
     /// Node identity (hex-encoded Ed25519 public key) for the discovery file.
     pub node_id: Option<String>,
-    /// GitHub `owner/repo` for marketplace registration (e.g. `douglasdemaio/vtessera`).
-    /// None = don't register with marketplace.
-    pub marketplace: Option<String>,
-    /// GitHub personal access token for marketplace registration.
-    pub marketplace_token: Option<String>,
+    /// Register with the public GitHub Pages marketplace on startup.
+    /// Detects external IP and POSTs to the Cloudflare Worker (no token needed).
+    pub marketplace: bool,
+    /// Auto-forward the node's port on the home router via UPnP so a paid
+    /// node is reachable from the internet without a manual port-forward.
+    pub upnp: bool,
 }
 
 /// Write a discovery file so agents on the same machine can find the node.
@@ -221,11 +222,11 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
         if let Some(url) = &opts.publish {
             node_cmd.args(["--publish", url]);
         }
-        if let Some(repo) = &opts.marketplace {
-            node_cmd.args(["--marketplace", repo]);
+        if opts.marketplace {
+            node_cmd.arg("--marketplace");
         }
-        if let Some(token) = &opts.marketplace_token {
-            node_cmd.args(["--marketplace-token", token]);
+        if opts.upnp {
+            node_cmd.arg("--upnp");
         }
         match node_cmd.spawn() {
             Ok(child) => Some(child),

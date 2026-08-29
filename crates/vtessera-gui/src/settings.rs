@@ -81,14 +81,15 @@ pub struct Settings {
     /// Defaults to `http://<lan-ip>:8443` when empty.
     #[serde(default)]
     pub marketplace_url: String,
-    /// GitHub `owner/repo` for public marketplace registration (e.g. `douglasdemaio/vtessera`).
-    /// Empty = don't register with the public marketplace.
+    /// Register with the public marketplace on startup.
+    /// Detects external IP and POSTs to the Cloudflare Worker (no token needed).
     #[serde(default)]
-    pub marketplace_repo: String,
-    /// GitHub personal access token for marketplace `repository_dispatch`.
-    /// Empty = skip marketplace registration (local network only).
+    pub marketplace_enabled: bool,
+    /// Auto-forward the node's port on the home router via UPnP so a paid
+    /// node is reachable from the internet without a manual port-forward.
+    /// Best used together with `marketplace_enabled`.
     #[serde(default)]
-    pub marketplace_token: String,
+    pub upnp_enabled: bool,
 }
 
 fn default_backend() -> String {
@@ -119,8 +120,8 @@ impl Default for Settings {
             accept_workloads: false,
             consent_version: 0,
             marketplace_url: String::new(),
-            marketplace_repo: "douglasdemaio/vtessera".into(),
-            marketplace_token: String::new(),
+            marketplace_enabled: false,
+            upnp_enabled: false,
         }
     }
 }
@@ -292,8 +293,8 @@ mod tests {
             accept_workloads: false,
             consent_version: CURRENT_CONSENT_VERSION,
             marketplace_url: String::new(),
-            marketplace_repo: "douglasdemaio/vtessera".into(),
-            marketplace_token: String::new(),
+            marketplace_enabled: false,
+            upnp_enabled: false,
             local_network: false,
             allowed_cidrs: Vec::new(),
         }

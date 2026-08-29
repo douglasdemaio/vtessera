@@ -46,6 +46,8 @@ use vtessera_offer::{PriceQuote, SignedOffer};
 #[cfg(feature = "serve")]
 pub mod index;
 pub mod mcp;
+#[cfg(feature = "serve")]
+pub mod solana_derivation;
 
 /// One inbound HTTP request, framework-agnostic.
 #[derive(Debug, Clone)]
