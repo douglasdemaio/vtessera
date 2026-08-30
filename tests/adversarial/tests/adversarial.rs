@@ -713,7 +713,7 @@ fn config_immutable_after_init() {
 fn update_config_rotates_settlement_authority() {
     // The current settlement authority can rotate the pinned authority,
     // so a wrong `init_config` value is recoverable on-chain.
-    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    let mut h = Harness::new_with(PAY_PRICE, BUYER_MINT_AMOUNT);
     let new_sa = Keypair::new();
     h.svm.airdrop(&new_sa.pubkey(), 1_000_000_000).unwrap();
 
