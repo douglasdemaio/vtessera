@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "serve")]
 use std::time::Duration;
 
 use serde_json::{json, Value};
