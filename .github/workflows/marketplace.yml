@@ -87,7 +87,7 @@ jobs:
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           NOW=$(date +%s)
-          STALE_THRESHOLD=86400  # 24 hours
+          STALE_THRESHOLD=21600  # 6 hours — prune on the same cadence as the schedule
 
           NODES=$(cat marketplace/nodes.json)
           BEFORE=$(echo "$NODES" | jq '.nodes | length')
