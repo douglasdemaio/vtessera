@@ -23,6 +23,11 @@ name = "vtessera-mcp"
 path = "src/bin/vtessera_mcp.rs"
 required-features = ["serve"]
 
+[[bin]]
+name = "vtessera-marketplace-mcp"
+path = "src/bin/vtessera_marketplace_mcp.rs"
+required-features = ["serve"]
+
 [features]
 default = []
 # `serve` wires the agent-facing binaries. It pulls the executor in so the
