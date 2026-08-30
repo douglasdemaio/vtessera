@@ -17,12 +17,21 @@ name = "vtessera-x402-client"
 path = "src/main.rs"
 
 [dependencies]
-# Solana SDK pinned to the 1.18 line — matches crates/devnet-demo and what's
-# cached on the dev box. Bump together with the on-chain program toolchain.
-solana-client = "=1.18.26"
-solana-sdk = "=1.18.26"
-spl-token = { version = "4.0.0", features = ["no-entrypoint"] }
-spl-associated-token-account = { version = "2.3.0", features = ["no-entrypoint"] }
+# Solana SDK on the 3.x line (Agave) — modern crypto tree that clears the
+# RUSTSEC advisories the 1.18 line pulled in (solana-ed25519-program 3.x no
+# longer pins ed25519-dalek 1.0.1). 4.x is not reachable yet because the
+# spl-token/spl-ata crates max out on the solana-3.x line.
+solana-client = "=3.1.14"
+solana-sdk = "=3.0.0"
+# Solana 3.x split out several modules into separate crates that the source
+# still imports directly. Declared explicitly so the `use` paths resolve.
+solana-commitment-config = "3.1.1"
+solana-system-interface = "2.0.0"
+# spl-token 9.x moved the token `state` and `instruction` builders into the
+# shared `spl-token-interface` crate; spl-token 9.0.0 re-exports `id()` only.
+spl-token-interface = "2.0.0"
+spl-token = { version = "9.0.0", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "8.0.0", features = ["no-entrypoint"] }
 
 # Anchor uses borsh 0.10 for IX serialisation on the 0.30 line.
 borsh = "0.10"

@@ -29,19 +29,21 @@ use std::time::Duration;
 use borsh::BorshSerialize;
 use sha2::{Digest, Sha256};
 use solana_client::rpc_client::RpcClient;
+// Solana 3.x split several `solana_sdk` modules into standalone crates.
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
-    commitment_config::CommitmentConfig,
     instruction::{AccountMeta, Instruction},
     program_pack::Pack,
     pubkey::Pubkey,
     signature::{read_keypair_file, Keypair, Signer},
-    system_instruction, system_program,
     transaction::Transaction,
 };
+use solana_system_interface::{instruction as system_instruction, program as system_program};
 use spl_associated_token_account::{
     get_associated_token_address, instruction::create_associated_token_account,
 };
-use spl_token::state::{Account as TokenAccount, Mint};
+// spl-token 9.x moved `state`/`instruction` builders into spl-token-interface.
+use spl_token_interface::state::{Account as TokenAccount, Mint};
 
 // The host crates `vtessera-executor` and `vtessera-settlement` aren't
 // depended on here because their ed25519-dalek 2 ecosystem conflicts
@@ -172,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mint::LEN as u64,
         &spl_token::id(),
     );
-    let init_mint = spl_token::instruction::initialize_mint(
+    let init_mint = spl_token_interface::instruction::initialize_mint(
         &spl_token::id(),
         &mint_pk,
         &payer.pubkey(),
@@ -198,7 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &spl_token::id(),
     )];
     let mint_amount: u64 = 10_000_000; // 10.000000 of a 6-decimal mint
-    ixs.push(spl_token::instruction::mint_to(
+    ixs.push(spl_token_interface::instruction::mint_to(
         &spl_token::id(),
         &mint_pk,
         &buyer_ata,
@@ -323,7 +325,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // rent exemption (0-byte account needs 890,880 lamports), so on devnet
     // top it up if it doesn't exist yet. On mainnet the operator funds it.
     match rpc.get_account(&fee_wallet) {
-        Ok(acct) if acct.lamports >= rpc.get_minimum_balance_for_rent_exemption(acct.data.len())? => {}
+        Ok(acct)
+            if acct.lamports >= rpc.get_minimum_balance_for_rent_exemption(acct.data.len())? => {}
         _ => {
             let sig = rpc.request_airdrop(&fee_wallet, 1_000_000_000)?;
             rpc.confirm_transaction(&sig)?;
