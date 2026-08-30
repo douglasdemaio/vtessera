@@ -49,6 +49,7 @@
 //! | zero fee disables | `zero_fee_disables_fee` |
 //! | wrong fee wallet | `pay_rejects_wrong_fee_wallet` |
 //! | config init + immutability | `init_config_sets_fee_fields`, `config_immutable_after_init` |
+//! | config rotation (update_config) | `update_config_rotates_settlement_authority`, `update_config_edits_fee_fields`, `update_config_rejects_non_settlement_authority` |
 //! | buyer unilateral cancel | `cancel_before_start_refunds_buyer` |
 
 use litesvm::types::TransactionResult;
@@ -270,6 +271,27 @@ fn init_config_ix(authority: &Pubkey, config: &Pubkey) -> Instruction {
             AccountMeta::new(*authority, true),
             AccountMeta::new(*config, false),
             AccountMeta::new_readonly(solana_system_interface::program::id(), false),
+        ],
+        data,
+    }
+}
+
+fn update_config_ix(
+    sa: &Pubkey,
+    config: &Pubkey,
+    new_sa: &Pubkey,
+    new_fee_wallet: &Pubkey,
+    new_fee_lamports: u64,
+) -> Instruction {
+    let mut data = disc("update_config").to_vec();
+    data.extend_from_slice(&new_sa.to_bytes());
+    data.extend_from_slice(&new_fee_wallet.to_bytes());
+    data.extend_from_slice(&new_fee_lamports.to_le_bytes());
+    Instruction {
+        program_id: prog(),
+        accounts: vec![
+            AccountMeta::new(*sa, true),
+            AccountMeta::new(*config, false),
         ],
         data,
     }
@@ -685,6 +707,116 @@ fn config_immutable_after_init() {
     expect_tx_error(h.svm.send_transaction(tx));
     // Config untouched by the failed re-init.
     assert_eq!(h.config_fee_lamports(), FEE_LAMPORTS);
+}
+
+#[test]
+fn update_config_rotates_settlement_authority() {
+    // The current settlement authority can rotate the pinned authority,
+    // so a wrong `init_config` value is recoverable on-chain.
+    let mut h = Harness::new_with(PAY_PRICE, BUYER_MINT_AMOUNT);
+    let new_sa = Keypair::new();
+    h.svm.airdrop(&new_sa.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = update_config_ix(
+        &h.payer.pubkey(),
+        &h.config,
+        &new_sa.pubkey(),
+        &fee_wallet(),
+        FEE_LAMPORTS,
+    );
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&h.payer.pubkey()),
+        &[&h.payer],
+        h.svm.latest_blockhash(),
+    );
+    h.svm.send_transaction(tx).unwrap();
+
+    assert_eq!(h.config_authority(), new_sa.pubkey());
+    assert_eq!(h.config_fee_wallet(), fee_wallet());
+    assert_eq!(h.config_fee_lamports(), FEE_LAMPORTS);
+    // The old authority can no longer finalize; the new one can.
+    let config = h.config;
+    let contract = h.contract;
+    let escrow_stable = h.escrow_stable;
+    let buyer_stable = h.buyer_stable;
+    let seller_stable = h.seller_stable;
+    let bh = h.svm.latest_blockhash();
+    let finalize_tx = |sa: &Keypair| {
+        Transaction::new_signed_with_payer(
+            &[finalize_ix(
+                &sa.pubkey(),
+                &config,
+                &contract,
+                &escrow_stable,
+                &buyer_stable,
+                &seller_stable,
+                0,
+            )],
+            Some(&sa.pubkey()),
+            &[sa],
+            bh,
+        )
+    };
+    expect_custom(
+        h.svm.send_transaction(finalize_tx(&h.payer)),
+        EscrowError::NotSettlementAuthority,
+    );
+    h.svm.send_transaction(finalize_tx(&new_sa)).unwrap();
+}
+
+#[test]
+fn update_config_edits_fee_fields() {
+    // Fee wallet and per-transaction fee can be changed by the current
+    // settlement authority.
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    let new_wallet = Keypair::new().pubkey();
+
+    let ix = update_config_ix(
+        &h.payer.pubkey(),
+        &h.config,
+        &h.payer.pubkey(),
+        &new_wallet,
+        0,
+    );
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&h.payer.pubkey()),
+        &[&h.payer],
+        h.svm.latest_blockhash(),
+    );
+    h.svm.send_transaction(tx).unwrap();
+
+    assert_eq!(h.config_fee_wallet(), new_wallet);
+    assert_eq!(h.config_fee_lamports(), 0);
+}
+
+#[test]
+fn update_config_rejects_non_settlement_authority() {
+    // Anyone other than the current settlement authority is rejected.
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    let attacker = Keypair::new();
+    h.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = update_config_ix(
+        &attacker.pubkey(),
+        &h.config,
+        &h.payer.pubkey(),
+        &fee_wallet(),
+        FEE_LAMPORTS,
+    );
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&attacker.pubkey()),
+        &[&attacker],
+        h.svm.latest_blockhash(),
+    );
+    expect_custom(
+        h.svm.send_transaction(tx),
+        EscrowError::NotSettlementAuthority,
+    );
+    // Config untouched.
+    assert_eq!(h.config_authority(), h.payer.pubkey());
 }
 
 // ---------- Protocol fee --------------------------------------------------

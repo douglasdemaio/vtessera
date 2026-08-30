@@ -21,12 +21,11 @@
 //!   contract never completes.
 //! - `init_config` is the **only** setup call, run once right after
 //!   deploy. It creates the single on-chain `Config` account holding
-//!   the **settlement authority** (the operator's key, pinned at deploy
-//!   and immutable afterwards) and the protocol fee wallet + amount.
-//!   There are no governance instructions: this is a single-operator
-//!   protocol with no governance token, so nothing can be changed
-//!   on-chain after init. Changing the settlement authority or fee
-//!   configuration requires a redeploy.
+//!   the **settlement authority** (the operator's key, pinned at deploy)
+//!   and the protocol fee wallet + amount. There are no governance
+//!   tokens; the current settlement authority can later rotate the
+//!   config via `update_config`, so a mistaken `init_config` value is
+//!   recoverable on-chain instead of forcing a redeploy.
 
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
@@ -56,9 +55,9 @@ pub mod vtessera_escrow {
 
     /// Create the program's `Config` account and pin the settlement
     /// authority + protocol fee configuration. Called once right after
-    /// deploy by whoever holds the deployer key; the account is
-    /// immutable afterwards (there are no update instructions), so all
-    /// three values are fixed for the life of this program ID.
+    /// deploy by whoever holds the deployer key. The account can later
+    /// be rotated by the current settlement authority via `update_config`,
+    /// so all three values are recoverable after a mistaken init.
     ///
     /// **Race note:** `init` fails if the account already exists, and
     /// anyone may call this first. The config PDA is derivable from the
@@ -79,6 +78,27 @@ pub mod vtessera_escrow {
         config.fee_wallet = fee_wallet;
         config.fee_lamports = fee_lamports;
         config.bump = ctx.bumps.config;
+        Ok(())
+    }
+
+    /// Rotate the protocol config — settlement authority, fee wallet, and/or
+    /// per-transaction fee — **without redeploying**. Only the current
+    /// settlement authority may call this, so a wrong `init_config` is not
+    /// permanently fatal (previously changing these required a redeploy).
+    ///
+    /// Each field is set unconditionally from the args; pass the existing
+    /// value for any field you want to leave unchanged. `Config` is a fixed
+    /// size, so no account resize or extra signer is needed.
+    pub fn update_config(
+        ctx: Context<UpdateConfig>,
+        new_settlement_authority: Pubkey,
+        new_fee_wallet: Pubkey,
+        new_fee_lamports: u64,
+    ) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        config.settlement_authority = new_settlement_authority;
+        config.fee_wallet = new_fee_wallet;
+        config.fee_lamports = new_fee_lamports;
         Ok(())
     }
 
@@ -268,8 +288,8 @@ fn charge_fee<'info>(
 /// Program configuration: the settlement authority (the single key that
 /// may finalize jobs — the operator's key on devnet and mainnet) and the
 /// protocol fee wallet + per-transaction fee amount. Written once by
-/// `init_config`; there are no update instructions, so it is immutable
-/// for the life of the program ID.
+/// `init_config`, but the current settlement authority can rotate any of
+/// these via `update_config` (recoverable without a redeploy).
 #[account]
 pub struct Config {
     pub settlement_authority: Pubkey,
@@ -317,6 +337,24 @@ pub struct InitConfig<'info> {
     pub config: Account<'info, Config>,
 
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateConfig<'info> {
+    /// The **current** settlement authority. Must equal
+    /// `Config::settlement_authority`. Signs and pays for the tx; this is
+    /// the only party allowed to rotate the config.
+    #[account(mut)]
+    pub settlement_authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = config.settlement_authority == settlement_authority.key()
+            @ EscrowError::NotSettlementAuthority,
+    )]
+    pub config: Account<'info, Config>,
 }
 
 #[derive(Accounts)]
