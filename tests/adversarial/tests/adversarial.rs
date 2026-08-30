@@ -736,24 +736,33 @@ fn update_config_rotates_settlement_authority() {
     assert_eq!(h.config_fee_wallet(), fee_wallet());
     assert_eq!(h.config_fee_lamports(), FEE_LAMPORTS);
     // The old authority can no longer finalize; the new one can.
-    let mut old = |sa: &Keypair| {
-        h.svm.send_transaction(Transaction::new_signed_with_payer(
+    let config = h.config;
+    let contract = h.contract;
+    let escrow_stable = h.escrow_stable;
+    let buyer_stable = h.buyer_stable;
+    let seller_stable = h.seller_stable;
+    let bh = h.svm.latest_blockhash();
+    let finalize_tx = |sa: &Keypair| {
+        Transaction::new_signed_with_payer(
             &[finalize_ix(
                 &sa.pubkey(),
-                &h.config,
-                &h.contract,
-                &h.escrow_stable,
-                &h.buyer_stable,
-                &h.seller_stable,
+                &config,
+                &contract,
+                &escrow_stable,
+                &buyer_stable,
+                &seller_stable,
                 0,
             )],
             Some(&sa.pubkey()),
             &[sa],
-            h.svm.latest_blockhash(),
-        ))
+            bh,
+        )
     };
-    expect_custom(old(&h.payer), EscrowError::NotSettlementAuthority);
-    old(&new_sa).unwrap();
+    expect_custom(
+        h.svm.send_transaction(finalize_tx(&h.payer)),
+        EscrowError::NotSettlementAuthority,
+    );
+    h.svm.send_transaction(finalize_tx(&new_sa)).unwrap();
 }
 
 #[test]
