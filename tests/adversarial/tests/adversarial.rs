@@ -737,21 +737,20 @@ fn update_config_rotates_settlement_authority() {
     assert_eq!(h.config_fee_lamports(), FEE_LAMPORTS);
     // The old authority can no longer finalize; the new one can.
     let mut old = |sa: &Keypair| {
-        h.svm
-            .send_transaction(Transaction::new_signed_with_payer(
-                &[finalize_ix(
-                    &sa.pubkey(),
-                    &h.config,
-                    &h.contract,
-                    &h.escrow_stable,
-                    &h.buyer_stable,
-                    &h.seller_stable,
-                    0,
-                )],
-                Some(&sa.pubkey()),
-                &[sa],
-                h.svm.latest_blockhash(),
-            ))
+        h.svm.send_transaction(Transaction::new_signed_with_payer(
+            &[finalize_ix(
+                &sa.pubkey(),
+                &h.config,
+                &h.contract,
+                &h.escrow_stable,
+                &h.buyer_stable,
+                &h.seller_stable,
+                0,
+            )],
+            Some(&sa.pubkey()),
+            &[sa],
+            h.svm.latest_blockhash(),
+        ))
     };
     expect_custom(old(&h.payer), EscrowError::NotSettlementAuthority);
     old(&new_sa).unwrap();
@@ -803,7 +802,10 @@ fn update_config_rejects_non_settlement_authority() {
         &[&attacker],
         h.svm.latest_blockhash(),
     );
-    expect_custom(h.svm.send_transaction(tx), EscrowError::NotSettlementAuthority);
+    expect_custom(
+        h.svm.send_transaction(tx),
+        EscrowError::NotSettlementAuthority,
+    );
     // Config untouched.
     assert_eq!(h.config_authority(), h.payer.pubkey());
 }
