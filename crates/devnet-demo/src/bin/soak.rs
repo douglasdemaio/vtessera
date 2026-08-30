@@ -85,19 +85,21 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use borsh::BorshSerialize;
 use sha2::{Digest, Sha256};
 use solana_client::rpc_client::RpcClient;
+// Solana 3.x split several `solana_sdk` modules into standalone crates.
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
-    commitment_config::CommitmentConfig,
     instruction::{AccountMeta, Instruction},
     program_pack::Pack,
     pubkey::Pubkey,
     signature::{read_keypair_file, Keypair, Signer},
-    system_instruction, system_program,
     transaction::Transaction,
 };
+use solana_system_interface::{instruction as system_instruction, program as system_program};
 use spl_associated_token_account::{
     get_associated_token_address, instruction::create_associated_token_account,
 };
-use spl_token::state::{Account as TokenAccount, Mint};
+// spl-token 9.x moved `state`/`instruction` builders into spl-token-interface.
+use spl_token_interface::state::{Account as TokenAccount, Mint};
 
 // Mirror of crates/devnet-demo/src/main.rs — same constants, same
 // hand-rolled Anchor encoding. Kept separate (not shared) because the
@@ -333,7 +335,7 @@ fn setup(rpc: &RpcClient, payer: Keypair) -> Result<Env, Box<dyn std::error::Err
         Mint::LEN as u64,
         &spl_token::id(),
     );
-    let init_mint = spl_token::instruction::initialize_mint(
+    let init_mint = spl_token_interface::instruction::initialize_mint(
         &spl_token::id(),
         &mint_pk,
         &payer.pubkey(),
@@ -386,7 +388,8 @@ fn setup(rpc: &RpcClient, payer: Keypair) -> Result<Env, Box<dyn std::error::Err
         }
     }
     match rpc.get_account(&fee_wallet) {
-        Ok(acct) if acct.lamports >= rpc.get_minimum_balance_for_rent_exemption(acct.data.len())? => {}
+        Ok(acct)
+            if acct.lamports >= rpc.get_minimum_balance_for_rent_exemption(acct.data.len())? => {}
         _ => {
             let sig = rpc.request_airdrop(&fee_wallet, 1_000_000_000)?;
             rpc.confirm_transaction(&sig)?;
@@ -409,8 +412,14 @@ fn top_up(
     ata: &Pubkey,
     amount: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ix =
-        spl_token::instruction::mint_to(&spl_token::id(), mint, ata, &payer.pubkey(), &[], amount)?;
+    let ix = spl_token_interface::instruction::mint_to(
+        &spl_token::id(),
+        mint,
+        ata,
+        &payer.pubkey(),
+        &[],
+        amount,
+    )?;
     send_tx_with_retry(rpc, &[ix], &[payer], payer, "mint_to buyer")?;
     Ok(())
 }
@@ -426,13 +435,7 @@ struct IterOutcome {
     elapsed_ms: u64,
 }
 
-fn run_iteration(
-    rpc: &RpcClient,
-    env: &Env,
-    iter: u64,
-    rng: &mut Rng,
-    nonce: u64,
-) -> IterOutcome {
+fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u64) -> IterOutcome {
     let iter_start = Instant::now();
 
     // Check timeout early.
@@ -649,7 +652,13 @@ fn run_iteration(
         ],
         data: pay_data,
     };
-    if let Err(e) = send_tx_with_retry(rpc, &[pay_ix], &[&buyer, &env.payer], &env.payer, "pay_for_compute") {
+    if let Err(e) = send_tx_with_retry(
+        rpc,
+        &[pay_ix],
+        &[&buyer, &env.payer],
+        &env.payer,
+        "pay_for_compute",
+    ) {
         return IterOutcome {
             iter,
             action: "pay".into(),
@@ -868,7 +877,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("read payer {}: {e}", payer_path.display()))?;
 
     let rpc_url = env::var("SOAK_RPC").unwrap_or_else(|_| DEVNET_RPC.to_string());
-    let rpc = Arc::new(RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed()));
+    let rpc = Arc::new(RpcClient::new_with_commitment(
+        rpc_url,
+        CommitmentConfig::confirmed(),
+    ));
 
     let payer_pk = payer.pubkey();
     let env = Arc::new(setup(&rpc, payer)?);
@@ -935,7 +947,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let o = run_iteration(&rpc, &env, iter, &mut rng, nonce);
                 // Live progress every PROGRESS_INTERVAL iterations.
-                if o.iter % PROGRESS_INTERVAL == 0 || !o.ok {
+                if o.iter.is_multiple_of(PROGRESS_INTERVAL) || !o.ok {
                     let mark = if o.ok { "OK" } else { "FAIL" };
                     eprintln!(
                         "  [{mark}] iter {:>4}  {:<24}  price={:<9}  {}ms  {}",
@@ -982,13 +994,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== soak summary ===");
     println!("  iterations:  {total}");
     println!("  successes:   {successes}");
-    println!("  failures:    {failures} ({:.1}%)", failures as f64 / total as f64 * 100.0);
+    println!(
+        "  failures:    {failures} ({:.1}%)",
+        failures as f64 / total as f64 * 100.0
+    );
     println!("  wall time:   {:.1}s", wall_elapsed.as_secs_f64());
     println!("  latency:     avg={avg}ms  p50={p50}ms  p95={p95}ms  p99={p99}ms");
 
     // Action breakdown.
     let cancels = results.iter().filter(|o| o.action == "cancel").count();
-    let finalizes = results.iter().filter(|o| o.action.starts_with("finalize")).count();
+    let finalizes = results
+        .iter()
+        .filter(|o| o.action.starts_with("finalize"))
+        .count();
     println!("  finalize:    {finalizes}");
     println!("  cancel:      {cancels}");
 

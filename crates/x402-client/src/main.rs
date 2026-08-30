@@ -39,19 +39,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use borsh::BorshSerialize;
 use sha2::{Digest, Sha256};
 use solana_client::rpc_client::RpcClient;
+// Solana 3.x split several `solana_sdk` modules into standalone crates.
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
-    commitment_config::CommitmentConfig,
     instruction::{AccountMeta, Instruction},
     program_pack::Pack,
     pubkey::Pubkey,
     signature::{read_keypair_file, Keypair, Signer},
-    system_instruction, system_program,
     transaction::Transaction,
 };
+use solana_system_interface::{instruction as system_instruction, program as system_program};
 use spl_associated_token_account::{
     get_associated_token_address, instruction::create_associated_token_account_idempotent,
 };
-use spl_token::state::{Account as TokenAccount, Mint};
+// spl-token 9.x moved `state`/`instruction` builders into spl-token-interface.
+use spl_token_interface::state::{Account as TokenAccount, Mint};
 
 /// Devnet escrow program ID — see ROADMAP.md §0, programs/Anchor.toml.
 const PROGRAM_ID_STR: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
@@ -284,7 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         ixs.insert(
             1,
-            spl_token::instruction::initialize_mint(
+            spl_token_interface::instruction::initialize_mint(
                 &spl_token::id(),
                 &mint_pk,
                 &authority,
@@ -292,7 +294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 6,
             )?,
         );
-        ixs.push(spl_token::instruction::mint_to(
+        ixs.push(spl_token_interface::instruction::mint_to(
             &spl_token::id(),
             &mint_pk,
             &buyer_ata,
