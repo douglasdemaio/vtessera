@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1788180441,
+  "updated_at": 1788180803,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -29,6 +29,17 @@
       "sig_hex": "null",
       "updated_at": 1788168968,
       "endpoint": "http://192.168.178.82:8402"
+    },
+    {
+      "node_id": "token-probe-x",
+      "offer": {
+        "body": {
+          "node_id": "token-probe-x"
+        }
+      },
+      "sig_hex": "x",
+      "updated_at": 1788180803,
+      "endpoint": null
     }
   ]
 }
