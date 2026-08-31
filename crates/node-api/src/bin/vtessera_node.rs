@@ -1029,7 +1029,7 @@ fn main() {
         None
     };
 
-    // Marketplace registration: detect external IP and register via Cloudflare Worker.
+    // Marketplace registration: register via Cloudflare Worker.
     if args.marketplace {
         // Parse port from bind address.
         let port = args
@@ -1039,26 +1039,42 @@ fn main() {
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(8402);
 
-        // Prefer the IP that UPnP learned from the router (it also confirms
-        // the port is forwarded); fall back to detecting it via an echo
-        // service. Registration succeeds regardless.
-        let external_ip = upnp_external_ip
-            .clone()
-            .or_else(detect_external_ip)
-            .unwrap_or_default();
+        // Whether we have a *confirmed* public port-forward. Only the external
+        // IP returned by a successful UPnP mapping proves the port is actually
+        // reachable from the internet; a WAN IP from an echo service knows
+        // nothing about whether any forward exists.
+        let has_public_forward = upnp_external_ip.is_some();
 
-        let external_ip = if external_ip.is_empty() {
-            eprintln!("vtessera-node: could not determine external IP for marketplace");
+        // Choose which endpoint to advertise. We only use a WAN IP we detected
+        // when the operator did NOT rely on UPnP to open the port (e.g. they
+        // configured a static manual forward on the router). If UPnP was
+        // requested but failed, the WAN endpoint would be unreachable, so we
+        // keep the offer's original (typically LAN) endpoint instead.
+        let external_ip = if args.upnp && !has_public_forward {
+            eprintln!(
+                "vtessera-node: UPnP port forward failed; not advertising a public WAN \
+                 endpoint (the node remains reachable on the LAN)"
+            );
             None
         } else {
-            Some(external_ip)
+            upnp_external_ip
+                .clone()
+                .or_else(detect_external_ip)
+                .filter(|ip| !ip.is_empty())
         };
+
+        if external_ip.is_none() && !has_public_forward {
+            eprintln!(
+                "vtessera-node: registering with marketplace using the offer's local endpoint"
+            );
+        }
 
         match register_with_marketplace_with_ip(
             &offer,
             &signing_key_for_marketplace,
             port,
             external_ip.clone(),
+            has_public_forward,
         ) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: marketplace registration failed (will retry): {e}"),
@@ -1069,6 +1085,7 @@ fn main() {
             port,
             args.marketplace_interval,
             external_ip,
+            has_public_forward,
         );
     }
 
@@ -1255,22 +1272,29 @@ fn upnp_add_port_forward(bind: &str) -> Result<String, String> {
 /// IP-echo service. `None` falls back to detecting it at this moment.
 const MARKETPLACE_WORKER_URL: &str = "https://vtessera.douglasdemaio.workers.dev";
 
-/// Internal helper that takes an optional pre-detected external IP.
+/// Register the node's offer with the marketplace.
+///
+/// `external_ip` is `Some(public_ip)` when the node is publicly reachable at
+/// `http://<public_ip>:<port>` (e.g. a confirmed UPnP forward or a manual
+/// forward), in which case the offer is re-signed with that WAN endpoint.
+/// `None` advertises the offer's original (typically LAN) endpoint without
+/// claiming public reachability.
+///
+/// `publicly_reachable` only affects the success log; it mirrors whether a
+/// WAN endpoint is actually being advertised.
 fn register_with_marketplace_with_ip(
     offer: &vtessera_offer::SignedOffer,
     signing_key: &SigningKey,
     port: u16,
     external_ip: Option<String>,
+    publicly_reachable: bool,
 ) -> Result<(), String> {
-    // Detect external IP if not provided.
-    let external_ip = match external_ip {
-        Some(ip) => ip,
-        None => detect_external_ip().ok_or_else(|| "failed to detect external IP".to_string())?,
-    };
-
-    // Override the endpoint with the external IP and re-sign.
+    // Override the endpoint (with the external IP when publicly reachable) and re-sign.
     let mut offer_body = offer.body.clone();
-    offer_body.endpoint = format!("http://{external_ip}:{port}");
+    if let Some(ip) = &external_ip {
+        // Advertise the public WAN endpoint (confirmed reachable via forward).
+        offer_body.endpoint = format!("http://{ip}:{port}");
+    }
     let re_signed = vtessera_offer::sign(offer_body, signing_key);
 
     let offer_json = vtessera_offer::to_json(&re_signed);
@@ -1291,7 +1315,19 @@ fn register_with_marketplace_with_ip(
         .send(serde_json::to_string(&payload).unwrap().as_str())
     {
         Ok(_resp) => {
-            eprintln!("vtessera-node: registered with marketplace (IP: {external_ip})");
+            if publicly_reachable {
+                eprintln!(
+                    "vtessera-node: registered with marketplace (public endpoint: \
+                     {})",
+                    re_signed.body.endpoint
+                );
+            } else {
+                eprintln!(
+                    "vtessera-node: registered with marketplace (local endpoint: \
+                     {}; not publicly reachable)",
+                    re_signed.body.endpoint
+                );
+            }
             Ok(())
         }
         Err(ureq::Error::StatusCode(status)) => Err(format!("worker returned {status}")),
@@ -1307,13 +1343,18 @@ fn spawn_marketplace_registration(
     port: u16,
     interval: Duration,
     external_ip: Option<String>,
+    publicly_reachable: bool,
 ) {
     thread::spawn(move || loop {
         thread::sleep(interval);
         let signed = vtessera_offer::sign(offer_body.clone(), &signing_key);
-        if let Err(e) =
-            register_with_marketplace_with_ip(&signed, &signing_key, port, external_ip.clone())
-        {
+        if let Err(e) = register_with_marketplace_with_ip(
+            &signed,
+            &signing_key,
+            port,
+            external_ip.clone(),
+            publicly_reachable,
+        ) {
             eprintln!("vtessera-node: marketplace registration failed (will retry): {e}");
         }
     });
