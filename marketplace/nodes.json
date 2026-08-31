@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1788180848,
+  "updated_at": 1788180929,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -39,17 +39,6 @@
       },
       "sig_hex": "x",
       "updated_at": 1788180803,
-      "endpoint": null
-    },
-    {
-      "node_id": "probe-test-do-not-persist",
-      "offer": {
-        "body": {
-          "node_id": "probe-test-do-not-persist"
-        }
-      },
-      "sig_hex": "deadbeef",
-      "updated_at": 1788180848,
       "endpoint": null
     }
   ]
