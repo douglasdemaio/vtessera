@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1788189811,
+  "updated_at": 1788189917,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -29,17 +29,6 @@
       "sig_hex": "8e6111577b1679d43c05cfbede473cd9dd7d2ba9e384ef877fdd07bd8de22200e6d9ef1f9a947040a55c697c6fca82a524dd56dbcf78171928d005f685aec109",
       "updated_at": 1788189811,
       "endpoint": "http://194.15.83.79:8402"
-    },
-    {
-      "node_id": "token-probe-x",
-      "offer": {
-        "body": {
-          "node_id": "token-probe-x"
-        }
-      },
-      "sig_hex": "x",
-      "updated_at": 1788180803,
-      "endpoint": null
     },
     {
       "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
