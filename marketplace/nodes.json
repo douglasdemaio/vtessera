@@ -1,5 +1,34 @@
 {
   "version": 1,
-  "updated_at": 1788148270,
-  "nodes": []
+  "updated_at": 1788168968,
+  "nodes": [
+    {
+      "node_id": "793754d2844bfc814b0494560dd1c750",
+      "offer": {
+        "body": {
+          "device": {
+            "kind": "cpu",
+            "mem_mb": 5652,
+            "vcpus": 8
+          },
+          "endpoint": "http://192.168.178.82:8402",
+          "expires_unix": 1790759533,
+          "issued_unix": 1788167533,
+          "node_id": "793754d2844bfc814b0494560dd1c750",
+          "price": {
+            "currency": "usdc",
+            "mode": "paid",
+            "payout_id": "5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs",
+            "per_device_second_micros": 3903
+          },
+          "schema_ver": 1
+        },
+        "pubkey_hex": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
+        "sig_hex": "6413076f008388f0568f3cac5ac9b81a775020e4f4331877e71406423aa853a35094c273ea10de2ca5617932f1bf245bd36b994973de34eb8e26c03f257ee30b"
+      },
+      "sig_hex": "null",
+      "updated_at": 1788168968,
+      "endpoint": "http://192.168.178.82:8402"
+    }
+  ]
 }
