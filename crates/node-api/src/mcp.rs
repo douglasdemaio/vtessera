@@ -425,6 +425,18 @@ pub struct MarketplaceMcpServer {
     offers_override: Option<Vec<Value>>,
 }
 
+/// Extract the primary reachability endpoint from an offer body.
+///
+/// The offer schema (v2) carries `endpoint` as a list; older offers (v1,
+/// still in flight) used a bare string. Accept either and return the first
+/// entry.
+pub fn first_offer_endpoint(body: &serde_json::Value) -> Option<String> {
+    if let Some(eps) = body["endpoint"].as_array() {
+        return eps.first().and_then(|e| e.as_str()).map(String::from);
+    }
+    body["endpoint"].as_str().map(String::from)
+}
+
 #[cfg(feature = "serve")]
 impl MarketplaceMcpServer {
     pub fn new(marketplace_url: String, index_url: Option<String>) -> Self {
@@ -618,7 +630,7 @@ impl MarketplaceMcpServer {
                     .unwrap_or_default()
             };
             for o in arr {
-                if let Some(ep) = o["body"]["endpoint"].as_str() {
+                if let Some(ep) = first_offer_endpoint(&o["body"]) {
                     if seen.insert(ep.to_string()) {
                         offers.push(o);
                     }
@@ -812,7 +824,8 @@ mod tests {
         let body = OfferBody {
             schema_ver: OFFER_SCHEMA_VER,
             node_id,
-            endpoint: "https://node.example/v1".into(),
+            endpoint_id: hex::encode(key.verifying_key().to_bytes()),
+            endpoint: vec!["https://node.example/v1".into()],
             device: AdvertisedDevice::Cpu {
                 vcpus: 4,
                 mem_mb: 16 * 1024,
@@ -1047,7 +1060,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":10,"method":"resources/read","params":{"uri":"vtessera://offer"}}"#,
         );
         let text = r["result"]["contents"][0]["text"].as_str().unwrap();
-        assert!(text.contains("\"schema_ver\":1"));
+        assert!(text.contains("\"schema_ver\":2"));
         assert!(text.contains("\"pubkey_hex\":"));
     }
 
@@ -1263,7 +1276,8 @@ mod tests {
                 "body": {
                     "schema_ver": OFFER_SCHEMA_VER,
                     "node_id": derive_node_id(&[0u8; 32]),
-                    "endpoint": endpoint,
+                    "endpoint_id": hex::encode([0u8; 32]),
+                    "endpoint": [endpoint],
                     "device": {"kind": "cpu", "vcpus": 2, "mem_mb": 4096},
                     "price": {
                         "mode": mode,
@@ -1333,7 +1347,7 @@ mod tests {
             let data: Value =
                 serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
             assert_eq!(data["count"], 1);
-            assert_eq!(data["nodes"][0]["endpoint"], "http://paid-1:8402");
+            assert_eq!(data["nodes"][0]["endpoint"], json!(["http://paid-1:8402"]));
         }
 
         #[test]

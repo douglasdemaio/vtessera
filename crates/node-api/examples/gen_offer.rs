@@ -138,7 +138,8 @@ fn main() {
     let body = OfferBody {
         schema_ver: OFFER_SCHEMA_VER,
         node_id,
-        endpoint,
+        endpoint_id: hex::encode(key.verifying_key().to_bytes()),
+        endpoint: vec![endpoint],
         device: AdvertisedDevice::Cpu { vcpus, mem_mb },
         price,
         issued_unix: now,

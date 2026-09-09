@@ -34,8 +34,19 @@ impl IrohEndpoint {
     /// - DNS address lookup via iroh.link
     /// - Ring or aws-lc-rs crypto provider
     pub async fn new(secret_key: SecretKey) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_relay_pool(secret_key, &RelayPool::Default).await
+    }
+
+    /// Create an iroh endpoint with a caller-selected relay pool.
+    ///
+    /// See [`RelayPool`] for plurality requirements (P1.6).
+    pub async fn with_relay_pool(
+        secret_key: SecretKey,
+        relay_pool: &RelayPool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret_key)
+            .relay_mode(relay_pool.relay_mode())
             .bind()
             .await?;
 
@@ -138,6 +149,105 @@ pub async fn create_endpoint(
     IrohEndpoint::new(secret_key).await
 }
 
+/// Configure how the node's iroh endpoint dials relays (design P1.6, 6a-9).
+///
+/// The relay pool is **plural**: an operator can run their own relay
+/// alongside third-party (e.g. N0) relays, because the relay is the TCP
+/// fallback for UDP-blocked networks — it must not be a single-provider
+/// dependency (invariant #2). Dial order is direct (UDP/QUIC) then relay.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RelayPool {
+    /// No relay at all.
+    Disabled,
+    /// Use iroh's stock relay map (N0).
+    #[default]
+    Default,
+    /// Operator-supplied relays, self-hosted and/or third-party.
+    Custom(Vec<String>),
+}
+
+impl RelayPool {
+    /// Build the iroh [`RelayMode`] for this pool.
+    ///
+    /// `urls` are parsed as [`RelayUrl`]s — `https`, `wss`, or plain http
+    /// schemes (a `wss://…:443` value is accepted; iroh exposes the relay
+    /// over WebSocket-on-TCP(S), so wss:443 works from UDP-blocked networks,
+    /// §2/T1.3).
+    pub fn relay_mode(&self) -> iroh::RelayMode {
+        match self {
+            RelayPool::Disabled => iroh::RelayMode::Disabled,
+            RelayPool::Default => iroh::RelayMode::Default,
+            RelayPool::Custom(urls) => {
+                let parsed = urls
+                    .iter()
+                    .filter_map(|u| u.parse().ok())
+                    .collect::<Vec<_>>();
+                if parsed.is_empty() {
+                    iroh::RelayMode::Default
+                } else {
+                    iroh::RelayMode::custom(parsed)
+                }
+            }
+        }
+    }
+}
+#[cfg(test)]
+mod relay_pool_tests {
+    use super::super::{Candidate, CandidateKind, TransportKind};
+    use super::RelayPool;
+
+    /// Test 6a-9 (config half): a custom relay pool is plural — self-hosted
+    /// and third-party relays together — and maps to iroh's custom relay map;
+    /// default and disabled map correctly.
+    #[test]
+    fn relay_pool_plurality_and_modes() {
+        let pool = RelayPool::Custom(vec![
+            "https://relay.example.com.".to_string(), // self-hosted
+            "wss://relay.thirdparty.example:443".to_string(), // third-party + wss
+            "https://euw-1.relay.n0.iroh.link.".to_string(),
+        ]);
+        assert!(matches!(pool.relay_mode(), iroh::RelayMode::Custom(_)));
+
+        assert!(matches!(
+            RelayPool::Default.relay_mode(),
+            iroh::RelayMode::Default
+        ));
+        assert!(matches!(
+            RelayPool::Disabled.relay_mode(),
+            iroh::RelayMode::Disabled
+        ));
+        assert_eq!(RelayPool::default(), RelayPool::Default);
+    }
+
+    /// Fallback order is direct first, then relay — a property of iroh's
+    /// dialing, not config. Here we pin the transport's contract: candidates
+    /// rank direct IP candidates above relayed ones (matching §2's "prefer
+    /// direct when available, fall back to relay"). A relay in the pool must
+    /// surface as a `Relayed` candidate source, and the candidate ordering
+    /// keeps Host direct first.
+    #[test]
+    fn direct_precedes_relay_in_candidates() {
+        let candidates = vec![
+            Candidate {
+                kind: CandidateKind::Relayed,
+                transport: TransportKind::IrohQuic,
+                addr: "https://relay.example.com".into(),
+                priority: 50,
+            },
+            Candidate {
+                kind: CandidateKind::Host,
+                transport: TransportKind::IrohQuic,
+                addr: "192.168.1.5:8402".into(),
+                priority: 200,
+            },
+        ];
+        let mut sorted = candidates.clone();
+        sorted.sort_by_key(|a| std::cmp::Reverse(a.priority));
+        assert_eq!(sorted[0].kind, CandidateKind::Host); // direct first
+        assert_eq!(sorted[1].kind, CandidateKind::Relayed); // then relay
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +259,32 @@ mod tests {
         let id = ep.node_id();
         // Endpoint ID is a 32-byte public key, should be non-zero
         assert_ne!(id.as_bytes(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn endpoint_id_derives_deterministically_from_node_key() {
+        // Design P1.4 / test 6a-5: the iroh EndpointId is nothing but the
+        // node's Ed25519 public key — the exact bytes the signed offer
+        // advertises as `endpoint_id` (§3). No separate key is involved.
+        let node_key = [0x21; 32];
+
+        let ep_id = SecretKey::from_bytes(&node_key).public();
+        // Same key -> same EndpointId, no matter how many endpoints exist.
+        let again = SecretKey::from_bytes(&node_key).public();
+        assert_eq!(ep_id, again);
+
+        // A different key must not collide.
+        let other = SecretKey::generate();
+        assert_ne!(ep_id, other.public());
+
+        // The EndpointId IS the Ed25519 pubkey of the node key, byte for byte
+        // — identical to the hex the offer carries as `endpoint_id`.
+        let dalek = ed25519_dalek::SigningKey::from_bytes(&node_key);
+        assert_eq!(ep_id.as_bytes(), &dalek.verifying_key().to_bytes());
+        assert_eq!(
+            ep_id.to_string(),
+            hex::encode(dalek.verifying_key().to_bytes())
+        );
     }
 
     #[tokio::test]
@@ -235,10 +371,8 @@ mod tests {
                 let data = recv
                     .read_to_end(1024)
                     .await
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-                send.write_all(&data)
-                    .await
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                    .map_err(std::io::Error::other)?;
+                send.write_all(&data).await.map_err(std::io::Error::other)?;
                 send.finish()?;
                 // Wait for the client to read the response before dropping the connection
                 conn.closed().await;

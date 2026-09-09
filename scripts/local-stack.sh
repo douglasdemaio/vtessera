@@ -13,18 +13,21 @@
 #   ./scripts/local-stack.sh status  # check which services are running
 #
 # Environment overrides:
-#   VTESSERA_LOCAL_ONLY=1   bind everything to 127.0.0.1 (no LAN exposure)
-#   VTESSERA_MODE=free      "free" (default) or "paid"
-#   VTESSERA_PORT=8402      node HTTP port (default 8402)
-#   VTESSERA_STATE_DIR=...  state directory (default ~/.local/share/vtessera/stack)
+#   VTESSERA_LOCAL_ONLY=1     bind everything to 127.0.0.1 (no LAN exposure)
+#   VTESSERA_OUTBOUND=1       outbound-only node + local coordinator (P1.7)
+#   VTESSERA_MODE=free        "free" (default) or "paid"
+#   VTESSERA_PORT=8402        node HTTP port (default 8402)
+#   VTESSERA_STATE_DIR=...    state directory (default ~/.local/share/vtessera/stack)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="${VTESSERA_MODE:-free}"
 LOCAL_ONLY="${VTESSERA_LOCAL_ONLY:-0}"
+OUTBOUND="${VTESSERA_OUTBOUND:-0}"
 PORT="${VTESSERA_PORT:-8402}"
 INDEX_PORT=8403
 MARKETPLACE_PORT=8443
+COORD_PORT=8404
 STATE_DIR="${VTESSERA_STATE_DIR:-$HOME/.local/share/vtessera/stack}"
 PID_DIR="$STATE_DIR/pids"
 
@@ -179,7 +182,7 @@ cmd_start() {
     mkdir -p "$PID_DIR"
 
     # Check if already running
-    for svc in offer-index node marketplace; do
+    for svc in offer-index node marketplace coordinator; do
         if is_running "$svc"; then
             warn "$svc already running (pid $(cat "$PID_DIR/$svc.pid"))"
         fi
@@ -204,6 +207,9 @@ cmd_start() {
     info "Building binaries..."
     cargo build -q -p vtessera-offer-index --bin vtessera-offer-index --features serve
     cargo build -q -p vtessera-node-api --bin vtessera-node --features serve
+    if [ "$OUTBOUND" = "1" ]; then
+        cargo build -q -p vtessera-coordinator --bin vtessera-coordinator --features serve
+    fi
     cargo build -q -p marketplace-server --bin marketplace-server
 
     # Derive node_id and pubkey from the key
@@ -247,10 +253,40 @@ cmd_start() {
     info "Offer generated for $endpoint ($MODE)"
 
     # --- vtessera-node ---
+    local coord_addr_arg=()
+    if [ "$OUTBOUND" = "1" ]; then
+        # --- coordinator (outbound-only dispatch point) ---
+        local coord_marker="$STATE_DIR/coordinator-addr.json"
+        if ! is_running coordinator; then
+            info "Starting coordinator on loopback"
+            "$ROOT/target/debug/vtessera-coordinator" \
+                --addr-out "$coord_marker" \
+                >/dev/null 2>&1 &
+            save_pid coordinator $!
+            # The coordinator pins its EndpointAddr after ~0.5s of iroh
+            # address discovery; wait for the pin to land.
+            for _ in $(seq 1 20); do
+                [ -f "$coord_marker" ] && break
+                sleep 0.3
+            done
+            if [ -f "$coord_marker" ]; then
+                info "coordinator ready (addr pinned at $coord_marker)"
+            else
+                fail "coordinator failed to publish its addr"
+            fi
+        fi
+        # Node opens NO listener; it pulls from the queue (P1.7b).
+        coord_addr_arg=(--coordinator-addr "$coord_marker" --coordinator-poll 2)
+    fi
+
     if ! is_running node; then
         local escrow="6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma"
         local network="solana-devnet"
-        info "Starting vtessera-node on $bind_host:$PORT"
+        if [ "$OUTBOUND" = "1" ]; then
+            info "Starting vtessera-node (outbound-only, coordinator pull on $coord_marker)"
+        else
+            info "Starting vtessera-node on $bind_host:$PORT"
+        fi
         "$ROOT/target/debug/vtessera-node" \
             --bind "$bind_host:$PORT" \
             --offer "$offer_json" \
@@ -261,10 +297,13 @@ cmd_start() {
             --state-dir "$STATE_DIR" \
             --publish "http://$advertise_host:$INDEX_PORT" \
             --publish-interval 30 \
+            "${coord_addr_arg[@]}" \
             >/dev/null 2>&1 &
         save_pid node $!
         sleep 1
-        if wait_for node "http://127.0.0.1:$PORT/healthz"; then
+        if [ "$OUTBOUND" = "1" ]; then
+            info "vtessera-node started (outbound-only; no HTTP listener)"
+        elif wait_for node "http://127.0.0.1:$PORT/healthz"; then
             info "vtessera-node ready"
         else
             warn "vtessera-node may still be starting..."
@@ -276,7 +315,19 @@ cmd_start() {
     local node_pid
     node_pid=$(cat "$PID_DIR/node.pid")
     mkdir -p "$(dirname "$discovery_path")"
-    cat > "$discovery_path" <<JSON
+    if [ "$OUTBOUND" = "1" ]; then
+        cat > "$discovery_path" <<JSON
+{
+  "endpoint": "queue",
+  "node_id": "$node_id",
+  "index": "http://$advertise_host:$INDEX_PORT",
+  "queue": "$STATE_DIR/coordinator-addr.json",
+  "pid": $node_pid
+}
+JSON
+        info "Discovery file: $discovery_path (queue rendezvous)"
+    else
+        cat > "$discovery_path" <<JSON
 {
   "endpoint": "http://$advertise_host:$PORT",
   "node_id": "$node_id",
@@ -284,7 +335,8 @@ cmd_start() {
   "pid": $node_pid
 }
 JSON
-    info "Discovery file: $discovery_path"
+        info "Discovery file: $discovery_path"
+    fi
 
     # --- marketplace-server ---
     if ! is_running marketplace; then
@@ -308,11 +360,21 @@ JSON
     info "  marketplace:       http://$advertise_host:$MARKETPLACE_PORT"
     info "  state dir:         $STATE_DIR"
     info "  mode:              $MODE"
+    if [ "$OUTBOUND" = "1" ]; then
+        info "  coordinator:       $STATE_DIR/coordinator-addr.json (queue rendezvous)"
+    fi
     echo
     info "Test with:"
-    info "  curl http://127.0.0.1:$PORT/healthz"
-    info "  curl http://127.0.0.1:$PORT/offer"
-    info "  vtessera-agent --node http://$advertise_host:$PORT health"
+    if [ "$OUTBOUND" = "1" ]; then
+        info "  vtessera-agent --local health"
+        info "  vtessera-agent --local submit --job job.json   # enqueues; node pulls"
+        info "  vtessera-coordinator submit --addr $STATE_DIR/coordinator-addr.json --job job.json"
+        info "  curl http://127.0.0.1:$INDEX_PORT/offers?available=1"
+    else
+        info "  curl http://127.0.0.1:$PORT/healthz"
+        info "  curl http://127.0.0.1:$PORT/offer"
+        info "  vtessera-agent --node http://$advertise_host:$PORT health"
+    fi
 }
 
 # =====================================================================
@@ -320,7 +382,7 @@ JSON
 # =====================================================================
 cmd_stop() {
     local stopped=0
-    for svc in marketplace node offer-index; do
+    for svc in marketplace node coordinator offer-index; do
         if is_running "$svc"; then
             local pid
             pid=$(cat "$PID_DIR/$svc.pid")
@@ -351,7 +413,7 @@ cmd_stop() {
 # =====================================================================
 cmd_status() {
     local all_ok=true
-    for svc in offer-index node marketplace; do
+    for svc in offer-index node marketplace coordinator; do
         if is_running "$svc"; then
             echo -e "${GREEN}✓${NC} $svc (pid $(cat "$PID_DIR/$svc.pid"))"
         else
@@ -377,6 +439,7 @@ case "${1:-}" in
         echo
         echo "Environment:"
         echo "  VTESSERA_LOCAL_ONLY=1   loopback-only mode (default: LAN-advertised)"
+        echo "  VTESSERA_OUTBOUND=1     outbound-only node + coordinator queue (P1.7)"
         echo "  VTESSERA_MODE=free      free or paid (default: free)"
         echo "  VTESSERA_PORT=8402      node port (default: 8402)"
         echo "  VTESSERA_STATE_DIR=...  state directory"

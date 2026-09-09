@@ -41,6 +41,7 @@ members = [
     "crates/marketplace-server",
     "crates/vtessera-config",
     "crates/transport",
+    "crates/coordinator",
     "crates/vtessera-metrics",
     "crates/agent-cli",
 ]

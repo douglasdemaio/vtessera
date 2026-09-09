@@ -43,6 +43,13 @@ pub struct StartOptions<'a> {
     pub bind: String,
     pub escrow: &'a str,
     pub network: &'a str,
+    /// Connectivity mode passed to `vtessera-node --connectivity`
+    /// (`inbound+dialable` default during transition, or `outbound-only`).
+    pub connectivity: &'a str,
+    /// Coordinator queue pin: path to the coordinator's `EndpointAddr` JSON
+    /// (P1.8) or an inline `endpoint=<json>` / `queue=<path>` string. Passed
+    /// as `--coordinator-addr`. `None` when no coordinator is pinned.
+    pub coordinator_addr: Option<&'a str>,
     /// `vtessera-node --backend`: `"noop-cpu"` (synthetic metering) or
     /// `"local-cpu"` (runs job commands on the host, not isolated).
     pub backend: &'a str,
@@ -77,14 +84,19 @@ pub struct StartOptions<'a> {
 }
 
 /// Write a discovery file so agents on the same machine can find the node.
-fn write_discovery(path: &Path, endpoint: &str, node_id: &str, index: &str) {
+/// In `outbound-only` mode the file carries the coordinator queue pin (`queue`)
+/// instead of a dialable endpoint — the node has no inbound listener.
+fn write_discovery(path: &Path, endpoint: &str, node_id: &str, index: &str, queue: Option<&str>) {
     let pid = std::process::id();
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "endpoint": endpoint,
         "node_id": node_id,
         "index": index,
         "pid": pid,
     });
+    if let Some(q) = queue {
+        json["queue"] = serde_json::Value::String(q.to_string());
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -196,16 +208,22 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
         });
     }
 
-    // If a node is already answering on the configured port (e.g. leaked by
-    // a hard-killed previous session), reusing it beats spawning a second
-    // one that dies on bind. The served offer may be stale — the caller
-    // surfaces that to the user.
-    let port = opts
-        .bind
-        .rsplit_once(':')
-        .and_then(|(_, p)| p.parse::<u16>().ok())
-        .unwrap_or(0);
-    let node_reused = port != 0 && healthz_up("127.0.0.1", port);
+    let outbound = opts.connectivity == crate::settings::CONNECTIVITY_OUTBOUND;
+
+    // If a node is already answering on the configured port (e.g. leaked by a
+    // hard-killed previous session), reusing it beats spawning a second one
+    // that dies on bind. The served offer may be stale — the caller surfaces
+    // that to the user. Outbound-only nodes have no inbound port to probe, so
+    // they are never "reused"; a second outbound node is always spawned.
+    let port = if outbound {
+        0
+    } else {
+        opts.bind
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+            .unwrap_or(0)
+    };
+    let node_reused = !outbound && port != 0 && healthz_up("127.0.0.1", port);
 
     let node = if node_reused {
         None
@@ -219,13 +237,19 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
             .args(["--backend", opts.backend])
             .args(["--key", opts.key_path.to_str().unwrap_or_default()])
             .args(["--state-dir", opts.state_dir.to_str().unwrap_or_default()]);
+        if outbound {
+            node_cmd.args(["--connectivity", "outbound-only"]);
+            if let Some(addr) = opts.coordinator_addr {
+                node_cmd.args(["--coordinator-addr", addr]);
+            }
+        }
         if let Some(url) = &opts.publish {
             node_cmd.args(["--publish", url]);
         }
         if opts.marketplace {
             node_cmd.arg("--marketplace");
         }
-        if opts.upnp {
+        if opts.upnp && !outbound {
             node_cmd.arg("--upnp");
         }
         match node_cmd.spawn() {
@@ -243,15 +267,26 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
     };
 
     // Write discovery file so agents on the same machine can find the node.
+    // Outbound-only nodes advertise the queue pin (no dialable endpoint).
     let discovery_file = if let Some(ref path) = opts.discovery_file {
-        let endpoint = &opts.bind;
+        let endpoint = if outbound { "" } else { &opts.bind };
         let node_id = opts.node_id.as_deref().unwrap_or("unknown");
         let index = opts
             .index_bind
             .as_deref()
             .map(|b| format!("http://127.0.0.1:{}", &b[b.rfind(':').unwrap() + 1..]))
             .unwrap_or_default();
-        write_discovery(path, endpoint, node_id, &index);
+        write_discovery(
+            path,
+            endpoint,
+            node_id,
+            &index,
+            if outbound {
+                opts.coordinator_addr
+            } else {
+                None
+            },
+        );
         Some(path.clone())
     } else {
         None

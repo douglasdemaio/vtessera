@@ -20,6 +20,9 @@ allow = [
     "Zlib",
     "OpenSSL",
     "CDLA-Permissive-2.0",
+    # iroh relay/ws stack (via the agent's queue client, P1.7e):
+    "MPL-2.0",
+    "Unlicense",
 ]
 confidence-threshold = 0.8
 

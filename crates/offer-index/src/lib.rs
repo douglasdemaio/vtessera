@@ -463,7 +463,7 @@ pub fn dispatch(state: &mut IndexState, req: Request, now_unix: u64) -> Response
             Some(rest) if !rest.is_empty() => {
                 if let Some(node_id) = rest.strip_suffix("/heartbeat") {
                     if !node_id.is_empty() && req.method == Method::Post {
-                        return handle_heartbeat(state, node_id, &req.body, now_unix);
+                        return handle_heartbeat(state, node_id, &req, now_unix);
                     }
                 }
                 match rest.strip_suffix("/claim") {
@@ -578,8 +578,13 @@ fn handle_release(state: &mut IndexState, node_id: &str, body: &[u8], now_unix: 
     }
 }
 
-fn handle_heartbeat(state: &mut IndexState, node_id: &str, body: &[u8], now_unix: u64) -> Response {
-    let text = String::from_utf8_lossy(body);
+fn handle_heartbeat(
+    state: &mut IndexState,
+    node_id: &str,
+    req: &Request,
+    now_unix: u64,
+) -> Response {
+    let text = String::from_utf8_lossy(&req.body);
     let value: Value = match serde_json::from_str(&text) {
         Ok(v) => v,
         Err(e) => {
@@ -592,6 +597,36 @@ fn handle_heartbeat(state: &mut IndexState, node_id: &str, body: &[u8], now_unix
             );
         }
     };
+
+    // Signed heartbeat per docs/INTERNET-CONNECTIVITY.md §2.2: the node
+    // signs `heartbeat:{node_id}:{timestamp}` with its identity key (the
+    // same key bound to the registered offer). Without a verifiable
+    // signature the heartbeat is dropped, so a third party can't inject
+    // fake liveness or candidates for a node it doesn't control.
+    let timestamp = match value.get("timestamp").and_then(|v| v.as_u64()) {
+        Some(ts) => ts,
+        None => {
+            return Response::json(
+                400,
+                r#"{"status":"rejected","reason":"timestamp is required"}"#.into(),
+            );
+        }
+    };
+    let sig_hex = match req
+        .headers
+        .iter()
+        .find(|(k, _)| k == "x-signature")
+        .map(|(_, v)| v.as_str())
+    {
+        Some(s) => s.to_string(),
+        None => {
+            return Response::json(
+                400,
+                r#"{"status":"rejected","reason":"x-signature header is required"}"#.into(),
+            );
+        }
+    };
+
     let candidates: Vec<vtessera_transport::Candidate> = match value.get("candidates") {
         Some(c) => serde_json::from_value(c.clone()).unwrap_or_default(),
         None => vec![],
@@ -600,6 +635,22 @@ fn handle_heartbeat(state: &mut IndexState, node_id: &str, body: &[u8], now_unix
         .get("endpoint_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    // The node must already be registered, and the heartbeat must carry a
+    // signature that verifies against the registered offer's pubkey.
+    let Some(entry) = state.get(node_id) else {
+        return Response::text(404, "node not registered");
+    };
+    if let Err(e) =
+        vtessera_offer::verify_heartbeat(node_id, timestamp, &sig_hex, &entry.offer.pubkey_hex)
+    {
+        return Response::json(
+            403,
+            serde_json::to_string(&json!({ "status": "forged", "reason": e.to_string() }))
+                .unwrap_or_else(|_| r#"{"status":"forged"}"#.into()),
+        );
+    }
+
     match state.heartbeat(node_id, candidates, endpoint_id, now_unix) {
         Ok(()) => Response::json(200, r#"{"status":"ok"}"#.into()),
         Err(HeartbeatError::NotFound) => Response::text(404, "node not registered"),
@@ -671,7 +722,8 @@ mod tests {
         let body = OfferBody {
             schema_ver: OFFER_SCHEMA_VER,
             node_id: node_id.into(),
-            endpoint: format!("https://{node_id}.example/vtessera"),
+            endpoint_id: hex::encode(key.verifying_key().to_bytes()),
+            endpoint: vec![format!("https://{node_id}.example/vtessera")],
             device: AdvertisedDevice::NvidiaGpu {
                 model: "H100-80GB".into(),
                 vram_mb: 80 * 1024,
@@ -700,6 +752,20 @@ mod tests {
         derive_node_id(&key.verifying_key().to_bytes())
     }
 
+    /// Build a heartbeat request signed with the node key derived from
+    /// `seed`, mirroring what the node sends on the wire.
+    fn heartbeat_req(node_id: &str, seed: u8, body: Value) -> Request {
+        let key = SigningKey::from_bytes(&[seed; 32]);
+        let timestamp = body["timestamp"].as_u64().unwrap_or(0);
+        let sig = vtessera_offer::sign_heartbeat(node_id, timestamp, &key);
+        Request {
+            method: Method::Post,
+            path: format!("/offers/{node_id}/heartbeat"),
+            headers: vec![("x-signature".into(), sig)],
+            body: serde_json::to_vec(&body).unwrap_or_default(),
+        }
+    }
+
     #[test]
     fn register_verifies_signature_and_node_id() {
         let node_id = signed_node_id(1);
@@ -715,7 +781,7 @@ mod tests {
     fn register_rejects_tampered_offer() {
         let node_id = signed_node_id(1);
         let mut offer = offer(&node_id, paid(), 1);
-        offer.body.endpoint = "https://imposter.example".into();
+        offer.body.endpoint = vec!["https://imposter.example".into()];
         let mut state = IndexState::new();
         assert!(matches!(
             state.register(offer, "push".into(), NOW),
@@ -1175,17 +1241,15 @@ mod tests {
             .register(offer(&node, paid(), 1), "push".into(), NOW)
             .unwrap();
 
-        let body = r#"{"candidates":[{"kind":"host","transport":"iroh_quic","addr":"203.0.113.1:8402","priority":100}]}"#;
-        let r = dispatch(
-            &mut state,
-            Request {
-                method: Method::Post,
-                path: format!("/offers/{node}/heartbeat"),
-                headers: vec![],
-                body: body.as_bytes().to_vec(),
-            },
-            NOW + 10,
+        let req = heartbeat_req(
+            &node,
+            1,
+            json!({
+                "timestamp": NOW + 10,
+                "candidates": [{"kind":"host","transport":"iroh_quic","addr":"203.0.113.1:8402","priority":100}],
+            }),
         );
+        let r = dispatch(&mut state, req, NOW + 10);
         assert_eq!(r.status, 200);
         let entry = state.get(&node).unwrap();
         assert_eq!(entry.candidates.len(), 1);
@@ -1195,17 +1259,63 @@ mod tests {
     #[test]
     fn dispatch_heartbeat_unknown_node_is_404() {
         let mut state = IndexState::new();
+        let req = heartbeat_req("nope", 1, json!({ "timestamp": NOW }));
+        let r = dispatch(&mut state, req, NOW);
+        assert_eq!(r.status, 404);
+    }
+
+    #[test]
+    fn dispatch_heartbeat_rejects_forged_signature() {
+        let node = signed_node_id(1);
+        let mut state = IndexState::new();
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW)
+            .unwrap();
+
+        // Impostor signs a heartbeat for this node with a different key.
+        let req = heartbeat_req(&node, 7, json!({ "timestamp": NOW + 5 }));
+        let r = dispatch(&mut state, req, NOW + 5);
+        assert_eq!(r.status, 403);
+        // Liveness is untouched — the forged heartbeat must not extend it.
+        assert_eq!(state.get(&node).unwrap().last_heartbeat_unix, 0);
+    }
+
+    #[test]
+    fn dispatch_heartbeat_missing_signature_or_timestamp_is_400() {
+        let node = signed_node_id(1);
+        let mut state = IndexState::new();
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW)
+            .unwrap();
+
+        // No x-signature header.
         let r = dispatch(
             &mut state,
             Request {
                 method: Method::Post,
-                path: "/offers/nope/heartbeat".into(),
+                path: format!("/offers/{node}/heartbeat"),
                 headers: vec![],
-                body: br#"{}"#.to_vec(),
+                body: br#"{"timestamp":100}"#.to_vec(),
             },
             NOW,
         );
-        assert_eq!(r.status, 404);
+        assert_eq!(r.status, 400);
+
+        // Signature present but no timestamp in the body.
+        let r = dispatch(
+            &mut state,
+            Request {
+                method: Method::Post,
+                path: format!("/offers/{node}/heartbeat"),
+                headers: vec![(
+                    "x-signature".into(),
+                    vtessera_offer::sign_heartbeat(&node, 100, &SigningKey::from_bytes(&[1u8; 32])),
+                )],
+                body: br#"{"candidates":[]}"#.to_vec(),
+            },
+            NOW,
+        );
+        assert_eq!(r.status, 400);
     }
 
     #[test]
@@ -1283,31 +1393,14 @@ mod tests {
             .unwrap();
 
         // First two heartbeats succeed.
-        let body = r#"{"candidates":[]}"#;
         for i in 0..2 {
-            let r = dispatch(
-                &mut state,
-                Request {
-                    method: Method::Post,
-                    path: format!("/offers/{node}/heartbeat"),
-                    headers: vec![],
-                    body: body.as_bytes().to_vec(),
-                },
-                NOW + i,
-            );
+            let req = heartbeat_req(&node, 1, json!({ "timestamp": NOW + i }));
+            let r = dispatch(&mut state, req, NOW + i);
             assert_eq!(r.status, 200, "heartbeat {i} should succeed");
         }
         // Third is rate-limited.
-        let r = dispatch(
-            &mut state,
-            Request {
-                method: Method::Post,
-                path: format!("/offers/{node}/heartbeat"),
-                headers: vec![],
-                body: body.as_bytes().to_vec(),
-            },
-            NOW + 2,
-        );
+        let req = heartbeat_req(&node, 1, json!({ "timestamp": NOW + 2 }));
+        let r = dispatch(&mut state, req, NOW + 2);
         assert_eq!(r.status, 429);
     }
 

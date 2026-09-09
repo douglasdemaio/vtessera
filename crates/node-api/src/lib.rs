@@ -336,7 +336,7 @@ fn handle_agent_card(state: &NodeState) -> HttpResponse {
     let card = serde_json::json!({
         "name": mcp::MCP_SERVER_NAME,
         "description": "Vtessera compute seller node: signed compute offers over MCP + x402; paid offers settle in EURC/USDC.",
-        "url": state.offer.body.endpoint,
+        "url": state.offer.body.endpoint.first().cloned().unwrap_or_default(),
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": { "streaming": false, "pushNotifications": false },
         "authentication": { "schemes": ["none"], "credentials": false },
@@ -655,7 +655,16 @@ pub fn mcp_manifest(state: &NodeState) -> String {
     s.push_str("Free offers execute directly; paid offers return 402 (x402) ");
     s.push_str("until a signed payment is attached.\",");
     s.push_str("\"endpoint\":");
-    json_string(&state.offer.body.endpoint, &mut s);
+    json_string(
+        state
+            .offer
+            .body
+            .endpoint
+            .first()
+            .map(String::as_str)
+            .unwrap_or(""),
+        &mut s,
+    );
     s.push_str("}]}");
     s
 }
@@ -695,7 +704,8 @@ mod tests {
         let body = OfferBody {
             schema_ver: OFFER_SCHEMA_VER,
             node_id,
-            endpoint: "https://node.example/v1".into(),
+            endpoint_id: hex::encode(key.verifying_key().to_bytes()),
+            endpoint: vec!["https://node.example/v1".into()],
             device: AdvertisedDevice::Cpu {
                 vcpus: 4,
                 mem_mb: 16 * 1024,

@@ -50,6 +50,16 @@ struct Ui {
     port_spin: gtk4::SpinButton,
     endpoint_entry: gtk4::Entry,
     detect_btn: gtk4::Button,
+    connectivity_dd: gtk4::DropDown,
+    coordinator_entry: gtk4::Entry,
+    // Rows toggled by connectivity mode.
+    port_caption: gtk4::Label,
+    endpoint_caption: gtk4::Label,
+    endpoint_row: gtk4::Box,
+    upnp_caption: gtk4::Label,
+    upnp_hint: gtk4::Label,
+    coordinator_caption: gtk4::Label,
+    coordinator_hint: gtk4::Label,
     escrow_entry: gtk4::Entry,
     network_dd: gtk4::DropDown,
     network_custom_entry: gtk4::Entry,
@@ -72,6 +82,7 @@ struct Ui {
     // Dashboard cards
     status_value: gtk4::Label,
     nodeid_value: gtk4::Label,
+    connector_value: gtk4::Label,
     cpu_value: gtk4::Label,
     cpu_fill: gtk4::Box,
     mem_value: gtk4::Label,
@@ -112,6 +123,22 @@ impl Ui {
         let local = self.local_network_switch.is_active();
         self.marketplace_url_entry.set_visible(!local);
         self.cidr_entry.set_visible(local);
+    }
+
+    /// Show/hide the inbound-listener rows (port, HTTP endpoint, UPnP) vs the
+    /// outbound queue row, based on the connectivity dropdown (P1.8).
+    fn sync_connectivity_sensitivity(&self) {
+        let outbound = self.connectivity_dd.selected() == 1;
+        self.port_caption.set_visible(!outbound);
+        self.port_spin.set_visible(!outbound);
+        self.endpoint_caption.set_visible(!outbound);
+        self.endpoint_row.set_visible(!outbound);
+        self.upnp_caption.set_visible(!outbound);
+        self.upnp_switch.set_visible(!outbound);
+        self.upnp_hint.set_visible(!outbound);
+        self.coordinator_caption.set_visible(outbound);
+        self.coordinator_entry.set_visible(outbound);
+        self.coordinator_hint.set_visible(outbound);
     }
 
     fn set_error(&self, msg: &str) {
@@ -169,6 +196,12 @@ impl Ui {
             upnp_enabled: self.upnp_switch.is_active(),
             local_network: self.local_network_switch.is_active(),
             allowed_cidrs: cidr_list_from_entry(&self.cidr_entry),
+            connectivity: if self.connectivity_dd.selected() == 1 {
+                settings::CONNECTIVITY_OUTBOUND.into()
+            } else {
+                settings::CONNECTIVITY_INBOUND.into()
+            },
+            coordinator_addr: self.coordinator_entry.text().trim().to_string(),
         };
         settings.validate()?;
         Ok(settings)
@@ -198,6 +231,10 @@ impl Ui {
         self.marketplace_switch.set_active(s.marketplace_enabled);
         self.upnp_switch.set_active(s.upnp_enabled);
         self.cidr_entry.set_text(&s.allowed_cidrs.join(", "));
+        self.connectivity_dd
+            .set_selected(if s.is_outbound() { 1 } else { 0 });
+        self.coordinator_entry.set_text(&s.coordinator_addr);
+        self.sync_connectivity_sensitivity();
         self.sync_network_sensitivity();
         self.interval_spin.set_value(s.sample_interval_secs as f64);
         self.backend_dd
@@ -379,6 +416,32 @@ fn refresh_status(ui: &Ui, state: &NodeState) {
     // Update dashboard node ID card.
     let node_id = current_node_id().unwrap_or_else(|| "—".into());
     ui.nodeid_value.set_text(&node_id);
+
+    // T5.1: persistent outbound connector surface. Inbound+dialable talks
+    // HTTP/direct; outbound-only is a persistent iroh connection to the
+    // pinned coordinator queue, visible (not implied) to the user.
+    let connector = if !running {
+        "—".to_string()
+    } else if ui.settings.borrow().is_outbound() {
+        let pin = ui.settings.borrow().coordinator_addr.clone();
+        if pin.is_empty() {
+            "outbound-only node — no inbound port; coordinator unpinned, \
+             idle"
+                .to_string()
+        } else {
+            format!(
+                "outbound-only node — no inbound port; persistent iroh \
+                 connection to coordinator queue {pin}"
+            )
+        }
+    } else {
+        format!("http dial-in on port {}", current_state_port(ui))
+    };
+    ui.connector_value.set_text(&connector);
+}
+
+fn current_state_port(ui: &Ui) -> u16 {
+    ui.port_spin.value() as u16
 }
 
 /// Read the latest receipt file from state_dir and update dashboard CPU/memory cards.
@@ -667,6 +730,16 @@ fn start_node(ui: &Ui, state: &NodeState) {
         node_id: Some(node_id.clone()),
         marketplace: settings.marketplace_enabled,
         upnp: settings.upnp_enabled,
+        connectivity: if settings.is_outbound() {
+            settings::CONNECTIVITY_OUTBOUND
+        } else {
+            settings::CONNECTIVITY_INBOUND
+        },
+        coordinator_addr: if settings.is_outbound() && !settings.coordinator_addr.is_empty() {
+            Some(settings.coordinator_addr.as_str())
+        } else {
+            None
+        },
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,
@@ -676,6 +749,18 @@ fn start_node(ui: &Ui, state: &NodeState) {
         }
     };
     let node_reused = daemons.node_reused;
+
+    if settings.is_outbound() {
+        ui.log_line(&format!(
+            "starting in OUTBOUND-ONLY mode — this node opens no inbound port; \
+             work will be pulled from the coordinator queue ({}) over iroh.",
+            if settings.coordinator_addr.is_empty() {
+                "unpinned, waiting"
+            } else {
+                settings.coordinator_addr.as_str()
+            }
+        ));
+    }
 
     let tx = state.log_pending.clone();
     daemon::pump_output(&mut daemons, move |line| {
@@ -778,6 +863,7 @@ fn build_ui(app: &gtk4::Application) {
 
     let (status_card, _, status_value) = make_card("STATUS");
     let (nodeid_card, _, nodeid_value) = make_card("NODE ID");
+    let (connector_card, _, connector_value) = make_card("CONNECTOR");
     let (cpu_card, cpu_value, cpu_fill) = make_card_with_bar("CPU", "cpu-accent");
     let (mem_card, mem_value, mem_fill) = make_card_with_bar("MEMORY", "mem-accent");
 
@@ -804,6 +890,21 @@ fn build_ui(app: &gtk4::Application) {
     let (avgcpu_box, avgcpu_val) = make_summary("Avg CPU");
     let jobs_list = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
 
+    let ui_port_caption = gtk4::Label::new(Some("Port"));
+    let ui_endpoint_caption = gtk4::Label::new(Some("Advertised endpoint"));
+    let ui_endpoint_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+    let ui_upnp_caption = gtk4::Label::new(Some("UPnP port forward"));
+    let ui_upnp_hint = gtk4::Label::new(Some(
+        "Automatically forward port on your router via UPnP so agents\n\
+         on the internet can reach this node. Recommended for paid mode.",
+    ));
+    let ui_coordinator_caption = gtk4::Label::new(Some("Coordinator queue"));
+    let ui_coordinator_hint = gtk4::Label::new(Some(
+        "Outbound-only mode: this node opens NO inbound port. Work is pulled \
+         from the coordinator queue you pin here. Put the path to the \
+         coordinator's EndpointAddr JSON, or `endpoint=<json>` / `queue=<path>`.",
+    ));
+
     let ui = Rc::new(Ui {
         settings: Rc::new(RefCell::new(initial.clone())),
         free_btn: gtk4::ToggleButton::with_label("Donate (free)"),
@@ -818,6 +919,18 @@ fn build_ui(app: &gtk4::Application) {
         ),
         endpoint_entry: gtk4::Entry::new(),
         detect_btn: gtk4::Button::with_label("Detect"),
+        connectivity_dd: gtk4::DropDown::from_strings(&[
+            "Internet + direct dial (inbound)",
+            "Outbound-only (coordinator queue)",
+        ]),
+        coordinator_entry: gtk4::Entry::new(),
+        port_caption: ui_port_caption,
+        endpoint_caption: ui_endpoint_caption,
+        endpoint_row: ui_endpoint_row,
+        upnp_caption: ui_upnp_caption,
+        upnp_hint: ui_upnp_hint,
+        coordinator_caption: ui_coordinator_caption,
+        coordinator_hint: ui_coordinator_hint,
         escrow_entry: gtk4::Entry::new(),
         network_dd: gtk4::DropDown::from_strings(&["Solana Devnet", "Solana Mainnet", "Custom"]),
         network_custom_entry: gtk4::Entry::new(),
@@ -844,6 +957,7 @@ fn build_ui(app: &gtk4::Application) {
         stop_btn: gtk4::Button::with_label("Stop"),
         status_value,
         nodeid_value,
+        connector_value,
         cpu_value,
         cpu_fill,
         mem_value,
@@ -913,25 +1027,70 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&price_box, 1, row, 1, 1);
     row += 1;
 
-    let port_caption = gtk4::Label::new(Some("Port"));
+    let port_caption = &ui.port_caption;
     port_caption.set_xalign(0.0);
-    grid.attach(&port_caption, 0, row, 1, 1);
+    grid.attach(port_caption, 0, row, 1, 1);
     ui.port_spin.set_hexpand(true);
     ui.port_spin.set_halign(gtk4::Align::Start);
     grid.attach(&ui.port_spin, 1, row, 1, 1);
     row += 1;
 
-    let endpoint_caption = gtk4::Label::new(Some("Advertised endpoint"));
+    let endpoint_caption = &ui.endpoint_caption;
     endpoint_caption.set_xalign(0.0);
-    grid.attach(&endpoint_caption, 0, row, 1, 1);
-    let endpoint_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+    grid.attach(endpoint_caption, 0, row, 1, 1);
+    let endpoint_row = &ui.endpoint_row;
     ui.endpoint_entry
         .set_placeholder_text(Some("http://your-public-ip:8402"));
     ui.endpoint_entry.set_hexpand(true);
     endpoint_row.append(&ui.endpoint_entry);
     ui.detect_btn.set_halign(gtk4::Align::End);
     endpoint_row.append(&ui.detect_btn);
-    grid.attach(&endpoint_row, 1, row, 1, 1);
+    grid.attach(endpoint_row, 1, row, 1, 1);
+    row += 1;
+
+    // Connectivity: inbound+dialable (default during transition) vs
+    // outbound-only (no inbound listener; work pulled from a coordinator
+    // queue over iroh — P1.3/P1.5/P1.8). Mirrors `--connectivity` on the node.
+    let connectivity_caption = gtk4::Label::new(Some("Connectivity"));
+    connectivity_caption.set_xalign(0.0);
+    grid.attach(&connectivity_caption, 0, row, 1, 1);
+    ui.connectivity_dd.set_halign(gtk4::Align::Start);
+    grid.attach(&ui.connectivity_dd, 1, row, 1, 1);
+    row += 1;
+
+    // Coordinator queue (shown only in outbound-only mode).
+    let coordinator_caption = &ui.coordinator_caption;
+    coordinator_caption.set_xalign(0.0);
+    grid.attach(coordinator_caption, 0, row, 1, 1);
+    ui.coordinator_entry
+        .set_placeholder_text(Some("path/to/coordinator-endpoint.json"));
+    ui.coordinator_entry.set_hexpand(true);
+    ui.coordinator_entry.set_visible(false);
+    grid.attach(&ui.coordinator_entry, 1, row, 1, 1);
+    row += 1;
+
+    let coordinator_hint = &ui.coordinator_hint;
+    coordinator_hint.set_wrap(true);
+    coordinator_hint.set_xalign(0.0);
+    coordinator_hint.add_css_class("dim-label");
+    coordinator_hint.set_visible(false);
+    grid.attach(coordinator_hint, 0, row, 2, 1);
+    row += 1;
+
+    // UPnP (inbound only; moot when there is no inbound port).
+    let upnp_caption = &ui.upnp_caption;
+    upnp_caption.set_xalign(0.0);
+    grid.attach(upnp_caption, 0, row, 1, 1);
+    ui.upnp_switch.set_halign(gtk4::Align::Start);
+    ui.upnp_switch.set_valign(gtk4::Align::Center);
+    grid.attach(&ui.upnp_switch, 1, row, 1, 1);
+    row += 1;
+
+    let upnp_hint = &ui.upnp_hint;
+    upnp_hint.set_wrap(true);
+    upnp_hint.set_xalign(0.0);
+    upnp_hint.add_css_class("dim-label");
+    grid.attach(upnp_hint, 0, row, 2, 1);
     row += 1;
 
     let escrow_caption = gtk4::Label::new(Some("Escrow account"));
@@ -1003,24 +1162,6 @@ fn build_ui(app: &gtk4::Application) {
     marketplace_hint.set_xalign(0.0);
     marketplace_hint.add_css_class("dim-label");
     grid.attach(&marketplace_hint, 0, row, 2, 1);
-    row += 1;
-
-    let upnp_caption = gtk4::Label::new(Some("UPnP port forward"));
-    upnp_caption.set_xalign(0.0);
-    grid.attach(&upnp_caption, 0, row, 1, 1);
-    ui.upnp_switch.set_halign(gtk4::Align::Start);
-    ui.upnp_switch.set_valign(gtk4::Align::Center);
-    grid.attach(&ui.upnp_switch, 1, row, 1, 1);
-    row += 1;
-
-    let upnp_hint = gtk4::Label::new(Some(
-        "Automatically forward port on your router via UPnP so agents\n\
-         on the internet can reach this node. Recommended for paid mode.",
-    ));
-    upnp_hint.set_wrap(true);
-    upnp_hint.set_xalign(0.0);
-    upnp_hint.add_css_class("dim-label");
-    grid.attach(&upnp_hint, 0, row, 2, 1);
     row += 1;
 
     let cidr_caption = gtk4::Label::new(Some("Allowed CIDRs"));
@@ -1108,9 +1249,10 @@ fn build_ui(app: &gtk4::Application) {
 
     dashboard_grid.attach(&status_card, 0, 0, 1, 1);
     dashboard_grid.attach(&nodeid_card, 1, 0, 1, 1);
-    dashboard_grid.attach(&cpu_card, 0, 1, 1, 1);
-    dashboard_grid.attach(&mem_card, 1, 1, 1, 1);
-    dashboard_grid.attach(&last_job_card.0, 0, 2, 2, 1);
+    dashboard_grid.attach(&connector_card, 0, 2, 2, 1);
+    dashboard_grid.attach(&cpu_card, 0, 3, 1, 1);
+    dashboard_grid.attach(&mem_card, 1, 3, 1, 1);
+    dashboard_grid.attach(&last_job_card.0, 0, 4, 2, 1);
 
     dashboard_page.append(&dashboard_grid);
 
@@ -1243,6 +1385,12 @@ fn build_ui(app: &gtk4::Application) {
                 }
             }
         }
+    });
+
+    // Connectivity dropdown: show/hide inbound-listener vs coordinator rows.
+    ui.connectivity_dd.connect_selected_notify({
+        let ui = ui.clone();
+        move |_dd| ui.sync_connectivity_sensitivity()
     });
 
     // Local network toggle: show/hide marketplace and CIDR fields.

@@ -40,6 +40,8 @@ serve = [
     "dep:vtessera-settlement",
     "dep:vtessera-transport",
     "vtessera-transport/serve",
+    "dep:vtessera-coordinator",
+    "vtessera-coordinator/serve",
     "dep:iroh",
     "dep:ureq",
     "dep:sha2",
@@ -74,6 +76,9 @@ vtessera-executor = { path = "../executor", optional = true }
 vtessera-settlement = { path = "../settlement", optional = true }
 vtessera-mini-http = { path = "../mini-http", optional = true }
 vtessera-transport = { path = "../transport", optional = true }
+# P1.5/P1.7: the opt-in coordinator queue client, used by the node's outbound
+# pull loop. Only linked under `serve` (the library stays socket-free).
+vtessera-coordinator = { path = "../coordinator", optional = true, features = ["serve"] }
 iroh = { workspace = true, optional = true }
 # Outbound HTTP for the offer-index publish loop + claim gate + MCP discover
 # (serve only — the default library build stays socket-free).

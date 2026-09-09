@@ -28,3 +28,8 @@ serve = ["dep:ureq", "dep:iroh", "dep:rand", "dep:rand_core", "dep:tokio", "dep:
 [[example]]
 name = "iroh_client"
 required-features = ["serve"]
+
+[dev-dependencies]
+# Test-only: cross-check the iroh EndpointId against the same Ed25519
+# public key that signs offers (design P1.4, test 6a-5).
+ed25519-dalek = { workspace = true }

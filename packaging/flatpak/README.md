@@ -17,12 +17,16 @@ packaging/flatpak/
 └── .gitignore
 ```
 
-The manifest builds four binaries and installs them to `/app/bin`:
+The manifest builds these binaries and installs them to `/app/bin`:
 
 - `vtessera-gui` — the GTK4 front-end (the app users launch)
 - `vtesserad` — the v0 metering daemon (spawned by the GUI)
 - `vtessera-node` — the agent-facing HTTP server (spawned by the GUI)
 - `vtessera-mcp` — the stdio MCP server (for agent tool discovery)
+- `vtessera-offer-index` — the LAN offer-index (for `discover`)
+- `vtessera-agent` — the agent CLI (for `vtessera-agent submit`)
+- `vtessera-coordinator` — the opt-in queue/rendezvous daemon for
+  outbound-only nodes (P1.7; not started by default)
 
 ## Build
 

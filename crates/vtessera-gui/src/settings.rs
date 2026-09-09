@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_PORT: u16 = 8402;
 pub const DEFAULT_ESCROW: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
 pub const DEFAULT_NETWORK: &str = "solana-devnet";
+/// Connectivity mode: an inbound TCP listener + iroh dial-in (the transition
+/// default, P1.3) vs. outbound-only (no inbound listener; work is pulled from
+/// a pinned coordinator queue, P1.5/P1.7).
+pub const CONNECTIVITY_INBOUND: &str = "inbound+dialable";
+pub const CONNECTIVITY_OUTBOUND: &str = "outbound-only";
 /// Job executor the GUI passes to the spawned `vtessera-node` via `--backend`.
 pub const DEFAULT_BACKEND: &str = "noop-cpu";
 /// Bump when the consent copy or the consent contract changes: a stored
@@ -90,6 +95,21 @@ pub struct Settings {
     /// Best used together with `marketplace_enabled`.
     #[serde(default)]
     pub upnp_enabled: bool,
+    /// Connectivity mode: `inbound+dialable` (default, keeps the HTTP
+    /// listener + iroh dial-in) or `outbound-only` (no inbound listener;
+    /// the node pulls work from a coordinator queue over iroh).
+    #[serde(default = "default_connectivity")]
+    pub connectivity: String,
+    /// Coordinator queue rendezvous for `outbound-only` mode (P1.8): a path
+    /// to the coordinator's `EndpointAddr` JSON (the pin format), or the
+    /// inline string `endpoint=<json>` / `queue=<path>`. Empty when not
+    /// pinned. Ignored in `inbound+dialable` mode.
+    #[serde(default)]
+    pub coordinator_addr: String,
+}
+
+fn default_connectivity() -> String {
+    CONNECTIVITY_INBOUND.into()
 }
 
 fn default_backend() -> String {
@@ -122,6 +142,8 @@ impl Default for Settings {
             marketplace_url: String::new(),
             marketplace_enabled: false,
             upnp_enabled: false,
+            connectivity: CONNECTIVITY_INBOUND.into(),
+            coordinator_addr: String::new(),
         }
     }
 }
@@ -157,6 +179,10 @@ impl Settings {
         self.mode == "free"
     }
 
+    pub fn is_outbound(&self) -> bool {
+        self.connectivity == CONNECTIVITY_OUTBOUND
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !matches!(self.mode.as_str(), "paid" | "free") {
             return Err(format!(
@@ -183,7 +209,13 @@ impl Settings {
             return Err("port must not be 0".into());
         }
         if !(self.endpoint.starts_with("http://") || self.endpoint.starts_with("https://")) {
-            return Err("endpoint must start with http:// or https://".into());
+            // In inbound+dialable mode the endpoint is the advertised HTTP
+            // URL. In outbound-only mode the offer advertises an empty
+            // endpoint list (the node re-signs it) and the callback travels
+            // the coordinator queue instead, so the endpoint is optional.
+            if !self.is_outbound() {
+                return Err("endpoint must start with http:// or https://".into());
+            }
         }
         if self.escrow_account.trim().is_empty() {
             return Err("escrow account must not be empty".into());
@@ -198,6 +230,15 @@ impl Settings {
             return Err(format!(
                 "network_preset must be \"devnet\", \"mainnet\", or \"custom\", got \"{}\"",
                 self.network_preset
+            ));
+        }
+        if !matches!(
+            self.connectivity.as_str(),
+            CONNECTIVITY_INBOUND | CONNECTIVITY_OUTBOUND
+        ) {
+            return Err(format!(
+                "connectivity must be \"{CONNECTIVITY_INBOUND}\" or \"{CONNECTIVITY_OUTBOUND}\", got \"{}\"",
+                self.connectivity
             ));
         }
         if self.is_free() {
@@ -297,6 +338,8 @@ mod tests {
             upnp_enabled: false,
             local_network: false,
             allowed_cidrs: Vec::new(),
+            connectivity: CONNECTIVITY_INBOUND.into(),
+            coordinator_addr: String::new(),
         }
     }
 
@@ -419,5 +462,32 @@ mod tests {
         let _ = std::fs::remove_file(
             std::env::temp_dir().join("vtessera_gui_accept_workloads_test.toml"),
         );
+    }
+
+    #[test]
+    fn connectivity_defaults_inbound_and_validates() {
+        let mut s = valid();
+        assert_eq!(s.connectivity, CONNECTIVITY_INBOUND);
+        assert!(!s.is_outbound());
+        assert!(s.validate().is_ok());
+
+        s.connectivity = CONNECTIVITY_OUTBOUND.into();
+        assert!(s.is_outbound());
+        // Outbound-only: the HTTP endpoint is optional (the offer re-signs an
+        // empty list; work travels the coordinator queue).
+        s.endpoint = String::new();
+        assert!(s.validate().is_ok());
+        s.coordinator_addr = "endpoint={\"a\":1}".into();
+        assert!(s.validate().is_ok());
+
+        s.connectivity = "bogus".into();
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn outbound_requires_valid_mode_string() {
+        let mut s = valid();
+        s.connectivity = "".into();
+        assert!(s.validate().is_err());
     }
 }
