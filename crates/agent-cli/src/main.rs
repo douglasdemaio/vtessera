@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 #[derive(Parser)]
@@ -11,9 +11,16 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Node HTTP endpoint
+    /// Node HTTP endpoint (direct dial)
     #[arg(long, default_value = "http://127.0.0.1:8402", global = true)]
     node: String,
+
+    /// Coordinator queue rendezvous: path to the coordinator's EndpointAddr
+    /// JSON, or the string `endpoint=<endpoint-json>` / `queue=<path>`.
+    /// When set, submit/health/offer rendezvous through the queue instead
+    /// of direct HTTP dial (P1.7e).
+    #[arg(long, global = true)]
+    queue: Option<String>,
 
     /// Offer-index URL
     #[arg(long, default_value = "http://127.0.0.1:8403", global = true)]
@@ -59,6 +66,11 @@ struct DiscoveryFile {
     node_id: Option<String>,
     index: Option<String>,
     pid: Option<u32>,
+    /// Coordinator queue rendezvous for outbound-only nodes (P1.7e): a path
+    /// to the coordinator's `EndpointAddr` JSON. When present, the node is
+    /// reached through the queue rather than a direct HTTP dial.
+    #[allow(dead_code)]
+    queue: Option<String>,
 }
 
 fn discovery_file_path() -> PathBuf {
@@ -119,11 +131,23 @@ fn main() {
         (cli.node, default_index)
     };
 
+    // P1.7e queue rendezvous: an explicit --queue wins; otherwise a
+    // coordinator pin recorded in the discovery file.
+    let queue = match &cli.queue {
+        Some(q) if q.starts_with("queue=") => Some(q.trim_start_matches("queue=").to_owned()),
+        Some(q) => Some(q.clone()),
+        None if cli.local => {
+            let disc = read_discovery();
+            disc.and_then(|d| d.queue)
+        }
+        None => None,
+    };
+
     let result = match &cli.command {
         Commands::Discover => discover(&index, cli.marketplace.as_deref(), json),
-        Commands::Offer => offer(&node, json),
-        Commands::Submit { job } => submit(&node, &agent_id, job, json),
-        Commands::Health => health(&node, json),
+        Commands::Offer => offer(&node, queue.as_deref(), json),
+        Commands::Submit { job } => submit(&node, queue.as_deref(), &agent_id, job, json),
+        Commands::Health => health(&node, queue.as_deref(), json),
     };
 
     if let Err(e) = result {
@@ -134,6 +158,18 @@ fn main() {
 
 fn agent() -> ureq::Agent {
     ureq::Agent::new_with_defaults()
+}
+
+/// Extract the primary reachability endpoint from an offer body.
+///
+/// The offer schema (v2) carries `endpoint` as a list; older offers
+/// (v1, still in flight) used a bare string. Accept either and return the
+/// first entry, mirroring the "ordered list" semantics of the new schema.
+fn offer_endpoint(body: &serde_json::Value) -> Option<String> {
+    if let Some(eps) = body["endpoint"].as_array() {
+        return eps.first().and_then(|e| e.as_str()).map(String::from);
+    }
+    body["endpoint"].as_str().map(String::from)
 }
 
 fn discover(index: &str, marketplace: Option<&str>, json: bool) -> Result<(), String> {
@@ -166,7 +202,7 @@ fn discover(index: &str, marketplace: Option<&str>, json: bool) -> Result<(), St
             resp["offers"].as_array().cloned().unwrap_or_default()
         };
         for o in arr {
-            if let Some(ep) = o["offer"]["body"]["endpoint"].as_str() {
+            if let Some(ep) = offer_endpoint(&o["offer"]["body"]) {
                 if seen_endpoints.insert(ep.to_string()) {
                     offers.push(o);
                 }
@@ -179,7 +215,7 @@ fn discover(index: &str, marketplace: Option<&str>, json: bool) -> Result<(), St
         if let Some(nodes) = resp["nodes"].as_array() {
             for node in nodes {
                 if let Some(offer) = node.get("offer") {
-                    if let Some(ep) = offer["body"]["endpoint"].as_str() {
+                    if let Some(ep) = offer_endpoint(&offer["body"]) {
                         if seen_endpoints.insert(ep.to_string()) {
                             offers.push(offer.clone());
                         }
@@ -219,14 +255,45 @@ fn discover(index: &str, marketplace: Option<&str>, json: bool) -> Result<(), St
         };
         let node_id = body["node_id"].as_str().unwrap_or("?");
         let device = body["device"]["kind"].as_str().unwrap_or("?");
-        let endpoint = body["endpoint"].as_str().unwrap_or("?");
+        let endpoint = offer_endpoint(body).unwrap_or_else(|| "?".into());
         println!("{node_id:<20} {device:<15} {endpoint:<40}");
     }
     println!("\n{} node(s) found", offers.len());
     Ok(())
 }
 
-fn offer(node: &str, json: bool) -> Result<(), String> {
+/// Load a coordinator `EndpointAddr` from its JSON pin (a path, or the
+/// literal JSON when the queue was passed inline).
+fn load_coordinator_addr(queue: &str) -> Result<iroh::EndpointAddr, String> {
+    let raw = if Path::new(queue).exists() {
+        std::fs::read_to_string(queue).map_err(|e| format!("read {queue:?}: {e}"))?
+    } else {
+        queue.to_owned()
+    };
+    serde_json::from_str(&raw).map_err(|e| format!("parse coordinator EndpointAddr: {e}"))
+}
+
+/// Build a queue client for the pinned coordinator (fresh outbound iroh
+/// endpoint, no listener — mirrors the node's outbound pull path).
+fn queue_client(queue: &str) -> Result<vtessera_coordinator::iroh::QueueClient, String> {
+    let addr = load_coordinator_addr(queue)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+    rt.block_on(async move {
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .bind()
+            .await
+            .map_err(|e| format!("bind iroh endpoint: {e}"))?;
+        Ok(vtessera_coordinator::iroh::QueueClient::new(endpoint, addr))
+    })
+}
+
+fn offer(node: &str, queue: Option<&str>, json: bool) -> Result<(), String> {
+    if let Some(q) = queue {
+        return queue_render("offer", q, json);
+    }
     let url = format!("{node}/offer");
     let resp: serde_json::Value = agent()
         .get(&url)
@@ -241,7 +308,7 @@ fn offer(node: &str, json: bool) -> Result<(), String> {
     } else {
         let body = &resp["body"];
         let node_id = body["node_id"].as_str().unwrap_or("?");
-        let endpoint = body["endpoint"].as_str().unwrap_or("?");
+        let endpoint = offer_endpoint(body).unwrap_or_else(|| "?".into());
         let device = body["device"]["kind"].as_str().unwrap_or("?");
         let price = if body["price"]["mode"].as_str() == Some("free") {
             "free".to_string()
@@ -263,9 +330,47 @@ fn offer(node: &str, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn submit(node: &str, agent_id: &str, job_path: &str, json: bool) -> Result<(), String> {
+fn submit(
+    node: &str,
+    queue: Option<&str>,
+    agent_id: &str,
+    job_path: &str,
+    json: bool,
+) -> Result<(), String> {
     let job_json =
         std::fs::read_to_string(job_path).map_err(|e| format!("failed to read {job_path}: {e}"))?;
+    let job: serde_json::Value = serde_json::from_str(&job_json)
+        .map_err(|e| format!("invalid job JSON in {job_path}: {e}"))?;
+
+    // Queue rendezvous: enqueue over iroh, the node pulls + runs + acks.
+    if let Some(q) = queue {
+        let client = queue_client(q)?;
+        let coordinator = client.coordinator_id_hex();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("tokio runtime: {e}"))?;
+        let scoped_id = rt
+            .block_on(client.enqueue(job))
+            .map_err(|e| format!("enqueue failed: {e}"))?;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "queued",
+                    "coordinator_id": coordinator,
+                    "job_id": format!("{}", scoped_id.display()),
+                    "mode": "queue-rendezvous"
+                })
+            );
+        } else {
+            println!("status:  queued");
+            println!("coordinator: {coordinator}");
+            println!("job_id:  {}", scoped_id.display());
+            println!("mode:    queue-rendezvous (node pulls from queue)");
+        }
+        return Ok(());
+    }
 
     let url = format!("{node}/jobs");
     let resp: serde_json::Value = agent()
@@ -296,7 +401,10 @@ fn submit(node: &str, agent_id: &str, job_path: &str, json: bool) -> Result<(), 
     Ok(())
 }
 
-fn health(node: &str, json: bool) -> Result<(), String> {
+fn health(node: &str, queue: Option<&str>, json: bool) -> Result<(), String> {
+    if let Some(q) = queue {
+        return queue_render("health", q, json);
+    }
     let url = format!("{node}/healthz");
     let body = agent()
         .get(&url)
@@ -310,6 +418,33 @@ fn health(node: &str, json: bool) -> Result<(), String> {
         println!("{}", serde_json::json!({"status": body.trim()}));
     } else {
         println!("{}", body.trim());
+    }
+    Ok(())
+}
+
+/// Render offer/health through the queue rendezvous. Reachability is proven
+/// by successfully dialing the coordinator; job/offer detail arrives when
+/// the node pulls (P1.7e).
+fn queue_render(cmd: &str, queue: &str, json: bool) -> Result<(), String> {
+    let _client = queue_client(queue)?;
+    let addr = load_coordinator_addr(queue)?;
+    let coordinator = hex::encode(addr.id.as_bytes());
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "mode": "queue-rendezvous",
+                "coordinator_id": coordinator,
+                "reachability": "coordinator dialed ok",
+                "note": "node is outbound-only; job/offer detail arrives after the node pulls"
+            })
+        );
+    } else {
+        println!("mode:          queue-rendezvous");
+        println!("operation:     {cmd}");
+        println!("coordinator:   {coordinator}");
+        println!("reachability:  coordinator dialed ok");
+        println!("note:          node is outbound-only; pull path delivers jobs/results");
     }
     Ok(())
 }

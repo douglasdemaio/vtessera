@@ -90,6 +90,8 @@ mod tests {
             upnp_enabled: false,
             local_network: false,
             allowed_cidrs: Vec::new(),
+            connectivity: crate::settings::CONNECTIVITY_INBOUND.into(),
+            coordinator_addr: String::new(),
         }
     }
 

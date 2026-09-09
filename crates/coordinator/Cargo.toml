@@ -1,0 +1,45 @@
+[package]
+name = "vtessera-coordinator"
+description = "Vtessera coordinator — opt-in queue/rendezvous for outbound-only nodes (no money touch)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "vtessera_coordinator"
+path = "src/lib.rs"
+
+# The iroh QUIC server binary and binding are gated behind the `serve`
+# feature like node-api: the default library build is pure logic + ser-de,
+# opens no sockets, and links no per-coordinator transport.
+[[bin]]
+name = "vtessera-coordinator"
+path = "src/bin/coordinator.rs"
+required-features = ["serve"]
+
+[features]
+default = []
+serve = [
+    "dep:iroh",
+    "dep:tokio",
+    "dep:futures-util",
+    "dep:rand",
+    "dep:vtessera-transport",
+    "vtessera-transport/serve",
+]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Coordinator identity is an Ed25519 pubkey and coordinators sign what they
+# emit (design §4b-1/2) — same curve/key size as the node's FR-M2 seed.
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+# The queue rides inside iroh (invariant #2): reuse the vtessera ALPN and the
+# transport layer's candidates/candidate kinds when serve is enabled.
+vtessera-transport = { path = "../transport", optional = true }
+iroh = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+futures-util = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }

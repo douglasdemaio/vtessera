@@ -34,3 +34,4 @@ ureq = { workspace = true, optional = true }
 [dev-dependencies]
 # Test-only: build a deterministic SigningKey to construct test offers.
 ed25519-dalek = { workspace = true }
+hex = { workspace = true }

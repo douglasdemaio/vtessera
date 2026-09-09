@@ -78,11 +78,16 @@ use vtessera_settlement::{
 };
 
 #[cfg(feature = "serve")]
+use vtessera_coordinator::iroh::QueueClient;
+#[cfg(feature = "serve")]
+use vtessera_coordinator::CoordinatorPayload;
+#[cfg(feature = "serve")]
 use vtessera_transport::iroh_sidecar::{self, IrohEndpoint};
 
 const DEFAULT_PUBLISH_INTERVAL_SECS: u64 = 60;
 const DEFAULT_HEARTBEAT_SECS: u64 = 30;
 const DEFAULT_MARKETPLACE_INTERVAL_SECS: u64 = 3600;
+const DEFAULT_COORDINATOR_POLL_SECS: u64 = 5;
 const INDEX_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn usage_and_exit() -> ! {
@@ -96,11 +101,42 @@ fn usage_and_exit() -> ! {
         [--net-backend tap|macvtap] [--net-bridge <name>] \
         [--net-enforcement guest|host|both] \
         [--rpc-url <solana-rpc>] \
+        [--connectivity inbound+dialable|outbound-only] \
         [--publish <index-url>] [--publish-interval <secs>] \
         [--marketplace] [--marketplace-interval <secs>] \
-        [--upnp]"
+        [--upnp] \
+        [--coordinator-addr <endpoint-addr.json>] [--coordinator-poll <secs>]"
     );
     process::exit(2);
+}
+
+/// How the node exposes itself on the network.
+///
+/// `inbound+dialable` (the default) opens a TCP listener and accepts inbound
+/// iroh QUIC connections, so agents dial it directly. `outbound-only` opens
+/// no listening socket at all and advertises no dialable endpoint; work
+/// reaches the node only via an outbound dispatch path (a coordinator —
+/// P1.5). The default stays inbound+dialable during the transition so
+/// nothing breaks before coordinators exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectivityMode {
+    InboundDialable,
+    OutboundOnly,
+}
+
+impl ConnectivityMode {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "inbound+dialable" => Some(ConnectivityMode::InboundDialable),
+            "outbound-only" => Some(ConnectivityMode::OutboundOnly),
+            _ => None,
+        }
+    }
+}
+
+/// Whether this mode keeps (or skips) the inbound TCP listener + iroh router.
+fn wants_inbound_listener(mode: ConnectivityMode) -> bool {
+    mode == ConnectivityMode::InboundDialable
 }
 
 struct Args {
@@ -127,6 +163,17 @@ struct Args {
     /// Auto-forward the bind port on the home router via UPnP IGD so the
     /// node is reachable from the internet without a manual port-forward.
     upnp: bool,
+    /// How the node exposes itself (see [`ConnectivityMode`]).
+    connectivity: ConnectivityMode,
+    /// Optional path to a JSON file with the coordinator's `EndpointAddr`
+    /// (its EndpointId + addrs). When set, the node runs an outbound pull
+    /// loop against that coordinator's queue and accepts work without any
+    /// inbound listener (`outbound-only`). The coordinator is pinned by this
+    /// address's EndpointId — the node verifies every dispatched offer's
+    /// signature against it (design §4b-2 / P1.5).
+    coordinator_addr: Option<PathBuf>,
+    /// How often to poll the coordinator queue when empty (default 5s).
+    coordinator_poll_interval: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +268,15 @@ impl BackendChoice {
 }
 
 fn parse_args() -> Args {
+    parse_args_from(env::args().skip(1))
+}
+
+/// Testable arg parser — takes the argv slice so unit tests can exercise
+/// the flag matrix without touching the process environment.
+fn parse_args_from<I>(argv: I) -> Args
+where
+    I: IntoIterator<Item = String>,
+{
     let mut bind: Option<String> = None;
     let mut offer_path: Option<String> = None;
     let mut escrow: Option<String> = None;
@@ -239,7 +295,10 @@ fn parse_args() -> Args {
     let mut marketplace = false;
     let mut marketplace_interval: u64 = DEFAULT_MARKETPLACE_INTERVAL_SECS;
     let mut upnp = false;
-    let mut it = env::args().skip(1);
+    let mut connectivity = ConnectivityMode::InboundDialable;
+    let mut coordinator_addr: Option<PathBuf> = None;
+    let mut coordinator_poll: u64 = DEFAULT_COORDINATOR_POLL_SECS;
+    let mut it = argv.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--bind" => bind = it.next(),
@@ -291,6 +350,16 @@ fn parse_args() -> Args {
                 }
             }
             "--upnp" => upnp = true,
+            "--connectivity" => {
+                let raw = it.next().unwrap_or_else(|| usage_and_exit());
+                connectivity = ConnectivityMode::parse(&raw).unwrap_or_else(|| usage_and_exit());
+            }
+            "--coordinator-addr" => coordinator_addr = it.next().map(PathBuf::from),
+            "--coordinator-poll" => {
+                if let Some(s) = it.next() {
+                    coordinator_poll = s.parse().unwrap_or(DEFAULT_COORDINATOR_POLL_SECS);
+                }
+            }
             "--backend" => {
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 backend = BackendChoice::parse(&raw).unwrap_or_else(|| usage_and_exit());
@@ -322,6 +391,9 @@ fn parse_args() -> Args {
             marketplace,
             marketplace_interval: Duration::from_secs(marketplace_interval),
             upnp,
+            connectivity,
+            coordinator_addr,
+            coordinator_poll_interval: Duration::from_secs(coordinator_poll),
         },
         _ => usage_and_exit(),
     }
@@ -960,12 +1032,29 @@ fn main() {
     // create the iroh endpoint from the same secret key and re-sign for marketplace.
     let signing_key_for_iroh = signing_key.clone();
     let signing_key_for_marketplace = signing_key.clone();
+    let signing_key_for_heartbeat = signing_key.clone();
 
     let identity = NodeIdentity {
         signing_key,
         node_id: node_id.clone(),
         payout_id,
         receipts_dir,
+    };
+
+    // Outbound-only mode never accepts inbound connections, so advertising a
+    // dialable endpoint would be dishonest. Re-sign the offer with an empty
+    // endpoint list — reachability arrives later via the outbound dispatch
+    // path (coordinator, P1.5). Inbound+dialable nodes keep their endpoints.
+    let offer = if args.connectivity == ConnectivityMode::OutboundOnly {
+        eprintln!(
+            "vtessera-node: connectivity=outbound-only — no inbound listener; \
+             advertising an empty endpoint list (direct dial disabled)"
+        );
+        let mut body = offer.body.clone();
+        body.endpoint.clear();
+        vtessera_offer::sign(body, &signing_key_for_marketplace)
+    } else {
+        offer
     };
     let runner = args.backend.build(
         &identity,
@@ -982,9 +1071,11 @@ fn main() {
 
     // Start iroh endpoint early so both heartbeat and accept loops can use it.
     // The endpoint connects to the default relay servers so nodes behind NAT
-    // can be reached by agents through the relay.
+    // can be reached by agents through the relay. Outbound-only nodes skip it
+    // entirely — it both listens for inbound QUIC and opens a local UDP
+    // socket, and the whole point of that mode is no listening surface.
     let iroh_endpoint: Option<Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>> =
-        if args.publish.is_some() {
+        if args.publish.is_some() && wants_inbound_listener(args.connectivity) {
             Some(start_iroh_endpoint(&signing_key_for_iroh))
         } else {
             None
@@ -1000,9 +1091,18 @@ fn main() {
             }
             spawn_publisher(url.clone(), offer_json, args.publish_interval);
 
-            if let Some(ref ep) = iroh_endpoint {
-                spawn_heartbeat_with_iroh(url.clone(), node_id.clone(), ep.clone());
-            }
+            // Heartbeat on an interval regardless of iroh: liveness proof (and
+            // candidate refresh when an iroh endpoint exists) works even for
+            // an outbound-only node with no endpoint info to report.
+            let ep_handle = iroh_endpoint
+                .clone()
+                .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(None)));
+            spawn_heartbeat_with_iroh(
+                url.clone(),
+                node_id.clone(),
+                ep_handle,
+                signing_key_for_heartbeat,
+            );
 
             Some(Arc::new(client) as Arc<dyn IndexClient>)
         }
@@ -1014,7 +1114,9 @@ fn main() {
     // registering with any marketplace. This makes a paid node behind a home
     // NAT reachable from the internet without a manual port-forward. The
     // returned external IP (if any) is what agents on other networks use.
-    let upnp_external_ip: Option<String> = if args.upnp {
+    // Skipped entirely in outbound-only mode (no inbound port to forward).
+    let upnp_external_ip: Option<String> = if args.upnp && wants_inbound_listener(args.connectivity)
+    {
         match upnp_add_port_forward(&args.bind) {
             Ok(ip) => {
                 eprintln!("vtessera-node: UPnP port forward OK (external IP: {ip})");
@@ -1103,56 +1205,205 @@ fn main() {
         index,
     };
 
-    let listener = TcpListener::bind(&args.bind).unwrap_or_else(|e| {
-        eprintln!("bind {}: {e}", args.bind);
-        process::exit(1);
-    });
-    eprintln!(
-        "vtessera-node: listening on {} (backend {:?}{})",
-        args.bind,
-        args.backend,
-        match &args.publish {
-            Some(u) => format!(", publishing to {u}"),
-            None => String::new(),
-        }
-    );
-
-    // Thread-per-connection with a hard cap lives in mini-http: a slow or
-    // idle client must not stall every other request, and overload is
-    // refused up front with 503.
-    //
-    // In parallel, the iroh Router accepts incoming QUIC connections from
-    // agents that discovered this node via the offer-index. Each connection
-    // carries an HTTP request over a bi-directional QUIC stream, which is
-    // dispatched to the same handler as TCP requests.
-
-    if let Some(ref ep) = iroh_endpoint {
-        spawn_iroh_router(ep, Arc::new(state.clone()));
-    }
-
-    serve(
-        listener,
-        move |req: MiniRequest| {
-            let request = HttpRequest {
-                method: match req.method {
-                    MiniMethod::Get => HttpMethod::Get,
-                    MiniMethod::Post => HttpMethod::Post,
-                    MiniMethod::Delete => HttpMethod::Other,
-                    MiniMethod::Other => HttpMethod::Other,
-                },
-                path: req.path,
-                headers: req.headers,
-                body: req.body,
-            };
-            let resp = dispatch(&state, request);
-            Response {
-                status: resp.status,
-                headers: resp.headers,
-                body: resp.body,
+    if wants_inbound_listener(args.connectivity) {
+        let listener = TcpListener::bind(&args.bind).unwrap_or_else(|e| {
+            eprintln!("bind {}: {e}", args.bind);
+            process::exit(1);
+        });
+        eprintln!(
+            "vtessera-node: listening on {} (backend {:?}{})",
+            args.bind,
+            args.backend,
+            match &args.publish {
+                Some(u) => format!(", publishing to {u}"),
+                None => String::new(),
             }
-        },
-        32,
+        );
+
+        // Thread-per-connection with a hard cap lives in mini-http: a slow or
+        // idle client must not stall every other request, and overload is
+        // refused up front with 503.
+        //
+        // In parallel, the iroh Router accepts incoming QUIC connections from
+        // agents that discovered this node via the offer-index. Each connection
+        // carries an HTTP request over a bi-directional QUIC stream, which is
+        // dispatched to the same handler as TCP requests.
+
+        if let Some(ref ep) = iroh_endpoint {
+            spawn_iroh_router(ep, Arc::new(state.clone()));
+        }
+
+        if let Some(ref path) = args.coordinator_addr {
+            spawn_coordinator_pull(
+                path.clone(),
+                signing_key_for_iroh.to_bytes(),
+                Arc::new(state.clone()),
+                args.coordinator_poll_interval,
+            );
+        }
+
+        serve(
+            listener,
+            move |req: MiniRequest| {
+                let request = HttpRequest {
+                    method: match req.method {
+                        MiniMethod::Get => HttpMethod::Get,
+                        MiniMethod::Post => HttpMethod::Post,
+                        MiniMethod::Delete => HttpMethod::Other,
+                        MiniMethod::Other => HttpMethod::Other,
+                    },
+                    path: req.path,
+                    headers: req.headers,
+                    body: req.body,
+                };
+                let resp = dispatch(&state, request);
+                Response {
+                    status: resp.status,
+                    headers: resp.headers,
+                    body: resp.body,
+                }
+            },
+            32,
+        );
+    } else {
+        // Outbound-only: no TCP listener at all. If a coordinator is pinned,
+        // work arrives via the outbound pull loop (no inbound socket). Keep
+        // the process alive for heartbeat/publish threads and the pull loop.
+        if let Some(ref path) = args.coordinator_addr {
+            spawn_coordinator_pull(
+                path.clone(),
+                signing_key_for_iroh.to_bytes(),
+                Arc::new(state.clone()),
+                args.coordinator_poll_interval,
+            );
+            eprintln!(
+                "vtessera-node: connectivity=outbound-only + coordinator — \
+                 accepting work via outbound queue pull"
+            );
+        } else {
+            eprintln!(
+                "vtessera-node: connectivity=outbound-only — no listening socket; \
+                 staying alive for outbound dispatch"
+            );
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }
+}
+
+/// Spawn the node's outbound coordinator pull loop (P1.7b).
+///
+/// The loop dials the pinned coordinator's queue over iroh QUIC
+/// (`vtessera/0`), pulls the next `DispatchOffer`, **verifies its signature
+/// against the coordinator's EndpointId**, feeds the job through the same
+/// `dispatch()` used by HTTP/i roh agents, and acks. This is the outbound
+/// dispatch path for `outbound-only` nodes (P1.3) — no inbound listener is
+/// opened.
+///
+/// Degradation is fail-soft by design (6a-10, never a hard 503): an empty
+/// queue means "poll again later", a failed dial means "retry later". The
+/// process never exits here.
+fn spawn_coordinator_pull(
+    coordinator_addr_path: PathBuf,
+    node_key_bytes: [u8; 32],
+    state: Arc<NodeState>,
+    poll_interval: Duration,
+) {
+    thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
+            eprintln!("vtessera-node: cannot start coordinator-pull runtime: {e}");
+            process::exit(1);
+        });
+        rt.block_on(async move {
+            // Resolve the pinned coordinator's address; retry on read/parse
+            // failure (the addr file may still be landing on disk).
+            let coordinator_addr: iroh::EndpointAddr = loop {
+                match read_coordinator_addr(&coordinator_addr_path) {
+                    Ok(addr) => break addr,
+                    Err(e) => {
+                        eprintln!("vtessera-node: coordinator addr unresolved (retry): {e}");
+                        tokio::time::sleep(poll_interval).await;
+                    }
+                }
+            };
+            let coordinator_id = coordinator_addr.id;
+            eprintln!(
+                "vtessera-node: coordinator pull loop pinned to {}",
+                hex::encode(coordinator_id.as_bytes())
+            );
+
+            let endpoint = iroh_sidecar::create_endpoint(&node_key_bytes)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("vtessera-node: coordinator iroh endpoint failed: {e}");
+                    process::exit(1);
+                });
+            let client = QueueClient::new(endpoint.iroh_endpoint().clone(), coordinator_addr);
+
+            loop {
+                match pull_once(&client, &state).await {
+                    Ok(true) => continue, // handled a job; poll again immediately
+                    Ok(false) => {
+                        tokio::time::sleep(poll_interval).await;
+                    }
+                    Err(e) => {
+                        eprintln!("vtessera-node: coordinator pull failed (retry): {e}");
+                        tokio::time::sleep(poll_interval).await;
+                    }
+                }
+            }
+        });
+    });
+}
+
+/// Pull exactly one job from the coordinator queue and dispatch it.
+///
+/// Returns `Ok(true)` when a job was handled, `Ok(false)` on empty queue.
+async fn pull_once(client: &QueueClient, state: &Arc<NodeState>) -> Result<bool, String> {
+    // If we're outbound-only and the coordinator pauses, nothing blocks —
+    // this is pure dispatch, no socket is opened here.
+    let offer = match client.reserve().await {
+        Ok(Some(o)) => o,
+        Ok(None) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+
+    let coordinator_hex = client.coordinator_id_hex();
+    let payload = offer
+        .decode::<CoordinatorPayload>(&coordinator_hex)
+        .map_err(|e| format!("signed-emission invalid: {e:?}"))?;
+    let CoordinatorPayload::DispatchOffer { job_id, job } = payload else {
+        return Err("coordinator sent a non-dispatch payload".into());
+    };
+
+    let body = serde_json::to_vec(&job).map_err(|e| format!("serialize job: {e}"))?;
+    let request = HttpRequest {
+        method: HttpMethod::Post,
+        path: "/jobs".into(),
+        headers: vec![
+            ("x-agent-id".into(), "coordinator".into()),
+            ("content-type".into(), "application/json".into()),
+        ],
+        body,
+    };
+    let resp = dispatch(state, request);
+    eprintln!(
+        "vtessera-node: coordinator job {} -> HTTP {}",
+        job_id.display(),
+        resp.status
     );
+    // Ack regardless of dispatch outcome so the queue doesn't stall on a
+    // misbehaving job (the reserved entry is released).
+    let _ = client.ack(&job_id).await;
+    Ok(true)
+}
+
+/// Read + parse the pinned coordinator's [`iroh::EndpointAddr`] from JSON.
+#[cfg(feature = "serve")]
+fn read_coordinator_addr(path: &PathBuf) -> Result<iroh::EndpointAddr, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path:?}: {e}"))?;
+    serde_json::from_str::<iroh::EndpointAddr>(&raw).map_err(|e| format!("parse {path:?}: {e}"))
 }
 
 /// Background loop that refreshes the node's offer at the index on an
@@ -1293,7 +1544,7 @@ fn register_with_marketplace_with_ip(
     let mut offer_body = offer.body.clone();
     if let Some(ip) = &external_ip {
         // Advertise the public WAN endpoint (confirmed reachable via forward).
-        offer_body.endpoint = format!("http://{ip}:{port}");
+        offer_body.endpoint = vec![format!("http://{ip}:{port}")];
     }
     let re_signed = vtessera_offer::sign(offer_body, signing_key);
 
@@ -1319,13 +1570,23 @@ fn register_with_marketplace_with_ip(
                 eprintln!(
                     "vtessera-node: registered with marketplace (public endpoint: \
                      {})",
-                    re_signed.body.endpoint
+                    re_signed
+                        .body
+                        .endpoint
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("?")
                 );
             } else {
                 eprintln!(
                     "vtessera-node: registered with marketplace (local endpoint: \
                      {}; not publicly reachable)",
-                    re_signed.body.endpoint
+                    re_signed
+                        .body
+                        .endpoint
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("?")
                 );
             }
             Ok(())
@@ -1360,25 +1621,33 @@ fn spawn_marketplace_registration(
     });
 }
 
-/// POST a heartbeat with candidates and endpoint_id to the index.
+/// POST a signed heartbeat with candidates and endpoint_id to the index.
 /// Non-fatal: caller logs and retries on the next tick.
 fn post_heartbeat(
     index_url: &str,
     node_id: &str,
     candidates: &[vtessera_transport::Candidate],
     endpoint_id: Option<&str>,
+    signing_key: &SigningKey,
 ) -> Result<(), String> {
     let url = format!(
         "{}/offers/{node_id}/heartbeat",
         index_url.trim_end_matches('/')
     );
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let sig_hex = vtessera_offer::sign_heartbeat(node_id, timestamp, signing_key);
     let body = serde_json::json!({
+        "timestamp": timestamp,
         "candidates": candidates,
         "endpoint_id": endpoint_id,
     });
     let resp = ureq::Agent::new_with_defaults()
         .post(&url)
         .header("content-type", "application/json")
+        .header("x-signature", sig_hex.as_str())
         .send(serde_json::to_string(&body).unwrap().as_str())
         .map_err(|e| e.to_string())?;
     match resp.status().as_u16() {
@@ -1387,23 +1656,33 @@ fn post_heartbeat(
     }
 }
 
-/// Background loop that sends heartbeats with candidate addresses to the
-/// index on an interval. With iroh integration, the endpoint manages
-/// live connectivity and the heartbeat sends the current iroh EndpointId.
+/// Background loop that sends signed heartbeats with candidate addresses
+/// to the index on an interval. With iroh integration, the endpoint
+/// manages live connectivity and the heartbeat sends the current iroh
+/// EndpointId.
 ///
-/// The first heartbeat fires immediately on startup so the index
-/// isn't stale for the first 30 seconds.
+/// The signature (invariant #4) binds each heartbeat to the node's identity
+/// key so a third party can't inject fake liveness for someone else's node.
+/// The first heartbeat fires immediately on startup so the index isn't stale
+/// for the first 30 seconds.
 fn spawn_heartbeat_with_iroh(
     index_url: String,
     node_id: String,
     iroh_ep: Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>,
+    signing_key: SigningKey,
 ) {
     thread::spawn(move || {
         let interval = Duration::from_secs(DEFAULT_HEARTBEAT_SECS);
         // Send first heartbeat immediately so the index reflects this node
         // from the moment the server starts accepting connections.
         let (candidates, endpoint_id) = get_iroh_info(&iroh_ep);
-        match post_heartbeat(&index_url, &node_id, &candidates, endpoint_id.as_deref()) {
+        match post_heartbeat(
+            &index_url,
+            &node_id,
+            &candidates,
+            endpoint_id.as_deref(),
+            &signing_key,
+        ) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: initial heartbeat failed (will retry): {e}"),
         }
@@ -1411,7 +1690,13 @@ fn spawn_heartbeat_with_iroh(
             thread::sleep(interval);
             // Fetch fresh candidates and endpoint_id from the iroh endpoint.
             let (candidates, endpoint_id) = get_iroh_info(&iroh_ep);
-            match post_heartbeat(&index_url, &node_id, &candidates, endpoint_id.as_deref()) {
+            match post_heartbeat(
+                &index_url,
+                &node_id,
+                &candidates,
+                endpoint_id.as_deref(),
+                &signing_key,
+            ) {
                 Ok(()) => {}
                 Err(e) => eprintln!("vtessera-node: heartbeat failed (will retry): {e}"),
             }
@@ -1701,4 +1986,93 @@ fn spawn_iroh_router(
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connectivity_parse_matrix() {
+        assert_eq!(
+            ConnectivityMode::parse("inbound+dialable"),
+            Some(ConnectivityMode::InboundDialable)
+        );
+        assert_eq!(
+            ConnectivityMode::parse("outbound-only"),
+            Some(ConnectivityMode::OutboundOnly)
+        );
+        // Garbage and case-sensitive variants are rejected.
+        assert_eq!(ConnectivityMode::parse(""), None);
+        assert_eq!(ConnectivityMode::parse("outbound"), None);
+        assert_eq!(ConnectivityMode::parse("outbound_only"), None);
+        assert_eq!(ConnectivityMode::parse("Inbound+Dialable"), None);
+        assert_eq!(ConnectivityMode::parse("inbound-dialable"), None);
+    }
+
+    #[test]
+    fn inbound_listener_decision_matches_modes() {
+        assert!(wants_inbound_listener(ConnectivityMode::InboundDialable));
+        assert!(!wants_inbound_listener(ConnectivityMode::OutboundOnly));
+    }
+
+    #[test]
+    fn default_mode_is_inbound_dialable() {
+        // The transition default must not regress today's reachability: a
+        // node without the flag behaves exactly as before this change.
+        let args = parse_args_from(vec![
+            "--bind".into(),
+            "0.0.0.0:8402".into(),
+            "--offer".into(),
+            "/tmp/o.json".into(),
+            "--escrow".into(),
+            "escrow".into(),
+            "--network".into(),
+            "devnet".into(),
+            "--key".into(),
+            "/tmp/identity.key".into(),
+            "--state-dir".into(),
+            "/tmp/state".into(),
+        ]);
+        assert_eq!(args.connectivity, ConnectivityMode::InboundDialable);
+
+        let args = parse_args_from(vec![
+            "--bind".into(),
+            "0.0.0.0:8402".into(),
+            "--offer".into(),
+            "/tmp/o.json".into(),
+            "--escrow".into(),
+            "escrow".into(),
+            "--network".into(),
+            "devnet".into(),
+            "--key".into(),
+            "/tmp/identity.key".into(),
+            "--state-dir".into(),
+            "/tmp/state".into(),
+            "--connectivity".into(),
+            "outbound-only".into(),
+        ]);
+        assert_eq!(args.connectivity, ConnectivityMode::OutboundOnly);
+    }
+
+    #[test]
+    fn outbound_only_is_parsed_from_flag() {
+        let args = parse_args_from(vec![
+            "--bind".into(),
+            "0.0.0.0:8402".into(),
+            "--offer".into(),
+            "/tmp/o.json".into(),
+            "--escrow".into(),
+            "escrow".into(),
+            "--network".into(),
+            "devnet".into(),
+            "--key".into(),
+            "/tmp/identity.key".into(),
+            "--state-dir".into(),
+            "/tmp/state".into(),
+            "--connectivity".into(),
+            "inbound+dialable".into(),
+        ]);
+        assert_eq!(args.connectivity, ConnectivityMode::InboundDialable);
+    }
 }

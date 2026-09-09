@@ -420,9 +420,9 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chacha20"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -4509,10 +4509,14 @@ name = "vtessera-agent"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "hex",
+ "iroh",
  "libc",
  "serde",
  "serde_json",
+ "tokio",
  "ureq",
+ "vtessera-coordinator",
 ]
 
 [[package]]
@@ -4522,6 +4526,21 @@ dependencies = [
  "dialoguer",
  "serde",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "vtessera-coordinator"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "futures-util",
+ "hex",
+ "iroh",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "tokio",
+ "vtessera-transport",
 ]
 
 [[package]]
@@ -4581,6 +4600,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "ureq",
+ "vtessera-coordinator",
  "vtessera-executor",
  "vtessera-metrics",
  "vtessera-mini-http",
@@ -4605,6 +4625,7 @@ name = "vtessera-offer-index"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
+ "hex",
  "serde",
  "serde_json",
  "ureq",
@@ -4631,6 +4652,7 @@ name = "vtessera-transport"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "ed25519-dalek 2.2.0",
  "hex",
  "iroh",
  "rand 0.8.8",

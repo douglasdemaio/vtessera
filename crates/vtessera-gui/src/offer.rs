@@ -112,7 +112,15 @@ pub fn build_offer_json(settings: &Settings, key: &SigningKey) -> String {
     let body = OfferBody {
         schema_ver: OFFER_SCHEMA_VER,
         node_id,
-        endpoint: settings.endpoint.clone(),
+        endpoint_id: hex::encode(key.verifying_key().to_bytes()),
+        // Inbound+dialable: advertise the HTTP endpoint. Outbound-only: the
+        // offer advertises an empty endpoint list (reachability is the pinned
+        // coordinator queue; agents dial through it, never this node).
+        endpoint: if settings.is_outbound() {
+            Vec::new()
+        } else {
+            vec![settings.endpoint.clone()]
+        },
         device: AdvertisedDevice::Cpu {
             vcpus: host_vcpus(),
             mem_mb: host_mem_mb(),
@@ -151,6 +159,8 @@ mod tests {
             upnp_enabled: false,
             local_network: false,
             allowed_cidrs: Vec::new(),
+            connectivity: crate::settings::CONNECTIVITY_INBOUND.into(),
+            coordinator_addr: String::new(),
         }
     }
 
