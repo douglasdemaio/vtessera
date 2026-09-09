@@ -20,6 +20,9 @@ libc = "0.2"
 # (outbound-only node), the agent enqueues over iroh QUIC instead of a
 # blocking HTTP POST; the node pulls the job itself.
 vtessera-coordinator = { path = "../coordinator", features = ["serve"] }
+# P2/T2.1: resolver — agent resolves a node's EndpointId from the offer-index
+# candidate list and dials it over iroh QUIC (no HTTP endpoint required).
+vtessera-transport = { path = "../transport", features = ["serve"] }
 iroh = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 hex = { workspace = true }

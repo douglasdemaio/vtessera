@@ -13,6 +13,8 @@
 //! - Agent dials by EndpointId through iroh
 //! - iroh handles relay + hole punching transparently
 
+use std::str::FromStr;
+
 use iroh::{EndpointAddr, EndpointId, SecretKey, TransportAddr};
 
 /// vtessera ALPN protocol identifier for iroh connections.
@@ -136,6 +138,60 @@ impl IrohEndpoint {
         let conn = self.endpoint.connect(endpoint_addr, VTESSERA_ALPN).await?;
         Ok(conn)
     }
+}
+
+/// Parse an `EndpointId` from an index-served identifier (design T2.1).
+///
+/// Two encodings are published on the network today and both must resolve:
+/// - iroh blob form, e.g. `PublicKey::to_string()` as sent in heartbeats.
+/// - hex form, e.g. the offer body's `endpoint_id` (`hex::encode(pubkey)`).
+pub fn parse_endpoint_id(raw: &str) -> Result<EndpointId, String> {
+    if let Ok(id) = EndpointId::from_str(raw) {
+        return Ok(id);
+    }
+    let bytes = hex::decode(raw)
+        .map_err(|e| format!("{raw:?} is neither an iroh EndpointId nor hex: {e}"))?;
+    if bytes.len() != EndpointId::LENGTH {
+        return Err(format!(
+            "{raw:?} decodes to {} bytes, expected {}",
+            bytes.len(),
+            EndpointId::LENGTH
+        ));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    EndpointId::try_from(arr.as_ref())
+        .map_err(|e| format!("{raw:?} is not a valid ed25519 endpoint: {e}"))
+}
+
+/// Reconstruct an [`EndpointAddr`] from an index-served resolver entry:
+/// the node's identifier plus its live candidate list (design T2.1 /
+/// test 6a-8). IP candidates become direct QUIC addresses, relayed
+/// candidates become relay URLs; iroh orders both itself at dial time.
+pub fn endpoint_addr_from_candidates(
+    endpoint_id_raw: &str,
+    candidates: &[super::Candidate],
+) -> Result<EndpointAddr, String> {
+    let id = parse_endpoint_id(endpoint_id_raw)?;
+    let mut addrs = std::collections::BTreeSet::new();
+    for c in candidates {
+        match c.kind {
+            super::CandidateKind::Relayed => {
+                let url = c
+                    .addr
+                    .parse()
+                    .map_err(|e| format!("candidate {:?} is not a relay URL: {e}", c.addr))?;
+                addrs.insert(TransportAddr::Relay(url));
+            }
+            _ => {
+                let sock: std::net::SocketAddr = c.addr.parse().map_err(|e| {
+                    format!("candidate {:?} is not an ip:port address: {e}", c.addr)
+                })?;
+                addrs.insert(TransportAddr::Ip(sock));
+            }
+        }
+    }
+    Ok(EndpointAddr { id, addrs })
 }
 
 /// Create a new iroh endpoint from a secret key.
@@ -285,6 +341,102 @@ mod tests {
             ep_id.to_string(),
             hex::encode(dalek.verifying_key().to_bytes())
         );
+    }
+
+    #[test]
+    fn resolver_parses_both_endpoint_id_encodings() {
+        // Design T2.1: heartbeats publish `node_id().to_string()` and offer
+        // bodies publish `hex::encode(pubkey)`; both identify the same node
+        // and both must resolve to the same EndpointId.
+        let node_key = [0x51; 32];
+        let ep_id = SecretKey::from_bytes(&node_key).public();
+        let hex_form = hex::encode(ep_id.as_bytes());
+        let blob_form = ep_id.to_string();
+
+        assert_eq!(parse_endpoint_id(&blob_form).unwrap(), ep_id);
+        assert_eq!(parse_endpoint_id(&hex_form).unwrap(), ep_id);
+        // Lowercase hex (serde may normalize) too.
+        assert_eq!(parse_endpoint_id(&hex_form.to_lowercase()).unwrap(), ep_id);
+
+        assert!(parse_endpoint_id("not-an-endpoint").is_err());
+        assert!(parse_endpoint_id("ab").is_err());
+    }
+
+    #[tokio::test]
+    async fn resolver_endpoint_addr_dials_by_candidates() {
+        use iroh::protocol::{ProtocolHandler, Router};
+
+        // Echo handler: reads bytes from the bi-stream, writes them back.
+        // Reused from the relay-path test so the dialed endpoint answers.
+        #[derive(Debug)]
+        struct EchoHandler;
+        impl ProtocolHandler for EchoHandler {
+            async fn accept(
+                &self,
+                conn: iroh::endpoint::Connection,
+            ) -> Result<(), iroh::protocol::AcceptError> {
+                let (mut send, mut recv) = conn.accept_bi().await?;
+                let data = recv
+                    .read_to_end(1024)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                send.write_all(&data).await.map_err(std::io::Error::other)?;
+                send.finish()?;
+                conn.closed().await;
+                Ok(())
+            }
+        }
+
+        // Design T2.1 / test 6a-8: an index entry carries the node's id +
+        // candidates and nothing else; the resolver reconstructs a dialable
+        // EndpointAddr and the agent connects. Proves resolution end-to-end
+        // over offline loopback (no relay).
+        let srv_key = SecretKey::from_bytes(&[0x61; 32]);
+        let srv_ep = IrohEndpoint::new(srv_key).await.unwrap();
+        // Wait for iroh to publish its loopback addresses.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let _router = Router::builder(srv_ep.iroh_endpoint().clone())
+            .accept(VTESSERA_ALPN, EchoHandler)
+            .spawn();
+
+        let candidates = srv_ep
+            .endpoint_addr()
+            .addrs
+            .iter()
+            .filter_map(|a| match a {
+                TransportAddr::Ip(sa) => Some(super::super::Candidate {
+                    kind: super::super::CandidateKind::Host,
+                    transport: super::super::TransportKind::IrohQuic,
+                    addr: sa.to_string(),
+                    priority: 200,
+                }),
+                TransportAddr::Relay(_) => None,
+                TransportAddr::Custom(_) => None,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !candidates.is_empty(),
+            "endpoint should publish a loopback address offline"
+        );
+
+        let addr =
+            endpoint_addr_from_candidates(&hex::encode(srv_ep.node_id().as_bytes()), &candidates)
+                .unwrap();
+        assert_eq!(addr.id, srv_ep.node_id());
+
+        // Dial from a fresh client endpoint purely by the reconstructed id.
+        let cli = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .bind()
+            .await
+            .unwrap();
+        let conn = cli.connect(addr, VTESSERA_ALPN).await.expect("dial by id");
+        let (mut send, mut recv) = conn.open_bi().await.expect("open bi-stream");
+        send.write_all(b"resolve-me").await.expect("write");
+        send.finish().ok();
+        let echoed = recv.read_to_end(64).await.expect("read echo");
+        assert_eq!(echoed, b"resolve-me");
     }
 
     #[tokio::test]

@@ -814,6 +814,28 @@ node flips outbound-only, and payment/escrow modules are untouched.
   is a protocol assumption." The N0-operated coordinator is available but never
   the default.
 
+### 7d. Phase 2 status — resolver (T2.1) + index convergence + §6b tests
+
+Phase 2 implementing the resolver from §4a/§1.3 ("`endpoint` → `node_id` once a
+resolver exists"). `CONNECTIVITY-PLAN.md` (referenced in §8) is **not in this
+repo**, so Phase 2 is scoped from this doc's own T2.1, §6a, and §6b text.
+
+| Item | What landed | Where |
+|---|---|---|
+| T2.1 resolver type | `parse_endpoint_id` (hex **and** iroh blob form) + `endpoint_addr_from_candidates` — an index entry (`endpoint_id` + `candidates`) reconstructs a dialable `EndpointAddr` | `crates/transport/src/iroh_sidecar.rs` |
+| Agent dial-by-id | `--node-id <EndpointId>` for `health`/`offer`/`submit`: resolve via offer-index → dial over iroh QUIC → HTTP-over-QUIC on `vtessera/0` (the node's `VtesseraHandler` wire format). No offer `endpoint` required | `crates/agent-cli/src/main.rs` (`quic_health`/`quic_offer`/`quic_submit`, `resolve_addr`) |
+| `discover` | Includes outbound-only nodes (unchanged behavior — previously dropped when `endpoint` was empty); dedups by `endpoint_id` (fallback `endpoint`); new `REACH`/`DIAL` columns + dial-by-id hint | `crates/agent-cli/src/main.rs` |
+| 6a-8 (schema lockstep) | Transport-level resolve-→dial end-to-end test over offline loopback | `crates/transport/src/iroh_sidecar.rs` tests |
+| Index convergence (T1.4/6a-2) | `register` no longer wipes `candidates` / `endpoint_id` / `last_heartbeat_unix` on re-register (publish loop refresh); tests: re-register preserves resolver state; re-heartbeat after re-register updates candidates with one entry (no duplicates) | `crates/offer-index/src/lib.rs` |
+| Aggregated "go over index" overview | (recommended §6a/§6b follow-up) — see checks | – |
+| Honest reachability (4b-7/§4b) | `QueueClient::probe` performs a real QUIC dial; agent `--queue health/offer` reports `reachability` based on the actual handshake, erroring (non-zero) when the coordinator is unreachable; live-coordinator and dead-coordinator probe tests | `crates/coordinator/src/iroh.rs`, `crates/agent-cli/src/main.rs` (`queue_render`) |
+| §6b infra tests | `crates/transport/tests/infra.rs` with runbook headers: stay-relayed, relay plurality, 100-cycle disconnect/reconnect soak, two-peer resolver interdial. Network cases `#[ignore]` (run `-- --ignored`) | `crates/transport/tests/infra.rs` |
+
+Remaining Phase 2 debt tracked out of doc for now: agent `submit`-by-id still
+polls for paid (x402) settlement flow parity (a 402 response is rendered, not a
+full payment resubmit); marketplace `resolve` (nodes.json) is not yet wired to
+`--node-id` (only the offer-index is).
+
 ---
 
 ## 8. References

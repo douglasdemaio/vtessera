@@ -4517,6 +4517,7 @@ dependencies = [
  "tokio",
  "ureq",
  "vtessera-coordinator",
+ "vtessera-transport",
 ]
 
 [[package]]

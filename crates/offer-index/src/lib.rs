@@ -277,6 +277,20 @@ impl IndexState {
             }
             _ => (None, 0),
         };
+        // Convergence (design T2.1/T1.4, test 6a-2): a re-register of the
+        // same node (the publish loop refreshes every interval) must NOT
+        // blank the resolver state. Candidates and endpoint_id come from
+        // signed heartbeats; wiping them on refresh creates a window where
+        // the index can't resolve the node even though it verified its
+        // liveness moments ago.
+        let (candidates, endpoint_id, last_heartbeat_unix) = match prior {
+            Some(prev) => (
+                prev.candidates.clone(),
+                prev.endpoint_id.clone(),
+                prev.last_heartbeat_unix,
+            ),
+            None => (vec![], None, 0),
+        };
         self.entries.insert(
             node_id.clone(),
             IndexEntry {
@@ -285,9 +299,9 @@ impl IndexState {
                 fetched_at_unix: now_unix,
                 claimed_by,
                 claim_until_unix,
-                candidates: vec![],
-                endpoint_id: None,
-                last_heartbeat_unix: 0,
+                candidates,
+                endpoint_id,
+                last_heartbeat_unix,
             },
         );
         Ok(node_id)
@@ -1199,6 +1213,60 @@ mod tests {
         let entry = state.get(&node).unwrap();
         assert_eq!(entry.candidates, candidates);
         assert_eq!(entry.last_heartbeat_unix, NOW + 10);
+    }
+
+    #[test]
+    fn reregister_preserves_resolver_state_convergence() {
+        // Design T1.4/T2.1 / test 6a-2: the publish loop re-registers every
+        // interval, but resolver state (candidates + endpoint_id, refreshed
+        // by signed heartbeats) must survive a refresh, not blank out and
+        // create an unresolvable window.
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        let candidates = vec![vtessera_transport::Candidate {
+            kind: vtessera_transport::CandidateKind::Relayed,
+            transport: vtessera_transport::TransportKind::IrohQuic,
+            addr: "https://relay.example.com".into(),
+            priority: 50,
+        }];
+        state
+            .heartbeat(&node, candidates.clone(), Some("a1b2c3".into()), NOW + 10)
+            .unwrap();
+
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW + 20)
+            .unwrap();
+        let entry = state.get(&node).unwrap();
+        assert_eq!(entry.candidates, candidates);
+        assert_eq!(entry.endpoint_id.as_deref(), Some("a1b2c3"));
+        assert_eq!(entry.last_heartbeat_unix, NOW + 10);
+    }
+
+    #[test]
+    fn reheartbeat_after_reregister_still_updates_candidates() {
+        let mut state = IndexState::new();
+        let node = register_one(&mut state, 1);
+        state
+            .register(offer(&node, paid(), 1), "push".into(), NOW + 30)
+            .unwrap();
+        state
+            .heartbeat(
+                &node,
+                vec![vtessera_transport::Candidate {
+                    kind: vtessera_transport::CandidateKind::Host,
+                    transport: vtessera_transport::TransportKind::IrohQuic,
+                    addr: "192.0.2.7:8402".into(),
+                    priority: 200,
+                }],
+                Some("5e".into()),
+                NOW + 40,
+            )
+            .unwrap();
+        let entry = state.get(&node).unwrap();
+        assert_eq!(entry.candidates.len(), 1);
+        assert_eq!(entry.endpoint_id.as_deref(), Some("5e"));
+        // Same node, one entry: no duplicate registrations after reconnect.
+        assert_eq!(state.count(), 1);
     }
 
     #[test]
