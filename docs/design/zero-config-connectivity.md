@@ -830,11 +830,14 @@ repo**, so Phase 2 is scoped from this doc's own T2.1, §6a, and §6b text.
 | Aggregated "go over index" overview | (recommended §6a/§6b follow-up) — see checks | – |
 | Honest reachability (4b-7/§4b) | `QueueClient::probe` performs a real QUIC dial; agent `--queue health/offer` reports `reachability` based on the actual handshake, erroring (non-zero) when the coordinator is unreachable; live-coordinator and dead-coordinator probe tests | `crates/coordinator/src/iroh.rs`, `crates/agent-cli/src/main.rs` (`queue_render`) |
 | §6b infra tests | `crates/transport/tests/infra.rs` with runbook headers: stay-relayed, relay plurality, 100-cycle disconnect/reconnect soak, two-peer resolver interdial. Network cases `#[ignore]` (run `-- --ignored`) | `crates/transport/tests/infra.rs` |
+| x402 paid parity (1.2/FR-P2)* | Agent `submit` (HTTP **and** `--node-id` QUIC) now reads the HTTP status: 402 renders the full x402 challenge + pay-then-resubmit guidance; `--payment '{"tx","amount_micros"}'` attaches the `x-payment` proof header and re-submits; a proof that is still rejected is a hard error. HTTP path builds its own ureq agent with `http_status_as_error(false)` so the 402 body survives; shared classifier + renderer | `crates/agent-cli/src/main.rs` (`post_job`, `render_submit_outcome`, `print_x402_challenge`, `--payment`) |
 
-Remaining Phase 2 debt tracked out of doc for now: agent `submit`-by-id still
-polls for paid (x402) settlement flow parity (a 402 response is rendered, not a
-full payment resubmit); marketplace `resolve` (nodes.json) is not yet wired to
-`--node-id` (only the offer-index is).
+\* x402 client flow: shorter x402 parity carries the agent through the 402
+challenge; the actual `spl-token transfer` to the escrow happens out-of-band
+(AGENTS.md). Queue-rendezvous + `--payment` rejects loudly (not supported).
+
+Remaining Phase 2 debt tracked out of doc for now: marketplace `resolve`
+(nodes.json) is not yet wired to `--node-id` (only the offer-index is).
 
 ---
 

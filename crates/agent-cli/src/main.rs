@@ -48,6 +48,12 @@ struct Cli {
     /// Auto-discover node from the local discovery file
     #[arg(long, global = true)]
     local: bool,
+
+    /// x402 payment proof (JSON `{"tx":"<signature>","amount_micros":<n>}`)
+    /// attached as the `x-payment` header on a paid job submit. Pay the
+    /// escrow first (AGENTS.md x402 flow), then resubmit with `--payment`.
+    #[arg(long, global = true)]
+    payment: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -162,6 +168,20 @@ fn main() {
             }
         }
         Commands::Submit { job } => {
+            if let Some(raw) = &cli.payment {
+                let valid = serde_json::from_str::<serde_json::Value>(raw)
+                    .map(|proof| {
+                        proof["tx"].as_str().is_some() && proof["amount_micros"].as_u64().is_some()
+                    })
+                    .unwrap_or(false);
+                if !valid {
+                    eprintln!(
+                        "error: --payment must be JSON {{\"tx\":\"<signature>\",\"amount_micros\":<amount>}}"
+                    );
+                    process::exit(1);
+                }
+            }
+
             if let Some(nid) = &cli.node_id {
                 quic_submit(
                     &index,
@@ -170,9 +190,17 @@ fn main() {
                     &agent_id,
                     job,
                     json,
+                    cli.payment.as_deref(),
                 )
             } else {
-                submit(&node, queue.as_deref(), &agent_id, job, json)
+                submit(
+                    &node,
+                    queue.as_deref(),
+                    &agent_id,
+                    job,
+                    json,
+                    cli.payment.as_deref(),
+                )
             }
         }
         Commands::Health => {
@@ -396,6 +424,7 @@ fn submit(
     agent_id: &str,
     job_path: &str,
     json: bool,
+    payment: Option<&str>,
 ) -> Result<(), String> {
     let job_json =
         std::fs::read_to_string(job_path).map_err(|e| format!("failed to read {job_path}: {e}"))?;
@@ -404,6 +433,9 @@ fn submit(
 
     // Queue rendezvous: enqueue over iroh, the node pulls + runs + acks.
     if let Some(q) = queue {
+        if payment.is_some() {
+            return Err("x402 payment is not supported over queue rendezvous".into());
+        }
         let client = queue_client(q)?;
         let coordinator = client.coordinator_id_hex();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -433,32 +465,137 @@ fn submit(
     }
 
     let url = format!("{node}/jobs");
-    let resp: serde_json::Value = agent()
-        .post(&url)
-        .header("x-agent-id", agent_id)
-        .send(&job_json)
-        .map_err(|e| format!("request failed: {e}"))?
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("failed to read response: {e}"))?;
+    let (status, v) = post_job(&url, agent_id, payment, &job_json)?;
+    render_submit_outcome(status, &v, payment.is_some(), json)?;
+    Ok(())
+}
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
-    } else {
-        let status = resp["status"].as_str().unwrap_or("?");
-        let job_id = resp["job_id"].as_str().unwrap_or("?");
-        let backend = resp["backend"].as_str().unwrap_or("?");
-        println!("status:  {status}");
-        println!("job_id:  {job_id}");
-        println!("backend: {backend}");
-        if let Some(metering) = resp.get("metering") {
+/// POST a job over HTTP and return `(status, parsed JSON body)`.
+///
+/// Uses `http_status_as_error(false)` so the x402 challenge (HTTP 402) is
+/// surfaced as a body instead of being dropped by ureq's status-as-error
+/// behaviour. Unparseable bodies (non-JSON proxies etc.) are preserved as
+/// `{"raw": "<text>"}` so the message survives.
+fn post_job(
+    url: &str,
+    agent_id: &str,
+    payment: Option<&str>,
+    job_json: &str,
+) -> Result<(u16, serde_json::Value), String> {
+    use std::io::Read;
+    let agent = ureq::config::Config::builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    let mut req = agent.post(url).header("x-agent-id", agent_id);
+    if let Some(p) = payment {
+        req = req.header("x-payment", p);
+    }
+    let mut resp = req
+        .send(job_json)
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let mut bytes: Vec<u8> = Vec::new();
+    resp.body_mut()
+        .as_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read response body: {e}"))?;
+    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(v) => Ok((status, v)),
+        Err(_) => Ok((
+            status,
+            serde_json::json!({ "raw": String::from_utf8_lossy(&bytes).trim_end_matches('\n') }),
+        )),
+    }
+}
+
+/// Classify + render the outcome of a job submission, shared by the HTTP
+/// and QUIC (wire-parsed) transports.
+///
+/// - HTTP 200 -> accepted, with metering when the node reports it.
+/// - HTTP 402 without a payment proof -> the x402 challenge + how to pay.
+/// - HTTP 402 with a proof -> challenge + error (the proof was rejected).
+/// - Anything else -> the node's error message.
+fn render_submit_outcome(
+    status: u16,
+    v: &serde_json::Value,
+    had_payment: bool,
+    json: bool,
+) -> Result<(), String> {
+    if status == 200 {
+        if json {
+            println!("{}", serde_json::to_string_pretty(v).unwrap());
+            return Ok(());
+        }
+        let job_id = v["job_id"].as_str().unwrap_or("?");
+        let backend = v["backend"].as_str().unwrap_or("?");
+        println!("status:   accepted");
+        println!("job_id:   {job_id}");
+        println!("backend:  {backend}");
+        if let Some(metering) = v.get("metering") {
             let cpu = metering["cpu_seconds"].as_f64().unwrap_or(0.0);
             let exit = metering["exit_status"].as_str().unwrap_or("?");
             println!("cpu_seconds: {cpu:.2}");
             println!("exit_status: {exit}");
         }
+        return Ok(());
     }
-    Ok(())
+    if status == 402 {
+        print_x402_challenge(v, json);
+        if had_payment {
+            return Err("payment proof not accepted (still 402) - see terms above".into());
+        }
+        return Ok(());
+    }
+    let detail = match v["error"].as_str() {
+        Some(s) => s.trim_end_matches('\n').to_string(),
+        None => v["raw"].as_str().unwrap_or("").to_string(),
+    };
+    let detail = if detail.is_empty() {
+        v.to_string()
+    } else {
+        detail
+    };
+    Err(format!("job rejected (HTTP {status}): {detail}"))
+}
+
+/// Print an x402 challenge — the HTTP 402 `/jobs` response. JSON mode echoes
+/// the raw body for machine parsing; human mode renders the terms and the
+/// pay-then-resubmit flow.
+fn print_x402_challenge(v: &serde_json::Value, json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(v).unwrap());
+        return;
+    }
+    println!("status:   402 payment_required");
+    if let Some(s) = v["scheme"].as_str() {
+        println!("scheme:   {s}");
+    }
+    if let Some(n) = v["network"].as_str() {
+        println!("network:  {n}");
+    }
+    if let Some(e) = v["escrow_account"].as_str() {
+        println!("escrow:   {e}");
+    }
+    if let Some(price) = v["offer"]["body"]["price"].as_object() {
+        let mode = price.get("mode").and_then(|m| m.as_str()).unwrap_or("?");
+        let cur = price
+            .get("currency")
+            .and_then(|c| c.as_str())
+            .unwrap_or("?");
+        let per_sec = price
+            .get("per_device_second_micros")
+            .and_then(|p| p.as_u64())
+            .unwrap_or(0);
+        println!("price:    {mode} {cur} {per_sec} micros/s/device");
+        if let Some(payout) = price.get("payout_id").and_then(|p| p.as_str()) {
+            println!("payout_id: {payout}");
+        }
+    }
+    println!("pay:      spl-token transfer <TOKEN_MINT> <amount> <escrow> \\");
+    println!("          --with-memo <job_id>  (AGENTS.md x402 flow), then resubmit:");
+    println!("vtessera-agent ... submit \\");
+    println!("    --payment '{{\"tx\":\"<signature>\",\"amount_micros\":<amount>}}'");
 }
 
 fn health(node: &str, queue: Option<&str>, json: bool) -> Result<(), String> {
@@ -737,10 +874,14 @@ fn quic_submit(
     agent_id: &str,
     job_path: &str,
     json: bool,
+    payment: Option<&str>,
 ) -> Result<(), String> {
     let job_json = std::fs::read_to_string(job_path)
         .map_err(|e| format!("read job file {job_path:?}: {e}"))?;
-    let headers = vec![("x-agent-id".to_string(), agent_id.to_string())];
+    let mut headers = vec![("x-agent-id".to_string(), agent_id.to_string())];
+    if let Some(p) = payment {
+        headers.push(("x-payment".to_string(), p.to_string()));
+    }
     let (status, body) = quic_round_trip(
         index,
         node_id,
@@ -749,42 +890,13 @@ fn quic_submit(
         &headers,
         job_json.as_bytes(),
     )?;
-    let v: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|e| format!("job response unparseable (HTTP {status}): {e}"))?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&v).unwrap());
-    } else if status != 200 {
-        // 402 carries the x402 payment challenge; other codes carry an error.
-        println!("status:   {status}");
-        let scheme = v["scheme"].as_str().unwrap_or("");
-        let escrow = v["escrow_account"].as_str().unwrap_or("");
-        if !scheme.is_empty() {
-            println!("payment_required: x402");
-            println!("scheme:   {scheme}");
-            println!("escrow:   {escrow}");
-            return Ok(());
+    let v: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            serde_json::json!({ "raw": String::from_utf8_lossy(&body).trim_end_matches('\n') })
         }
-        let detail = match v["error"].as_str() {
-            Some(s) => s.trim_end_matches('\n').to_string(),
-            None => String::from_utf8_lossy(&body)
-                .trim_end_matches('\n')
-                .to_string(),
-        };
-        return Err(format!("job rejected (HTTP {status}): {detail}"));
-    } else {
-        let job_id = v["job_id"].as_str().unwrap_or("?");
-        let backend = v["backend"].as_str().unwrap_or("?");
-        println!("status:   accepted");
-        println!("job_id:   {job_id}");
-        println!("backend:  {backend}");
-        if let Some(metering) = v.get("metering") {
-            let cpu = metering["cpu_seconds"].as_f64().unwrap_or(0.0);
-            let exit = metering["exit_status"].as_str().unwrap_or("?");
-            println!("cpu_seconds: {cpu:.2}");
-            println!("exit_status: {exit}");
-        }
-    }
+    };
+    render_submit_outcome(status, &v, payment.is_some(), json)?;
     Ok(())
 }
 
@@ -848,6 +960,58 @@ mod tests {
         assert!(index_entry_for(&entries, "aaa1").is_some());
         // Unknown id -> none.
         assert!(index_entry_for(&entries, "zzz9").is_none());
+    }
+
+    /// Validate the `--payment` x402 proof shape (JSON with `tx` + numeric
+    /// `amount_micros`), as required by the `x-payment` header.
+    fn x402_proof_valid(raw: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(raw)
+            .map(|proof| {
+                proof["tx"].as_str().is_some() && proof["amount_micros"].as_u64().is_some()
+            })
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn x402_challenge_and_outcomes_are_classified() {
+        let ch = serde_json::json!({
+            "scheme": "x402",
+            "network": "solana-devnet",
+            "escrow_account": "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma",
+            "offer": {"body": {
+                "price": {"mode": "paid", "currency": "eurc",
+                          "per_device_second_micros": 2792,
+                          "payout_id": "5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs"}
+            }}
+        });
+
+        // 402 without a proof -> Ok, the challenge is rendered (step 1 of the
+        // x402 flow; scripts detect "payment_required" in the output).
+        assert!(render_submit_outcome(402, &ch, false, true).is_ok());
+        // 402 with a proof -> the proof was rejected: hard error.
+        assert!(render_submit_outcome(402, &ch, true, true).is_err());
+        // 200 accepted -> Ok.
+        let acc =
+            serde_json::json!({"status": "accepted", "job_id": "job-1", "backend": "noop-cpu"});
+        assert!(render_submit_outcome(200, &acc, false, true).is_ok());
+        assert!(render_submit_outcome(200, &acc, true, true).is_ok());
+        // Other codes -> Err carrying the node's message.
+        let rejected = serde_json::json!({"error": "no capacity"});
+        let r = render_submit_outcome(503, &rejected, false, true);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("no capacity"));
+        // Non-JSON body fallback keeps the raw text.
+        let r = render_submit_outcome(502, &serde_json::json!({"raw": "bad gateway"}), false, true);
+        assert!(r.unwrap_err().contains("bad gateway"));
+    }
+
+    #[test]
+    fn x402_challenge_rejects_payment_without_tx_or_amount() {
+        // A proof needs both "tx" and a numeric "amount_micros".
+        assert!(x402_proof_valid(r#"{"tx":"sig","amount_micros":10000}"#));
+        assert!(!x402_proof_valid(r#"{"tx":"sig"}"#));
+        assert!(!x402_proof_valid(r#"{"amount_micros":10000}"#));
+        assert!(!x402_proof_valid("not json"));
     }
 
     #[test]
