@@ -33,3 +33,6 @@ required-features = ["serve"]
 # Test-only: cross-check the iroh EndpointId against the same Ed25519
 # public key that signs offers (design P1.4, test 6a-5).
 ed25519-dalek = { workspace = true }
+# §6b infrastructure tests (tests/infra.rs) drive live iroh endpoints.
+iroh = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

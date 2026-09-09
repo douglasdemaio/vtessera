@@ -127,6 +127,33 @@ impl QueueClient {
         hex::encode(self.coordinator_addr.id.as_bytes())
     }
 
+    /// Prove the coordinator is reachable with a real QUIC handshake
+    /// (design §4b-7: "reachability = proved by the RPC round-trip").
+    ///
+    /// Dialing opens a connection and completes the handshake; no user
+    /// traffic is exchanged, just liveness. Used by the agent's queue
+    /// health/offer path so it never reports a coordinator as reachable
+    /// it has not actually dialed. Returns an error (with context) when
+    /// the coordinator is dead, not listening on the ALPN, or the dial
+    /// exceeds `timeout`.
+    pub async fn probe(&self, timeout: std::time::Duration) -> Result<(), String> {
+        let conn = tokio::time::timeout(
+            timeout,
+            self.endpoint
+                .connect(self.coordinator_addr.clone(), VTESSERA_ALPN),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "dial coordinator: timed out after {:?} (no relay/DIRECT path)",
+                timeout
+            )
+        })?
+        .map_err(|e| format!("dial coordinator: {e}"))?;
+        conn.close(0u32.into(), b"probe");
+        Ok(())
+    }
+
     /// One JSON round-trip over a fresh QUIC bi-stream.
     async fn rpc(&self, request: QueueRequest) -> Result<QueueResponse, String> {
         let conn = self
@@ -382,5 +409,57 @@ mod tests {
             .await
             .expect("lease");
         lease.verify(&pubkey_hex).unwrap();
+    }
+
+    /// Honest-reachability probe (design §4b-7): a real QUIC handshake must
+    /// succeed against a live coordinator and fail against one that is not
+    /// answer on the ALPN.
+    #[tokio::test]
+    async fn probe_verifies_live_coordinator_roundtrip() {
+        let srv_key = iroh::SecretKey::from_bytes(&[0x41; 32]);
+        let cli_key = iroh::SecretKey::from_bytes(&[0x42; 32]);
+
+        let srv = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(srv_key.clone())
+            .bind()
+            .await
+            .unwrap();
+        let handler = CoordinatorQueueHandler::new(SigningKey::from_bytes(&srv_key.to_bytes()));
+        let _router = Router::builder(srv.clone())
+            .accept(VTESSERA_ALPN, handler)
+            .spawn();
+
+        let cli = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(cli_key.clone())
+            .bind()
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let client = QueueClient::new(cli.clone(), loopback_addr(&srv));
+        client
+            .probe(Duration::from_secs(5))
+            .await
+            .expect("live coordinator must answer the dial");
+    }
+
+    #[tokio::test]
+    async fn probe_errors_on_dead_coordinator() {
+        let cli_key = iroh::SecretKey::from_bytes(&[0x44; 32]);
+        let cli = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(cli_key)
+            .bind()
+            .await
+            .unwrap();
+        // 127.0.0.1:1 is closed — nothing answers the ALPN there. A tight
+        // 500ms budget keeps the failing case fast offline.
+        let dead = EndpointAddr {
+            id: iroh::SecretKey::from_bytes(&[0x43; 32]).public(),
+            addrs: [TransportAddr::Ip("127.0.0.1:1".parse().unwrap())]
+                .into_iter()
+                .collect(),
+        };
+        let client = QueueClient::new(cli, dead);
+        assert!(client.probe(Duration::from_millis(500)).await.is_err());
     }
 }
