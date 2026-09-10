@@ -184,6 +184,12 @@ pub struct JobSpec {
     /// boundary even if it hasn't exited. The buyer is refunded the
     /// unearned portion via Module 4.
     pub max_duration_secs: u64,
+    /// Advisory node-local scheduling priority, 0 (default) ..= 9. Higher
+    /// sorts earlier in a node's wait queue. Never negotiated on-chain or
+    /// written into a receipt — node-local only (job-queue spec §4.3).
+    /// Out-of-range values are rejected with a 400 at admission.
+    #[serde(default)]
+    pub priority: u8,
 }
 
 /// Per-job metering written into the signed receipt (ROADMAP.md §1d).
@@ -476,6 +482,7 @@ mod tests {
             },
             network: NetworkPolicy::OutboundHttps,
             max_duration_secs: 3600,
+            priority: 0,
         }
     }
 
@@ -543,6 +550,7 @@ mod tests {
             },
             network: NetworkPolicy::None,
             max_duration_secs,
+            priority: 0,
         }
     }
 

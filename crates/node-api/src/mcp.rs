@@ -847,6 +847,7 @@ mod tests {
             state_dir: None,
             #[cfg(feature = "serve")]
             index: None,
+            queue: None,
         })
     }
 

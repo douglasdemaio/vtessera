@@ -1003,6 +1003,7 @@ mod tests {
             },
             network: NetworkPolicy::None,
             max_duration_secs: 10,
+            priority: 0,
         }
     }
 

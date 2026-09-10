@@ -185,6 +185,7 @@ fn main() {
         verifier: None,
         state_dir: None,
         index: None,
+        queue: None,
     });
 
     eprintln!(

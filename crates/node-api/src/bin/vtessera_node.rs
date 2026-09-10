@@ -1224,6 +1224,7 @@ fn main() {
         verifier,
         state_dir: Some(args.state_dir.clone().into()),
         index,
+        queue: None,
     };
 
     if wants_inbound_listener(args.connectivity) {

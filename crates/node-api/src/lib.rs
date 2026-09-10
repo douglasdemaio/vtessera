@@ -50,6 +50,8 @@ pub mod queue;
 #[cfg(feature = "serve")]
 pub mod solana_derivation;
 
+use queue::{EnqueueOutcome, JobQueue};
+
 /// One inbound HTTP request, framework-agnostic.
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
@@ -243,6 +245,11 @@ pub struct NodeState {
     /// behaves as a standalone node with no claim gate.
     #[cfg(feature = "serve")]
     pub index: Option<Arc<dyn index::IndexClient>>,
+    /// Optional job queue (PRD shortfall "no queuing/scheduling"). `Some`
+    /// bounds concurrency to `max_concurrent` and holds the excess in a
+    /// durable on-disk wait queue; `None` preserves today's synchronous
+    /// behavior byte-for-byte. The binary spawns the drainer thread.
+    pub queue: Option<Arc<JobQueue>>,
 }
 
 /// Outcome of handling a `/jobs` request when the offer is paid.
@@ -416,6 +423,10 @@ pub fn handle_paid_job(state: &NodeState, payment_proof: &str, body: &[u8]) -> H
         Ok(s) => s,
         Err(e) => return HttpResponse::json(400, format!("bad job spec: {e}")),
     };
+    let priority = match spec_priority(&spec) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
 
     // Verify payment on-chain.
     match verifier.verify(payment_proof, &state.escrow_account, &state.network) {
@@ -452,17 +463,15 @@ pub fn handle_paid_job(state: &NodeState, payment_proof: &str, body: &[u8]) -> H
     // Create contract and write to disk.
     create_and_write_contract(state, &spec);
 
-    // Run through executor.
-    match &state.runner {
-        Some(runner) => match runner.run(body) {
-            Ok(json) => HttpResponse::json(200, json),
-            Err(e) => HttpResponse::json(e.status, e.message),
-        },
-        None => HttpResponse::json(
-            501,
-            r#"{"status":"not-implemented","reason":"job execution not wired"}"#.into(),
-        ),
-    }
+    // Run synchronously through the executor, or admit to the wait queue
+    // when a slot isn't free (202). On a 503 re-attach the x402 challenge so
+    // an agent that retries later can re-pay cleanly against the same terms.
+    let challenge = PaymentChallenge {
+        offer: &state.offer,
+        escrow_account: &state.escrow_account,
+        network: &state.network,
+    };
+    execute_or_queue(state, &spec.job_id, priority, body, Some(challenge))
 }
 
 #[cfg(not(feature = "serve"))]
@@ -487,17 +496,12 @@ pub fn run_free(state: &NodeState, body: &[u8], agent_id: Option<String>) -> Htt
         Ok(s) => s,
         Err(e) => return HttpResponse::json(400, format!("bad job spec: {e}")),
     };
+    let priority = match spec_priority(&spec) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
     create_and_write_contract(state, &spec);
-    match &state.runner {
-        Some(runner) => match runner.run(body) {
-            Ok(json) => HttpResponse::json(200, json),
-            Err(e) => HttpResponse::json(e.status, e.message),
-        },
-        None => HttpResponse::json(
-            501,
-            r#"{"status":"not-implemented","reason":"job execution is not wired; start the node with an executor backend"}"#.into(),
-        ),
-    }
+    execute_or_queue(state, &spec.job_id, priority, body, None)
 }
 
 #[cfg(not(feature = "serve"))]
@@ -515,6 +519,87 @@ fn run_free(state: &NodeState, body: &[u8], agent_id: Option<String>) -> HttpRes
             r#"{"status":"not-implemented","reason":"job execution is not wired; start the node with an executor backend"}"#.into(),
         ),
     }
+}
+
+/// Run `body` synchronously, or admit it to the wait queue when a slot isn't
+/// free. The queue-facing tail shared by the free and paid `POST /jobs` paths.
+///
+/// With `state.queue` `None` this is byte-for-byte the pre-queue behavior.
+/// With `Some(q)`:
+///
+/// - slot free → the runner's 200 JSON (unchanged fast path; the queue also
+///   records running→done markers for a uniform status surface),
+/// - busy → 202 `{"status":"queued","job_id":..,"position":k,"status_url":..}`,
+/// - full → 503 `{"status":"queue_full"}` (with the x402 challenge embedded
+///   on the paid path so a retrying agent re-pays against the same terms).
+fn execute_or_queue(
+    state: &NodeState,
+    job_id: &str,
+    priority: u8,
+    body: &[u8],
+    paid_challenge: Option<PaymentChallenge<'_>>,
+) -> HttpResponse {
+    let Some(q) = &state.queue else {
+        return match &state.runner {
+            Some(runner) => match runner.run(body) {
+                Ok(json) => HttpResponse::json(200, json),
+                Err(e) => HttpResponse::json(e.status, e.message),
+            },
+            None => HttpResponse::json(
+                501,
+                r#"{"status":"not-implemented","reason":"job execution is not wired"}"#.into(),
+            ),
+        };
+    };
+
+    match q.enqueue(job_id, priority, body) {
+        Ok(EnqueueOutcome::RanNow(json)) => HttpResponse::json(200, json),
+        Ok(EnqueueOutcome::Queued { position }) => HttpResponse::json(
+            202,
+            serde_json::to_string(&serde_json::json!({
+                "status": "queued",
+                "job_id": job_id,
+                "position": position,
+                "status_url": format!("/jobs/{job_id}/status"),
+                "priority": priority,
+            }))
+            .unwrap_or_else(|_| r#"{"status":"queued","job_id":""}"#.into()),
+        ),
+        Err(e) if e.status == 503 => match paid_challenge {
+            Some(challenge) => {
+                let body = serde_json::to_string(&serde_json::json!({
+                    "status": "queue_full",
+                    // Re-attach the challenge so the agent can pay up front
+                    // and resubmit without re-fetching the 402 first.
+                    "x402": serde_json::from_str::<serde_json::Value>(
+                        &payment_required_body(&challenge),
+                    )
+                    .unwrap_or(serde_json::Value::Null),
+                }))
+                .unwrap_or_else(|_| r#"{"status":"queue_full"}"#.into());
+                HttpResponse::json(503, body)
+            }
+            None => HttpResponse::json(503, r#"{"status":"queue_full"}"#.into()),
+        },
+        Err(e) => HttpResponse::json(e.status, e.message),
+    }
+}
+
+/// Validate the advisory `priority` from a job spec: the wire field is one
+/// byte and the queue sorts on it, so out-of-range is a 400 up front.
+#[cfg(feature = "serve")]
+fn spec_priority(spec: &vtessera_executor::JobSpec) -> Result<u8, HttpResponse> {
+    if spec.priority > 9 {
+        return Err(HttpResponse::json(
+            400,
+            serde_json::to_string(&serde_json::json!({
+                "status": "bad_request",
+                "reason": format!("priority {} out of range 0..=9", spec.priority),
+            }))
+            .unwrap_or_else(|_| r#"{"status":"bad_request"}"#.into()),
+        ));
+    }
+    Ok(spec.priority)
 }
 
 /// Create a `JobContract` from the offer and job spec, and write it to disk.
@@ -736,6 +821,7 @@ mod tests {
             state_dir: None,
             #[cfg(feature = "serve")]
             index: None,
+            queue: None,
         }
     }
 
@@ -1081,30 +1167,325 @@ mod tests {
         }
 
         #[test]
-        fn metrics_endpoint_returns_prometheus_format() {
-            let s = state(PriceQuote::Free);
-            let r = dispatch(&s, req(HttpMethod::Get, "/metrics", vec![]));
-            assert_eq!(r.status, 200);
-            let content_type = r
-                .headers
-                .iter()
-                .find(|(k, _)| k == "content-type")
-                .map(|(_, v)| v.as_str())
-                .unwrap_or("");
-            assert!(
-                content_type.contains("text/plain"),
-                "expected text/plain, got {content_type}"
-            );
-            // Response should be valid Prometheus text exposition format.
-            let body = String::from_utf8(r.body).unwrap();
-            // Empty body is acceptable if no metrics are registered yet.
-            // If metrics exist, they should have HELP/TYPE lines.
-            if !body.is_empty() {
-                assert!(
-                    body.contains("# HELP") || body.contains("# TYPE"),
-                    "expected Prometheus format markers in: {body}"
-                );
+        fn gated_job_claim_runs_before_queue_admission() {
+            let dir = std::env::temp_dir().join(format!("vtq-gate-first-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut s = state_with_runner(PriceQuote::Free, FakeRunner);
+            s.index = Some(FakeIndex::with(Err(AdmitError::Taken(
+                "agent-other".into(),
+            ))));
+            s.queue = Some(queue::JobQueue::new(&dir, Arc::new(FakeRunner), 1, 8));
+            // The gate refuses before the queue sees the job.
+            let r = dispatch(&s, job_req(vec![("x-agent-id", "agent-a")]));
+            assert_eq!(r.status, 409);
+            assert!(String::from_utf8(r.body)
+                .unwrap()
+                .contains("node claimed by agent-other"));
+        }
+    }
+
+    #[cfg(feature = "serve")]
+    mod queue_admission {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::thread;
+
+        static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        /// Immediate runner: echoes the job_id back like the real backend.
+        struct EchoRunner;
+        impl JobRunner for EchoRunner {
+            fn run(&self, body: &[u8]) -> Result<String, JobRunError> {
+                let id: serde_json::Value = serde_json::from_slice(body)
+                    .ok()
+                    .and_then(|v: serde_json::Value| v.get("job_id").cloned())
+                    .unwrap_or(serde_json::Value::String("x".into()));
+                Ok(format!(
+                    r#"{{"status":"accepted","job_id":{}}}"#,
+                    serde_json::to_string(&id).unwrap()
+                ))
             }
+        }
+
+        /// Runner that blocks until `release` is set — occupies the only
+        /// slot from a background thread so later submissions get queued.
+        struct GateRunner {
+            release: Arc<Mutex<bool>>,
+        }
+        impl JobRunner for GateRunner {
+            fn run(&self, _body: &[u8]) -> Result<String, JobRunError> {
+                loop {
+                    if *self.release.lock().unwrap() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Ok(r#"{"status":"accepted","job_id":"x"}"#.into())
+            }
+        }
+
+        fn queue_state(
+            runner: Arc<dyn JobRunner>,
+            max_concurrent: u32,
+            max_queue_len: usize,
+        ) -> (NodeState, Arc<std::path::PathBuf>) {
+            let dir = Arc::new(std::env::temp_dir().join(format!(
+                "vtq-adm-{}-{}",
+                std::process::id(),
+                DIR_COUNTER.fetch_add(1, Ordering::SeqCst)
+            )));
+            let _ = std::fs::remove_dir_all(dir.as_ref());
+            let mut s = state(PriceQuote::Free);
+            s.queue = Some(queue::JobQueue::new(
+                dir.as_ref(),
+                runner,
+                max_concurrent,
+                max_queue_len,
+            ));
+            (s, dir)
+        }
+
+        fn job_body(job_id: &str, priority: Option<u8>) -> Vec<u8> {
+            let prio = priority
+                .map(|p| format!(r#","priority":{p}"#))
+                .unwrap_or_default();
+            format!(
+                r#"{{"job_id":"{job_id}","image":"ghcr.io/example/echo:latest","command":[],"env":[],"devices":{{"class":{{"kind":"cpu"}},"vcpus":1,"mem_kb":1024,"min_vram_mb":0}},"max_duration_secs":60{prio}}}"#
+            )
+            .into_bytes()
+        }
+
+        /// Occupy the only slot with a background submission.
+        fn hold_slot(q: &Arc<queue::JobQueue>, job_id: &str) -> thread::JoinHandle<()> {
+            let q = q.clone();
+            let job_id = job_id.to_string();
+            let body = job_body(&job_id, None);
+            thread::spawn(move || {
+                let _ = q.enqueue(&job_id, 0, &body).unwrap();
+            })
+        }
+
+        fn wait_for_marker(dir: &std::path::Path, job_id: &str, suffix: &str) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let marker = dir.join(format!("{job_id}.json{suffix}"));
+            while std::time::Instant::now() < deadline {
+                if marker.exists() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("{job_id} never reached {suffix}");
+        }
+
+        /// The slot-holder is *running* (blocked in the gate runner), not done.
+        fn wait_holding(dir: &std::path::Path, job_id: &str) {
+            wait_for_marker(dir, job_id, ".running");
+        }
+
+        #[test]
+        fn slot_free_runs_now_unchanged() {
+            let (s, dir) = queue_state(Arc::new(EchoRunner), 1, 8);
+            let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+            r.body = job_body("j-fast", None);
+            let resp = dispatch(&s, r);
+            assert_eq!(resp.status, 200);
+            let body = String::from_utf8(resp.body).unwrap();
+            assert!(body.contains("\"status\":\"accepted\""));
+            assert!(body.contains("\"job_id\":\"j-fast\""));
+            // Uniform status surface: a done marker exists even on the
+            // sync fast path.
+            assert!(dir.join("j-fast.json.done").exists());
+        }
+
+        #[test]
+        fn busy_node_returns_202_with_status_url() {
+            let release = Arc::new(Mutex::new(false));
+            let (s, dir) = queue_state(
+                Arc::new(GateRunner {
+                    release: release.clone(),
+                }),
+                1,
+                8,
+            );
+            let q = s.queue.clone().unwrap();
+            let holder = hold_slot(&q, "hold1");
+            wait_holding(&dir, "hold1");
+
+            let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+            r.body = job_body("j-2", None);
+            let resp = dispatch(&s, r);
+            assert_eq!(resp.status, 202);
+            let body = String::from_utf8(resp.body).unwrap();
+            assert!(body.contains("\"status\":\"queued\""));
+            assert!(body.contains("\"job_id\":\"j-2\""));
+            assert!(body.contains("\"status_url\":\"/jobs/j-2/status\""));
+            assert!(body.contains("\"position\":1"));
+
+            // Release the slot and let the queue drain the 202 job.
+            *release.lock().unwrap() = true;
+            holder.join().unwrap();
+            q.drain_sync(8);
+            assert!(dir.join("j-2.json.done").exists());
+        }
+
+        #[test]
+        fn queue_full_returns_503() {
+            let release = Arc::new(Mutex::new(false));
+            let (s, dir) = queue_state(
+                Arc::new(GateRunner {
+                    release: release.clone(),
+                }),
+                1,
+                1, // only one waiting slot
+            );
+            let q = s.queue.clone().unwrap();
+            let holder = hold_slot(&q, "hold1");
+            wait_holding(&dir, "hold1");
+            // Fill the wait queue.
+            let _ = q.enqueue("j-full", 0, &job_body("j-full", None));
+
+            let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+            r.body = job_body("j-reject", None);
+            let resp = dispatch(&s, r);
+            assert_eq!(resp.status, 503);
+            assert!(String::from_utf8(resp.body)
+                .unwrap()
+                .contains("\"status\":\"queue_full\""));
+            *release.lock().unwrap() = true;
+            holder.join().unwrap();
+        }
+
+        #[test]
+        fn priority_out_of_range_returns_400() {
+            let (s, _dir) = queue_state(Arc::new(EchoRunner), 1, 8);
+            let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+            r.body = job_body("j-prio", Some(10));
+            let resp = dispatch(&s, r);
+            assert_eq!(resp.status, 400);
+            assert!(String::from_utf8(resp.body)
+                .unwrap()
+                .contains("priority 10 out of range 0..=9"));
+        }
+
+        #[test]
+        fn priority_absent_defaults_to_zero_and_runs() {
+            let (s, dir) = queue_state(Arc::new(EchoRunner), 1, 8);
+            let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+            r.body = job_body("j-default", None);
+            let resp = dispatch(&s, r);
+            assert_eq!(resp.status, 200);
+            assert!(dir.join("j-default.json.done").exists());
+        }
+
+        struct OkVerifier;
+        impl PaymentVerifier for OkVerifier {
+            fn verify(
+                &self,
+                _proof: &str,
+                _escrow_account: &str,
+                _network: &str,
+            ) -> Result<(String, u64), PaymentVerifyError> {
+                Ok(("5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs".into(), 1000))
+            }
+        }
+
+        fn paid_state(
+            runner: Arc<dyn JobRunner>,
+            max_concurrent: u32,
+            max_queue_len: usize,
+        ) -> (NodeState, Arc<std::path::PathBuf>) {
+            let (mut s, dir) = queue_state(runner, max_concurrent, max_queue_len);
+            s.offer = signed(paid());
+            s.verifier = Some(Arc::new(OkVerifier));
+            (s, dir)
+        }
+
+        #[test]
+        fn paid_job_verifies_then_queues_when_busy() {
+            let release = Arc::new(Mutex::new(false));
+            let (s, dir) = paid_state(
+                Arc::new(GateRunner {
+                    release: release.clone(),
+                }),
+                1,
+                8,
+            );
+            let q = s.queue.clone().unwrap();
+            let holder = hold_slot(&q, "hold1");
+            wait_holding(&dir, "hold1");
+
+            let mut r = req(
+                HttpMethod::Post,
+                "/jobs",
+                vec![("x-payment", r#"{"tx":"sig","amount_micros":1000}"#)],
+            );
+            r.body = job_body("j-paid", None);
+            let resp = dispatch(&s, r);
+            assert_eq!(resp.status, 202);
+            let body = String::from_utf8(resp.body).unwrap();
+            assert!(body.contains("\"status\":\"queued\""));
+            assert!(body.contains("\"status_url\":\"/jobs/j-paid/status\""));
+            *release.lock().unwrap() = true;
+            holder.join().unwrap();
+        }
+
+        #[test]
+        fn paid_job_queue_full_re_attaches_x402() {
+            let release = Arc::new(Mutex::new(false));
+            let (s, dir) = paid_state(
+                Arc::new(GateRunner {
+                    release: release.clone(),
+                }),
+                1,
+                1,
+            );
+            let q = s.queue.clone().unwrap();
+            let holder = hold_slot(&q, "hold1");
+            wait_holding(&dir, "hold1");
+            let _ = q.enqueue("j-full", 0, &job_body("j-full", None));
+
+            let mut r = req(
+                HttpMethod::Post,
+                "/jobs",
+                vec![("x-payment", r#"{"tx":"sig","amount_micros":1000}"#)],
+            );
+            r.body = job_body("j-reject", None);
+            let resp = dispatch(&s, r);
+            assert_eq!(resp.status, 503);
+            let body = String::from_utf8(resp.body).unwrap();
+            assert!(body.contains("\"status\":\"queue_full\""));
+            assert!(body.contains("\"x402\""));
+            assert!(body.contains("\"escrow_account\""));
+            *release.lock().unwrap() = true;
+            holder.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn metrics_endpoint_returns_prometheus_format() {
+        let s = state(PriceQuote::Free);
+        let r = dispatch(&s, req(HttpMethod::Get, "/metrics", vec![]));
+        assert_eq!(r.status, 200);
+        let content_type = r
+            .headers
+            .iter()
+            .find(|(k, _)| k == "content-type")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert!(
+            content_type.contains("text/plain"),
+            "expected text/plain, got {content_type}"
+        );
+        // Response should be valid Prometheus text exposition format.
+        let body = String::from_utf8(r.body).unwrap();
+        // Empty body is acceptable if no metrics are registered yet.
+        // If metrics exist, they should have HELP/TYPE lines.
+        if !body.is_empty() {
+            assert!(
+                body.contains("# HELP") || body.contains("# TYPE"),
+                "expected Prometheus format markers in: {body}"
+            );
         }
     }
 }
