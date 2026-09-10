@@ -513,6 +513,7 @@ fn post_job(
 /// and QUIC (wire-parsed) transports.
 ///
 /// - HTTP 200 -> accepted, with metering when the node reports it.
+/// - HTTP 202 -> queued; the node reports a status_url to poll (§11).
 /// - HTTP 402 without a payment proof -> the x402 challenge + how to pay.
 /// - HTTP 402 with a proof -> challenge + error (the proof was rejected).
 /// - Anything else -> the node's error message.
@@ -538,6 +539,22 @@ fn render_submit_outcome(
             println!("cpu_seconds: {cpu:.2}");
             println!("exit_status: {exit}");
         }
+        return Ok(());
+    }
+    if status == 202 {
+        // The node accepted the job into its wait queue (PRD §11). The
+        // admission surface is synchronous: poll the reported status_url
+        // until the job drains.
+        if json {
+            println!("{}", serde_json::to_string_pretty(v).unwrap());
+            return Ok(());
+        }
+        let job_id = v["job_id"].as_str().unwrap_or("?");
+        let position = v["position"].as_u64().unwrap_or(0);
+        let status_url = v["status_url"].as_str().unwrap_or("/jobs/<id>/status");
+        println!("status:   queued (position {position})");
+        println!("job_id:   {job_id}");
+        println!("poll:     {status_url}");
         return Ok(());
     }
     if status == 402 {
@@ -1069,6 +1086,16 @@ mod tests {
             serde_json::json!({"status": "accepted", "job_id": "job-1", "backend": "noop-cpu"});
         assert!(render_submit_outcome(200, &acc, false, true).is_ok());
         assert!(render_submit_outcome(200, &acc, true, true).is_ok());
+        // 202 queued -> Ok, with the status_url to poll.
+        let queued = serde_json::json!({
+            "status": "queued",
+            "job_id": "job-2",
+            "position": 3,
+            "status_url": "/jobs/job-2/status",
+            "priority": 0,
+        });
+        assert!(render_submit_outcome(202, &queued, false, true).is_ok());
+        assert!(render_submit_outcome(202, &queued, true, true).is_ok());
         // Other codes -> Err carrying the node's message.
         let rejected = serde_json::json!({"error": "no capacity"});
         let r = render_submit_outcome(503, &rejected, false, true);
