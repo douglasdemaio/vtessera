@@ -46,6 +46,7 @@ use vtessera_offer::{PriceQuote, SignedOffer};
 #[cfg(feature = "serve")]
 pub mod index;
 pub mod mcp;
+pub mod queue;
 #[cfg(feature = "serve")]
 pub mod solana_derivation;
 
@@ -125,6 +126,14 @@ impl JobRunError {
     pub fn server(message: impl Into<String>) -> Self {
         JobRunError {
             status: 500,
+            message: message.into(),
+        }
+    }
+
+    /// Temporarily can't accept work right now (e.g. the wait queue is full).
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        JobRunError {
+            status: 503,
             message: message.into(),
         }
     }
