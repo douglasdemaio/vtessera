@@ -161,7 +161,9 @@ impl McpServer {
                 "Free offers run when the node has an executor backend wired; ",
                 "paid submissions with a payment proof fail honestly until ",
                 "on-chain verification lands. When the node is claim-gated, ",
-                "pass the `agent_id` this node is claimed by (or claim it)."
+                "pass the `agent_id` this node is claimed by (or claim it). If ",
+                "the node is busy it answers 202 with a `status_url` and the ",
+                "job's queue position — poll that URL until it drains."
             ),
             "inputSchema": {
                 "type": "object",
@@ -276,7 +278,7 @@ impl McpServer {
                 let text = String::from_utf8_lossy(&resp.body).to_string();
                 Ok(json!({
                     "content": [{ "type": "text", "text": text }],
-                    "isError": resp.status != 200,
+                    "isError": !(resp.status == 200 || resp.status == 202),
                 }))
             }
             JobDecision::RunFree { body } => {
@@ -287,7 +289,7 @@ impl McpServer {
                 let text = String::from_utf8_lossy(&resp.body).to_string();
                 Ok(json!({
                     "content": [{ "type": "text", "text": text }],
-                    "isError": resp.status != 200,
+                    "isError": !(resp.status == 200 || resp.status == 202),
                 }))
             }
         }
@@ -785,7 +787,7 @@ impl MarketplaceMcpServer {
         let body = String::from_utf8_lossy(&bytes).to_string();
         Ok(json!({
             "content": [{ "type": "text", "text": body }],
-            "isError": status != 200,
+            "isError": !(status == 200 || status == 202),
         }))
     }
 }
@@ -847,6 +849,7 @@ mod tests {
             state_dir: None,
             #[cfg(feature = "serve")]
             index: None,
+            queue: None,
         })
     }
 
@@ -1099,7 +1102,12 @@ mod tests {
     mod gate {
         use super::*;
         use crate::index::{AdmitError, IndexClient, IndexQuery};
+        use crate::queue::JobQueue;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        static GATE_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
         struct FakeIndex {
             calls: Mutex<Vec<String>>,
@@ -1142,6 +1150,43 @@ mod tests {
             let mut state = server(price).state;
             state.index = Some(index);
             McpServer::new(state)
+        }
+
+        /// Runner that blocks until `release` is set — occupies the only
+        /// queue slot from a background thread so later submissions take
+        /// the busy 202 path.
+        struct GateRunner {
+            release: Arc<Mutex<bool>>,
+        }
+        impl crate::JobRunner for GateRunner {
+            fn run(&self, _body: &[u8]) -> Result<String, crate::JobRunError> {
+                loop {
+                    if *self.release.lock().unwrap() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Ok(r#"{"status":"accepted","job_id":"hold"}"#.into())
+            }
+        }
+
+        /// MCP server with an admit gate, a blocking runner, and a live
+        /// queue so a busy-node submission surfaces as 202 queued.
+        fn gated_queue_server(
+            index: Arc<FakeIndex>,
+            release: Arc<Mutex<bool>>,
+        ) -> (McpServer, Arc<std::path::PathBuf>) {
+            let dir = Arc::new(std::env::temp_dir().join(format!(
+                "vtq-mcp-{}-{}",
+                std::process::id(),
+                GATE_DIR_COUNTER.fetch_add(1, Ordering::SeqCst)
+            )));
+            let _ = std::fs::remove_dir_all(dir.as_ref());
+            let runner: Arc<dyn crate::JobRunner> = Arc::new(GateRunner { release });
+            let mut state = server(PriceQuote::Free).state;
+            state.index = Some(index);
+            state.queue = Some(JobQueue::new(dir.as_ref(), runner, 1, 8));
+            (McpServer::new(state), dir)
         }
 
         #[test]
@@ -1263,6 +1308,48 @@ mod tests {
             assert_eq!(r["result"]["isError"], json!(true));
             let text = r["result"]["content"][0]["text"].as_str().unwrap();
             assert!(text.contains("cannot verify claim availability"));
+        }
+
+        #[test]
+        fn gated_submit_job_on_busy_node_returns_202_queued() {
+            let release = Arc::new(Mutex::new(false));
+            let (srv, dir) = gated_queue_server(FakeIndex::admitting(), release.clone());
+            let q = srv.state.queue.clone().unwrap();
+
+            // Occupy the single slot with a background submission that blocks
+            // inside the runner.
+            let q2 = q.clone();
+            let holder = thread::spawn(move || {
+                let body = valid_job_spec_str_with_id("hold1").into_bytes();
+                let _ = q2.enqueue("hold1", 0, &body).unwrap();
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let marker = dir.join("hold1.json.running");
+            while std::time::Instant::now() < deadline && !marker.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(marker.exists(), "hold1 never reached running");
+
+            let job = valid_job_spec_str_with_id("j-2");
+            let r = call(
+                &srv,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"submit_job","arguments":{{"job":"{}","agent_id":"agent-demo"}}}}}}"#,
+                    job.replace('"', "\\\"")
+                ),
+            );
+            assert_eq!(r["result"]["isError"], json!(false));
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("\"status\":\"queued\""));
+            assert!(text.contains("\"job_id\":\"j-2\""));
+            assert!(text.contains("\"status_url\":\"/jobs/j-2/status\""));
+            assert!(text.contains("\"position\":1"));
+
+            // Release the slot and let the queue drain the queued job.
+            *release.lock().unwrap() = true;
+            holder.join().unwrap();
+            q.drain_sync(8);
+            assert!(dir.join("j-2.json.done").exists());
         }
     }
 

@@ -93,6 +93,7 @@ fn ch_spec(job_id: &str, command: Vec<String>, max_duration_secs: u64) -> JobSpe
         },
         network: NetworkPolicy::None,
         max_duration_secs,
+        priority: 0,
     }
 }
 

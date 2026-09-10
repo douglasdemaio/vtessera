@@ -68,6 +68,7 @@ use std::time::Duration;
 use vtessera_executor::{Backend, Executor, ExecutorError, JobMetering, JobSpec};
 use vtessera_mini_http::{serve, Method as MiniMethod, Request as MiniRequest, Response};
 use vtessera_node_api::index::{AdmitError, IndexClient, IndexQuery};
+use vtessera_node_api::queue::JobQueue;
 use vtessera_node_api::{
     dispatch, parse_signed_offer, HttpMethod, HttpRequest, JobRunError, JobRunner, NodeState,
     PaymentVerifier, PaymentVerifyError,
@@ -109,7 +110,8 @@ fn usage_and_exit() -> ! {
         [--publish <index-url>] [--publish-interval <secs>] \
         [--marketplace] [--marketplace-interval <secs>] \
         [--upnp] \
-        [--coordinator-addr <endpoint-addr.json> ...] [--coordinator-poll <secs>]"
+        [--coordinator-addr <endpoint-addr.json> ...] [--coordinator-poll <secs>] \
+        [--max-concurrent-jobs <n>] [--max-queue-len <n>]"
     );
     process::exit(2);
 }
@@ -179,6 +181,12 @@ struct Args {
     coordinator_addrs: Vec<PathBuf>,
     /// How often to poll the coordinator queue when empty (default 5s).
     coordinator_poll_interval: Duration,
+    /// How many jobs may run at once (default 1). Extra jobs wait in the
+    /// on-disk queue and are drained in priority/FIFO order.
+    max_concurrent_jobs: u32,
+    /// Maximum number of jobs that may wait in the queue before new
+    /// submissions get 503 (default 16).
+    max_queue_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +311,8 @@ where
     let mut connectivity = ConnectivityMode::InboundDialable;
     let mut coordinator_addrs: Vec<PathBuf> = Vec::new();
     let mut coordinator_poll: u64 = DEFAULT_COORDINATOR_POLL_SECS;
+    let mut max_concurrent_jobs: u32 = 1;
+    let mut max_queue_len: usize = 16;
     let mut it = argv.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -373,6 +383,19 @@ where
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 backend = BackendChoice::parse(&raw).unwrap_or_else(|| usage_and_exit());
             }
+            "--max-concurrent-jobs" => {
+                if let Some(s) = it.next() {
+                    max_concurrent_jobs = s.parse().unwrap_or_else(|_| usage_and_exit());
+                    if max_concurrent_jobs == 0 {
+                        max_concurrent_jobs = 1;
+                    }
+                }
+            }
+            "--max-queue-len" => {
+                if let Some(s) = it.next() {
+                    max_queue_len = s.parse().unwrap_or_else(|_| usage_and_exit());
+                }
+            }
             "--help" | "-h" => usage_and_exit(),
             _ => {
                 eprintln!("unknown argument: {a}");
@@ -403,6 +426,8 @@ where
             connectivity,
             coordinator_addrs,
             coordinator_poll_interval: Duration::from_secs(coordinator_poll),
+            max_concurrent_jobs,
+            max_queue_len,
         },
         _ => usage_and_exit(),
     }
@@ -1216,6 +1241,22 @@ fn main() {
         rpc_url: args.rpc_url.clone(),
     }));
 
+    // Node-local durable job queue: a background drainer pulls waiting jobs
+    // off disk and runs them (priority desc, then FIFO), at most
+    // `--max-concurrent-jobs` at once. `None` here would mean "admission
+    // sees a free slot every time" — the pre-queue behavior.
+    let queue = {
+        let q = JobQueue::new(
+            PathBuf::from(&args.state_dir).join("job-queue"),
+            runner.clone(),
+            args.max_concurrent_jobs,
+            args.max_queue_len,
+        );
+        let drainer = q.clone();
+        std::thread::spawn(move || drainer.spawn());
+        Some(q)
+    };
+
     let state = NodeState {
         offer: offer.clone(),
         escrow_account: args.escrow_account,
@@ -1224,6 +1265,7 @@ fn main() {
         verifier,
         state_dir: Some(args.state_dir.clone().into()),
         index,
+        queue,
     };
 
     if wants_inbound_listener(args.connectivity) {
@@ -1270,7 +1312,7 @@ fn main() {
                     method: match req.method {
                         MiniMethod::Get => HttpMethod::Get,
                         MiniMethod::Post => HttpMethod::Post,
-                        MiniMethod::Delete => HttpMethod::Other,
+                        MiniMethod::Delete => HttpMethod::Delete,
                         MiniMethod::Other => HttpMethod::Other,
                     },
                     path: req.path,
@@ -1948,7 +1990,8 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
             match request.method {
                 HttpMethod::Get => "GET",
                 HttpMethod::Post => "POST",
-                _ => "OTHER",
+                HttpMethod::Delete => "DELETE",
+                HttpMethod::Other => "OTHER",
             },
             request.path
         );
@@ -2002,6 +2045,7 @@ fn parse_quic_http_request(
     let method = match method_str {
         "GET" => HttpMethod::Get,
         "POST" => HttpMethod::Post,
+        "DELETE" => HttpMethod::Delete,
         _ => HttpMethod::Other,
     };
 

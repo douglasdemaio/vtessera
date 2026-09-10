@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 8402;
+/// How many jobs the node may run at once (`--max-concurrent-jobs`). The node
+/// clamps to >= 1; the GUI spin is bounded 1..=1024.
+pub const DEFAULT_MAX_CONCURRENT_JOBS: u32 = 1;
 pub const DEFAULT_ESCROW: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
 pub const DEFAULT_NETWORK: &str = "solana-devnet";
 /// Connectivity mode: an inbound TCP listener + iroh dial-in (the transition
@@ -106,6 +109,12 @@ pub struct Settings {
     /// pinned. Ignored in `inbound+dialable` mode.
     #[serde(default)]
     pub coordinator_addr: String,
+    /// How many jobs this node may run at once. Passed to `vtessera-node`
+    /// as `--max-concurrent-jobs`; jobs beyond this wait in the node-local
+    /// queue (§11 of the PRD / the job-queue spec). `0` is rejected on
+    /// validate (the node clamps to >= 1).
+    #[serde(default = "default_max_concurrent_jobs")]
+    pub max_concurrent_jobs: u32,
 }
 
 fn default_connectivity() -> String {
@@ -114,6 +123,10 @@ fn default_connectivity() -> String {
 
 fn default_backend() -> String {
     DEFAULT_BACKEND.into()
+}
+
+fn default_max_concurrent_jobs() -> u32 {
+    DEFAULT_MAX_CONCURRENT_JOBS
 }
 
 fn default_network_preset() -> String {
@@ -144,6 +157,7 @@ impl Default for Settings {
             upnp_enabled: false,
             connectivity: CONNECTIVITY_INBOUND.into(),
             coordinator_addr: String::new(),
+            max_concurrent_jobs: DEFAULT_MAX_CONCURRENT_JOBS,
         }
     }
 }
@@ -204,6 +218,9 @@ impl Settings {
                 "backend must be \"noop-cpu\" or \"local-cpu\", got \"{}\"",
                 self.backend
             ));
+        }
+        if self.max_concurrent_jobs < 1 {
+            return Err("max concurrent jobs must be at least 1".into());
         }
         if self.port == 0 {
             return Err("port must not be 0".into());
@@ -340,6 +357,7 @@ mod tests {
             allowed_cidrs: Vec::new(),
             connectivity: CONNECTIVITY_INBOUND.into(),
             coordinator_addr: String::new(),
+            max_concurrent_jobs: 1,
         }
     }
 
@@ -429,6 +447,37 @@ mod tests {
         assert_eq!(s.backend, DEFAULT_BACKEND);
         // Pre-consent settings.toml files re-show the gate once.
         assert!(needs_consent(&s));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn max_concurrent_jobs_defaults_to_one_and_validates() {
+        let s = Settings::default();
+        assert_eq!(s.max_concurrent_jobs, DEFAULT_MAX_CONCURRENT_JOBS);
+
+        let mut s = valid();
+        assert_eq!(s.max_concurrent_jobs, DEFAULT_MAX_CONCURRENT_JOBS);
+        assert!(s.validate().is_ok());
+
+        s.max_concurrent_jobs = 4;
+        assert!(s.validate().is_ok());
+
+        s.max_concurrent_jobs = 0;
+        assert!(s.validate().is_err());
+
+        // Old settings.toml without the key load with the default.
+        let dir = std::env::temp_dir().join("vtessera_gui_settings_maxjobs_default");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old =
+            "mode = \"free\"\ncurrency = \"eurc\"\nprice_per_cpu_hour = 0.0\npayout_id = \"\"\n\
+             port = 8402\nendpoint = \"http://127.0.0.1:8402\"\n\
+             escrow_account = \"6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma\"\n\
+             network = \"solana-devnet\"\nsample_interval_secs = 60\n";
+        std::fs::write(&path, old).unwrap();
+        let loaded = Settings::load_or_default(&path);
+        assert_eq!(loaded.max_concurrent_jobs, DEFAULT_MAX_CONCURRENT_JOBS);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

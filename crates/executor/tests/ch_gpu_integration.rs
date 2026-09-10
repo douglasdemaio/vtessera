@@ -108,6 +108,7 @@ fn gpu_spec(
         },
         network: NetworkPolicy::None,
         max_duration_secs,
+        priority: 0,
     }
 }
 
@@ -285,6 +286,7 @@ fn mig_true_exits_completed() {
         },
         network: NetworkPolicy::None,
         max_duration_secs: 10,
+        priority: 0,
     };
     let m = executor.run(&spec).expect("run should succeed");
     assert!(
@@ -326,6 +328,7 @@ fn mig_rejects_wrong_profile() {
         },
         network: NetworkPolicy::None,
         max_duration_secs: 10,
+        priority: 0,
     };
     let result = CloudHypervisorExecutor { config }.run(&spec);
     assert!(
@@ -382,6 +385,7 @@ fn vgpu_admission_requires_vfio() {
         },
         network: NetworkPolicy::None,
         max_duration_secs: 10,
+        priority: 0,
     };
     let result = CloudHypervisorExecutor { config }.run(&spec);
     assert!(
@@ -421,6 +425,7 @@ fn vgpu_rejects_wrong_type() {
         },
         network: NetworkPolicy::None,
         max_duration_secs: 10,
+        priority: 0,
     };
     let result = CloudHypervisorExecutor { config }.run(&spec);
     assert!(
