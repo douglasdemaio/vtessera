@@ -195,3 +195,174 @@ async fn node_pulls_free_job_from_coordinator_queue() {
     let _ = child.wait();
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Design test 6a-10 — **federated failover (e2e, in-process)**.
+///
+/// The node pins *two* coordinators (A, then B). While A is alive a job
+/// enqueued on A is pulled, dispatched, and acked. A is then killed
+/// (router shutdown + endpoint close); a job enqueued on B still runs, the
+/// process stays alive (the degradation chain A→?→B never fails closed into
+/// a hard 503), and a coordinator's death ejects nothing globally — B keeps
+/// serving the node. Per-coordinator lease receipts are covered at the
+/// lib level (`crates/coordinator` tests).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn node_fails_over_from_dead_coordinator_a_to_b() {
+    let dir = std::env::temp_dir().join(format!("vtessera_node_failover_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let state = dir.join("state");
+    fs::create_dir_all(&state).expect("create state dir");
+    write_matching_key_and_offer(&dir);
+
+    // --- Two in-process coordinators: A (preferred) then B (fallback) -----
+    let spawn_coord = |seed: [u8; 32]| async move {
+        let key = iroh::SecretKey::from_bytes(&seed);
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(key.clone())
+            .bind()
+            .await
+            .expect("bind coordinator endpoint");
+        let handler = vtessera_coordinator::iroh::CoordinatorQueueHandler::new(
+            vtessera_settlement::SigningKey::from_bytes(&key.to_bytes()),
+        );
+        let router = iroh::protocol::Router::builder(endpoint.clone())
+            .accept(vtessera_transport::iroh_sidecar::VTESSERA_ALPN, handler)
+            .spawn();
+        (key, endpoint, router)
+    };
+    let (_key_a, endpoint_a, router_a) = spawn_coord([0x61; 32]).await;
+    let (_key_b, endpoint_b, _router_b) = spawn_coord([0x62; 32]).await;
+
+    // Persist both coordinator addrs where the node binary expects them.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let addr_a = loopback_addr(&endpoint_a);
+    let addr_b = loopback_addr(&endpoint_b);
+    let addr_file_a = dir.join("coord-a.json");
+    let addr_file_b = dir.join("coord-b.json");
+    fs::write(
+        &addr_file_a,
+        serde_json::to_vec(&addr_a).expect("serialize endpoint addr"),
+    )
+    .expect("write coordinator A addr");
+    fs::write(
+        &addr_file_b,
+        serde_json::to_vec(&addr_b).expect("serialize endpoint addr"),
+    )
+    .expect("write coordinator B addr");
+
+    // --- Spawn the node pinned to [A, B] (federation order = preference) ---
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vtessera-node"))
+        .arg("--bind")
+        .arg("127.0.0.1:1") // never bound in outbound-only
+        .arg("--offer")
+        .arg(dir.join("offer.json"))
+        .arg("--escrow")
+        .arg("escrow")
+        .arg("--network")
+        .arg("solana-devnet")
+        .arg("--key")
+        .arg(dir.join("identity.key"))
+        .arg("--state-dir")
+        .arg(&state)
+        .arg("--connectivity")
+        .arg("outbound-only")
+        .arg("--coordinator-addr")
+        .arg(&addr_file_a)
+        .arg("--coordinator-addr")
+        .arg(&addr_file_b)
+        .arg("--coordinator-poll")
+        .arg("1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn vtessera-node");
+
+    // Give the node time to boot its outbound endpoint + both pull tasks.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "vtessera-node exited during failover test"
+    );
+
+    // --- Stage 1: coordinator A serves a job while both are alive ----------
+    let agent_key = iroh::SecretKey::from_bytes(&[0x53; 32]);
+    let agent_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+        .secret_key(agent_key)
+        .bind()
+        .await
+        .expect("bind agent endpoint");
+    let client_a =
+        vtessera_coordinator::iroh::QueueClient::new(agent_endpoint.clone(), addr_a.clone());
+    let client_b = vtessera_coordinator::iroh::QueueClient::new(agent_endpoint, addr_b.clone());
+
+    let job_a = "coord-failover-a";
+    client_a
+        .enqueue(job_json(job_a))
+        .await
+        .expect("enqueue job at coordinator A");
+    wait_for_receipt(&state, job_a, &mut child).await;
+    assert!(
+        client_a.reserve().await.expect("reserve").is_none(),
+        "coordinator A queue not drained after node ack"
+    );
+
+    // --- Stage 2: kill coordinator A (router + endpoint) -------------------
+    router_a.shutdown().await.ok();
+    endpoint_a.close().await;
+    // Give the (now-dead) dial a beat to be observed as unreachable.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // --- Stage 3: B keeps serving; the node never fails closed --------------
+    let job_b = "coord-failover-b";
+    client_b
+        .enqueue(job_json(job_b))
+        .await
+        .expect("enqueue job at coordinator B");
+    wait_for_receipt(&state, job_b, &mut child).await;
+    assert!(
+        client_b.reserve().await.expect("reserve").is_none(),
+        "coordinator B queue not drained after failover"
+    );
+
+    child.kill().ok();
+    let _ = child.wait();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+fn job_json(job_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "job_id": job_id,
+        "image": "ghcr.io/example/echo:latest",
+        "command": [],
+        "env": [],
+        "devices": {"class": {"kind": "cpu"}, "vcpus": 1, "mem_kb": 1024, "min_vram_mb": 0},
+        "max_duration_secs": 60
+    })
+}
+
+async fn wait_for_receipt(state: &std::path::Path, job_id: &str, child: &mut std::process::Child) {
+    let receipt = state.join("job-receipts").join(format!("{job_id}.json"));
+    let deadline = Instant::now() + PULL_WINDOW;
+    while Instant::now() < deadline {
+        if receipt.exists() {
+            break;
+        }
+        tokio::time::sleep(POLL_IDLE_INTERVAL).await;
+    }
+
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "vtessera-node exited during the run"
+    );
+    assert!(
+        receipt.exists(),
+        "node never pulled+ran coordinator job {job_id} ({} waited)",
+        PULL_WINDOW.as_secs()
+    );
+
+    let raw_receipt = fs::read_to_string(&receipt).expect("read receipt");
+    let signed: vtessera_settlement::SignedJobReceipt =
+        serde_json::from_str(&raw_receipt).expect("parse receipt");
+    vtessera_settlement::verify_signed_job_receipt(&signed).expect("receipt must verify");
+}
