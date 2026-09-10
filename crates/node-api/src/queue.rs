@@ -346,6 +346,10 @@ impl JobQueue {
         if names.cancelled.exists() || names.done.exists() {
             return Err(JobRunError::server("job was cancelled"));
         }
+        // Persist the base file *before* running so a crash mid-run leaves a
+        // rewound, restartable queued job — not just a stale `.running`
+        // marker with no record to re-run.
+        let _ = self.persist_queued(job);
         let _ = fs::write(&names.running, b"");
         let result = self.runner.run(&job.body);
         match &result {
@@ -642,29 +646,35 @@ mod tests {
     }
 
     #[test]
-    fn restart_recovers_queued_jobs_and_rewinds_running() {
+    fn restart_recovers_running_and_queued_jobs() {
         let release = Arc::new(Mutex::new(false));
         let dir = temp_dir("restart");
         let q = JobQueue::new(&dir, gate_runner(release.clone()), 1, 16);
+        // "held" is mid-run (fast path, only a `.running` marker at first).
         let holder = hold_slot(&q, "held");
         wait_until(2000, || dir.join("held.json.running").exists());
         q.enqueue("beta", 2, br#"{"job_id":"beta"}"#).unwrap();
         q.enqueue("alpha", 9, br#"{"job_id":"alpha"}"#).unwrap();
-        // Drop q "without going through GC" — the running marker stays on disk.
+        // Drop q "without going through GC" — scene of the crash.
         drop(q);
 
-        // "After reboot": a fresh queue re-reads queued files, sorted.
+        // "After reboot": a fresh queue re-reads the *base* files it can,
+        // including the rewound running job, sorted priority-desc then FIFO.
         let (runner2, _order, _calls) = order_runner();
         let q2 = JobQueue::new(&dir, runner2, 1, 16);
         assert_eq!(q2.position("alpha"), Some(1));
         assert_eq!(q2.position("beta"), Some(2));
+        assert_eq!(q2.position("held"), Some(3), "running job must be rewound");
         q2.drain_sync(10);
         assert_eq!(q2.status("alpha").unwrap().unwrap()["status"], "completed");
         assert_eq!(q2.status("beta").unwrap().unwrap()["status"], "completed");
-        // The rewound running marker is now completed once released.
+        assert_eq!(
+            q2.status("held").unwrap().unwrap()["status"],
+            "completed",
+            "rewound job re-runs on the fresh queue"
+        );
         *release.lock().unwrap() = true;
         holder.join().unwrap();
-        assert_eq!(q2.status("held").unwrap().unwrap()["status"], "completed");
     }
 
     #[test]

@@ -50,7 +50,9 @@ pub mod queue;
 #[cfg(feature = "serve")]
 pub mod solana_derivation;
 
-use queue::{EnqueueOutcome, JobQueue, QueueLookupError};
+#[cfg(feature = "serve")]
+use queue::EnqueueOutcome;
+use queue::{JobQueue, QueueLookupError};
 
 /// One inbound HTTP request, framework-agnostic.
 #[derive(Debug, Clone)]
@@ -598,6 +600,7 @@ fn run_free(state: &NodeState, body: &[u8], agent_id: Option<String>) -> HttpRes
 /// - busy → 202 `{"status":"queued","job_id":..,"position":k,"status_url":..}`,
 /// - full → 503 `{"status":"queue_full"}` (with the x402 challenge embedded
 ///   on the paid path so a retrying agent re-pays against the same terms).
+#[cfg(feature = "serve")]
 fn execute_or_queue(
     state: &NodeState,
     job_id: &str,
