@@ -1271,7 +1271,7 @@ fn main() {
                     method: match req.method {
                         MiniMethod::Get => HttpMethod::Get,
                         MiniMethod::Post => HttpMethod::Post,
-                        MiniMethod::Delete => HttpMethod::Other,
+                        MiniMethod::Delete => HttpMethod::Delete,
                         MiniMethod::Other => HttpMethod::Other,
                     },
                     path: req.path,
@@ -1949,7 +1949,8 @@ impl iroh::protocol::ProtocolHandler for VtesseraHandler {
             match request.method {
                 HttpMethod::Get => "GET",
                 HttpMethod::Post => "POST",
-                _ => "OTHER",
+                HttpMethod::Delete => "DELETE",
+                HttpMethod::Other => "OTHER",
             },
             request.path
         );
@@ -2003,6 +2004,7 @@ fn parse_quic_http_request(
     let method = match method_str {
         "GET" => HttpMethod::Get,
         "POST" => HttpMethod::Post,
+        "DELETE" => HttpMethod::Delete,
         _ => HttpMethod::Other,
     };
 

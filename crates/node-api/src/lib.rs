@@ -50,7 +50,7 @@ pub mod queue;
 #[cfg(feature = "serve")]
 pub mod solana_derivation;
 
-use queue::{EnqueueOutcome, JobQueue};
+use queue::{EnqueueOutcome, JobQueue, QueueLookupError};
 
 /// One inbound HTTP request, framework-agnostic.
 #[derive(Debug, Clone)]
@@ -68,6 +68,7 @@ pub struct HttpRequest {
 pub enum HttpMethod {
     Get,
     Post,
+    Delete,
     Other,
 }
 
@@ -283,6 +284,22 @@ pub struct PaymentChallenge<'a> {
 /// Dispatch a single request to the right handler. This is the function
 /// every HTTP framework integration calls.
 pub fn dispatch(state: &NodeState, req: HttpRequest) -> HttpResponse {
+    // Job-status routes are pattern-matched off the "fast" prefixes first so
+    // the `/jobs` POST dispatch stays untouched.
+    if req.method == HttpMethod::Get {
+        if let Some(id) = req
+            .path
+            .strip_prefix("/jobs/")
+            .and_then(|p| p.strip_suffix("/status"))
+        {
+            return handle_job_status(state, id);
+        }
+    }
+    if req.method == HttpMethod::Delete {
+        if let Some(id) = req.path.strip_prefix("/jobs/") {
+            return handle_job_cancel(state, id);
+        }
+    }
     match (req.method, req.path.as_str()) {
         (HttpMethod::Get, "/offer") => handle_offer(state),
         (HttpMethod::Get, "/mcp/manifest") => handle_mcp_manifest(state),
@@ -292,6 +309,55 @@ pub fn dispatch(state: &NodeState, req: HttpRequest) -> HttpResponse {
         (HttpMethod::Get, "/healthz") => HttpResponse::text(200, "ok"),
         (HttpMethod::Get, "/metrics") => handle_metrics(),
         _ => HttpResponse::text(404, "not found"),
+    }
+}
+
+/// `GET /jobs/<id>/status` — poll the state of a submitted job. The queue
+/// synthesizes the JSON from on-disk markers (spec §4.5), so a status check
+/// needs no locking or executor access.
+fn handle_job_status(state: &NodeState, job_id: &str) -> HttpResponse {
+    let Some(q) = &state.queue else {
+        return HttpResponse::json(
+            501,
+            r#"{"status":"not-implemented","reason":"job queue not configured"}"#.into(),
+        );
+    };
+    if !queue::valid_job_id(job_id) {
+        return HttpResponse::text(404, "not found");
+    }
+    match q.status(job_id) {
+        Ok(Some(json)) => HttpResponse::json(200, serde_json::to_string(&json).unwrap_or_default()),
+        _ => HttpResponse::text(404, "not found"),
+    }
+}
+
+/// `DELETE /jobs/<id>` — cancel a job that is still waiting. Running and
+/// finished jobs are never interrupted (no preemption by design).
+fn handle_job_cancel(state: &NodeState, job_id: &str) -> HttpResponse {
+    let Some(q) = &state.queue else {
+        return HttpResponse::json(
+            501,
+            r#"{"status":"not-implemented","reason":"job queue not configured"}"#.into(),
+        );
+    };
+    if !queue::valid_job_id(job_id) {
+        return HttpResponse::text(404, "not found");
+    }
+    match q.cancel(job_id) {
+        Ok(Ok(())) => HttpResponse {
+            status: 204,
+            headers: vec![("content-length".into(), "0".into())],
+            body: Vec::new(),
+        },
+        Ok(Err(reason)) => HttpResponse::json(
+            409,
+            serde_json::to_string(&serde_json::json!({
+                "status": "conflict",
+                "reason": reason,
+            }))
+            .unwrap_or_else(|_| r#"{"status":"conflict"}"#.into()),
+        ),
+        Err(QueueLookupError::NoSuchJob) => HttpResponse::text(404, "not found"),
     }
 }
 
@@ -1459,6 +1525,130 @@ mod tests {
             assert!(body.contains("\"escrow_account\""));
             *release.lock().unwrap() = true;
             holder.join().unwrap();
+        }
+
+        #[test]
+        fn queued_job_status_is_pollable_then_completed() {
+            let release = Arc::new(Mutex::new(false));
+            let (s, dir) = queue_state(
+                Arc::new(GateRunner {
+                    release: release.clone(),
+                }),
+                1,
+                8,
+            );
+            let q = s.queue.clone().unwrap();
+            let holder = hold_slot(&q, "hold1");
+            wait_holding(&dir, "hold1");
+
+            // Queue a job behind the holder.
+            let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+            r.body = job_body("j-poll", None);
+            let resp = dispatch(&s, r);
+            assert_eq!(resp.status, 202);
+
+            // Poll it: still queued at position 1.
+            let poll = dispatch(&s, req(HttpMethod::Get, "/jobs/j-poll/status", vec![]));
+            assert_eq!(poll.status, 200);
+            let body = String::from_utf8(poll.body).unwrap();
+            assert!(body.contains("\"status\":\"queued\""));
+            assert!(body.contains("\"job_id\":\"j-poll\""));
+            assert!(body.contains("\"position\":1"));
+
+            // Drain and poll again: completed, with the runner's JSON.
+            *release.lock().unwrap() = true;
+            holder.join().unwrap();
+            q.drain_sync(8);
+            let poll = dispatch(&s, req(HttpMethod::Get, "/jobs/j-poll/status", vec![]));
+            assert_eq!(poll.status, 200);
+            let body = String::from_utf8(poll.body).unwrap();
+            assert!(body.contains("\"status\":\"completed\""));
+            assert!(body.contains("\"job_id\":\"j-poll\""));
+        }
+
+        #[test]
+        fn status_unknown_job_returns_404() {
+            let (s, _dir) = queue_state(Arc::new(EchoRunner), 1, 8);
+            let r = dispatch(&s, req(HttpMethod::Get, "/jobs/nope/status", vec![]));
+            assert_eq!(r.status, 404);
+        }
+
+        #[test]
+        fn status_requires_a_configured_queue() {
+            let s = state(PriceQuote::Free);
+            let r = dispatch(&s, req(HttpMethod::Get, "/jobs/anything/status", vec![]));
+            assert_eq!(r.status, 501);
+        }
+
+        #[test]
+        fn cancel_waiting_job_returns_204_and_marks_cancelled() {
+            let release = Arc::new(Mutex::new(false));
+            let (s, dir) = queue_state(
+                Arc::new(GateRunner {
+                    release: release.clone(),
+                }),
+                1,
+                8,
+            );
+            let q = s.queue.clone().unwrap();
+            let holder = hold_slot(&q, "hold1");
+            wait_holding(&dir, "hold1");
+
+            let mut r = req(HttpMethod::Post, "/jobs", vec![]);
+            r.body = job_body("j-cancel", None);
+            assert_eq!(dispatch(&s, r).status, 202);
+
+            // Cancelling the waiting job succeeds and surfaces as cancelled.
+            let r = dispatch(&s, req(HttpMethod::Delete, "/jobs/j-cancel", vec![]));
+            assert_eq!(r.status, 204);
+            let poll = dispatch(&s, req(HttpMethod::Get, "/jobs/j-cancel/status", vec![]));
+            let body = String::from_utf8(poll.body).unwrap();
+            assert!(body.contains("\"status\":\"cancelled\""));
+
+            // A second cancel has nothing to cancel: it's past the queue.
+            let r = dispatch(&s, req(HttpMethod::Delete, "/jobs/j-cancel", vec![]));
+            assert_eq!(r.status, 409);
+
+            *release.lock().unwrap() = true;
+            holder.join().unwrap();
+        }
+
+        #[test]
+        fn cancel_running_job_conflicts() {
+            let release = Arc::new(Mutex::new(false));
+            let (s, dir) = queue_state(
+                Arc::new(GateRunner {
+                    release: release.clone(),
+                }),
+                1,
+                8,
+            );
+            let q = s.queue.clone().unwrap();
+            let holder = hold_slot(&q, "hold1");
+            wait_holding(&dir, "hold1");
+
+            // The runner is mid-flight — no preemption by design.
+            let r = dispatch(&s, req(HttpMethod::Delete, "/jobs/hold1", vec![]));
+            assert_eq!(r.status, 409);
+            let body = String::from_utf8(r.body).unwrap();
+            assert!(body.contains("\"status\":\"conflict\""));
+
+            *release.lock().unwrap() = true;
+            holder.join().unwrap();
+        }
+
+        #[test]
+        fn cancel_unknown_job_returns_404() {
+            let (s, _dir) = queue_state(Arc::new(EchoRunner), 1, 8);
+            let r = dispatch(&s, req(HttpMethod::Delete, "/jobs/nope", vec![]));
+            assert_eq!(r.status, 404);
+        }
+
+        #[test]
+        fn cancel_requires_a_configured_queue() {
+            let s = state(PriceQuote::Free);
+            let r = dispatch(&s, req(HttpMethod::Delete, "/jobs/anything", vec![]));
+            assert_eq!(r.status, 501);
         }
     }
 
