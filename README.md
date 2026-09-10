@@ -117,7 +117,9 @@ vtessera/
 ├── docs/
 │   ├── DESIGN.md                   # design index
 │   ├── CONSENT.md                  # consent & disclosure spec (UI + copy rules)
-│   └── superpowers/                # specs + plans (historical; specs are canonical)
+│   ├── design/                     # live design docs (connectivity, specs)
+│   ├── complete/                   # archive (implemented work / irrelevant notes)
+│   └── PRD.md                      # product requirements
 └── .github/workflows/ci.yml
 ```
 

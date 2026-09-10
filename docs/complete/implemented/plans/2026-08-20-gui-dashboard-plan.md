@@ -1,6 +1,6 @@
 # Vtessera GUI Dashboard — Implementation Plan
 
-**Spec:** `docs/superpowers/specs/2026-08-20-gui-dashboard-design.md`
+**Spec:** `docs/complete/implemented/specs/2026-08-20-gui-dashboard-design.md`
 **Date:** 2026-08-20
 
 ## Phase 1: CSS Theme

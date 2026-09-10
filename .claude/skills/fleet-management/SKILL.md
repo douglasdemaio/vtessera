@@ -17,7 +17,7 @@ posture.
   **opt-in enterprise/private-network feature**, layered on the existing
   private/enterprise hooks: `crates/vtessera-config` (wizard),
   `crates/marketplace-server` (private receipt store), and
-  `docs/superpowers/specs/2026-08-21-private-network-design.md` ("pools, edge
+  `docs/complete/implemented/specs/2026-08-21-private-network-design.md` ("pools, edge
   fleets").
 - Fleet nodes are headless systemd deployments, NOT the Flatpak GUI. The GUI
   path (GUI spawns `vtesserad` + `vtessera-node` + `vtessera-offer-index`)

@@ -1,6 +1,6 @@
 # Vtessera Settlement Service — Implementation Plan
 
-Spec: `docs/superpowers/specs/2026-08-14-settlement-service-design.md`
+Spec: `docs/complete/implemented/specs/2026-08-14-settlement-service-design.md`
 Branch: `settlement-service` (new, off main)
 
 ## Amendment to the spec

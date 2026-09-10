@@ -1,7 +1,7 @@
 # Implementation plan — Module 2 lifecycle (contract creation + x402 verification)
 
 **Date:** 2026-08-20
-**Spec:** `docs/superpowers/specs/2026-08-20-module2-lifecycle-design.md`
+**Spec:** `docs/complete/implemented/specs/2026-08-20-module2-lifecycle-design.md`
 **Branch:** `module1-ch-cpu`
 
 ## Overview

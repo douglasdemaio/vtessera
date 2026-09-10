@@ -1,6 +1,6 @@
 # Cloud Hypervisor CPU Executor — Implementation Plan
 
-Spec: `docs/superpowers/specs/2026-08-16-cloud-hypervisor-cpu-executor-design.md`
+Spec: `docs/complete/implemented/specs/2026-08-16-cloud-hypervisor-cpu-executor-design.md`
 Branch: `module1-ch-cpu` (new, off `main`). One PR at the end.
 
 Host prerequisites (documented, not scripted here): `cloud-hypervisor`

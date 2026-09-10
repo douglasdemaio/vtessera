@@ -1,6 +1,6 @@
 # Cloud Hypervisor GPU Passthrough — Implementation Plan
 
-Spec: `docs/superpowers/specs/2026-08-17-cloud-hypervisor-gpu-passthrough-design.md`
+Spec: `docs/complete/implemented/specs/2026-08-17-cloud-hypervisor-gpu-passthrough-design.md`
 Branch: `module1-ch-gpu` (new, off `main`). One PR at the end.
 
 Host prerequisites (documented, not scripted here): `cloud-hypervisor`,

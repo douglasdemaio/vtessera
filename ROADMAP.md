@@ -96,13 +96,13 @@ images, supports VFIO GPU passthrough, includes metering sidecar for
 guest metrics. Feature-gated behind `kata` in the executor crate;
 `vtessera-node --backend kata-cloud-hypervisor` wires it.
 `scripts/kata-setup.sh` provisions fresh nodes. See
-`docs/superpowers/specs/2026-08-20-kata-isolation-design.md`.
+`docs/complete/implemented/specs/2026-08-20-kata-isolation-design.md`.
 
 ### 1a. Pick a VMM that can pass through accelerators
 
 > **Status: shipped** — Kata Containers on Cloud Hypervisor is the
 > recommended production path and is now implemented. See
-> `docs/superpowers/specs/2026-08-20-kata-isolation-design.md`.
+> `docs/complete/implemented/specs/2026-08-20-kata-isolation-design.md`.
 
 - **Kata Containers on a Cloud Hypervisor backend** — *recommended.*
   Accepts standard **OCI images** (what AI users ship), gives VM-grade
@@ -128,7 +128,7 @@ workload image. Both NVIDIA and AMD supported.
 
 **Shipped (2026-08-18):** GPU sharing — MIG (hardware-partitioned instances
 on A100/H100+), vGPU / mediated devices (NVIDIA), and time-slicing.
-See `docs/superpowers/specs/2026-08-17-cloud-hypervisor-gpu-passthrough-design.md`.
+See `docs/complete/implemented/specs/2026-08-17-cloud-hypervisor-gpu-passthrough-design.md`.
 
 - **Whole-GPU passthrough** via VFIO: bind to `vfio-pci`, hand to the
   guest. One tenant per GPU.
@@ -158,7 +158,7 @@ releases against. The receipt remains node-signed as in v0.
 
 > **Status: shipped** — capability-aware admission, per-network-policy
 > enforcement (guest iptables + host nftables), TAP/bridge networking.
-> See `docs/superpowers/specs/2026-08-18-network-policy-enforcement-design.md`.
+> See `docs/complete/implemented/specs/2026-08-18-network-policy-enforcement-design.md`.
 
 - **Capability-aware admission:** match on device class, GPU model,
   VRAM, MIG profile, driver/CUDA version.
@@ -648,7 +648,7 @@ intervention) is asymmetric versus the benefit of an earlier demo.
 
 1. **M1 — CPU compute proof:** ✅ **SHIPPED.** Kata + Cloud Hypervisor
    running OCI workloads, CPU-only, with per-job metering into signed
-   receipts. No money. See `docs/superpowers/specs/2026-08-20-kata-isolation-design.md`.
+   receipts. No money. See `docs/complete/implemented/specs/2026-08-20-kata-isolation-design.md`.
 2. **M2 — GPU tier:** VFIO passthrough (whole-GPU, then MIG), CUDA/ROCm
    images, GPU-second + VRAM metering. The AI demand.
 3. **M3 — Agent discovery + free compute:** signed machine-readable

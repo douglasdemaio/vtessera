@@ -1,6 +1,6 @@
 # Implementation plan — Per-device GPU metering (Module 1d)
 
-Implements the design in `docs/superpowers/specs/2026-08-18-per-device-gpu-metering-design.md`.
+Implements the design in `docs/complete/implemented/specs/2026-08-18-per-device-gpu-metering-design.md`.
 
 ## Overview
 

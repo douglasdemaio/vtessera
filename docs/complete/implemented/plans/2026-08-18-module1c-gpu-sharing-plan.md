@@ -2,7 +2,7 @@
 
 Date: 2026-08-18
 Status: approved plan (one PR per mode, confirmed 2026-08-18)
-Related: `ROADMAP.md` §1c, `crates/executor`, `docs/superpowers/specs/2026-08-17-cloud-hypervisor-gpu-passthrough-design.md`
+Related: `ROADMAP.md` §1c, `crates/executor`, `docs/complete/implemented/specs/2026-08-17-cloud-hypervisor-gpu-passthrough-design.md`
 
 ## Decisions (confirmed 2026-08-18)
 
@@ -386,4 +386,4 @@ Add `FilterDevice::NvidiaVgpu` and `FilterDevice::TimeSlice` to
 | `crates/node-api/src/bin/vtessera_node.rs` | Add `--gpu-time-slice` flag, wire config |
 | `crates/offer-index/src/lib.rs` | Add `FilterDevice::NvidiaVgpu`, query parsing |
 | `ROADMAP.md` | Update §1c status |
-| `docs/superpowers/specs/` | New design spec for GPU sharing |
+| `docs/complete/implemented/specs/` | New design spec for GPU sharing |
