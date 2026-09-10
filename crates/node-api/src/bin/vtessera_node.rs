@@ -1133,6 +1133,15 @@ fn main() {
 
     // Marketplace registration: register via Cloudflare Worker.
     if args.marketplace {
+        // Fetch the current iroh candidates (relay + direct addrs) so the
+        // marketplace entry is dialable by EndpointId, like an index
+        // heartbeat. Empty until iroh has discovered addresses; the hourly
+        // re-register loop refreshes them (§7d marketplace resolver).
+        let ep_handle = iroh_endpoint
+            .clone()
+            .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(None)));
+        let (candidates, endpoint_id) = get_iroh_info(&ep_handle);
+
         // Parse port from bind address.
         let port = args
             .bind
@@ -1177,6 +1186,8 @@ fn main() {
             port,
             external_ip.clone(),
             has_public_forward,
+            &candidates,
+            endpoint_id.as_deref(),
         ) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: marketplace registration failed (will retry): {e}"),
@@ -1188,6 +1199,7 @@ fn main() {
             args.marketplace_interval,
             external_ip,
             has_public_forward,
+            ep_handle,
         );
     }
 
@@ -1539,6 +1551,8 @@ fn register_with_marketplace_with_ip(
     port: u16,
     external_ip: Option<String>,
     publicly_reachable: bool,
+    candidates: &[vtessera_transport::Candidate],
+    endpoint_id: Option<&str>,
 ) -> Result<(), String> {
     // Override the endpoint (with the external IP when publicly reachable) and re-sign.
     let mut offer_body = offer.body.clone();
@@ -1550,12 +1564,21 @@ fn register_with_marketplace_with_ip(
 
     let offer_json = vtessera_offer::to_json(&re_signed);
 
-    // Build the registration payload.
-    let payload = serde_json::json!({
+    // Build the registration payload. Candidates + endpoint_id mirror the
+    // index heartbeat so a marketplace entry is dialable by EndpointId over
+    // iroh QUIC (nodes.json resolver, §7d). Both are optional: pre-iroh and
+    // outbound-only nodes report neither.
+    let mut payload = serde_json::json!({
         "offer": serde_json::from_str::<serde_json::Value>(&offer_json)
             .map_err(|e| e.to_string())?,
         "sig_hex": re_signed.sig_hex,
     });
+    if !candidates.is_empty() {
+        payload["candidates"] = serde_json::to_value(candidates).unwrap_or_default();
+    }
+    if let Some(id) = endpoint_id {
+        payload["endpoint_id"] = serde_json::Value::String(id.to_string());
+    }
 
     let url = format!("{MARKETPLACE_WORKER_URL}/register");
     let agent = ureq::Agent::new_with_defaults();
@@ -1598,6 +1621,7 @@ fn register_with_marketplace_with_ip(
 
 /// Background loop that re-registers with the marketplace on an interval.
 /// External IP may change (DHCP, VPN reconnect), so we re-detect and re-register.
+/// iroh candidates are re-fetched each tick so the public entry stays dialable.
 fn spawn_marketplace_registration(
     offer_body: vtessera_offer::OfferBody,
     signing_key: SigningKey,
@@ -1605,16 +1629,20 @@ fn spawn_marketplace_registration(
     interval: Duration,
     external_ip: Option<String>,
     publicly_reachable: bool,
+    iroh_ep: Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>,
 ) {
     thread::spawn(move || loop {
         thread::sleep(interval);
         let signed = vtessera_offer::sign(offer_body.clone(), &signing_key);
+        let (candidates, endpoint_id) = get_iroh_info(&iroh_ep);
         if let Err(e) = register_with_marketplace_with_ip(
             &signed,
             &signing_key,
             port,
             external_ip.clone(),
             publicly_reachable,
+            &candidates,
+            endpoint_id.as_deref(),
         ) {
             eprintln!("vtessera-node: marketplace registration failed (will retry): {e}");
         }

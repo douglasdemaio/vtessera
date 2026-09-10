@@ -691,38 +691,7 @@ fn queue_render(cmd: &str, queue: &str, json: bool) -> Result<(), String> {
 
 /// Find the offer-index entry for `node_id` and hand back the candidates the
 /// node heartbeats there. Returns (endpoint_id, candidates).
-fn resolve_node_candidates(
-    index: &str,
-    node_id: &str,
-) -> Result<(String, Vec<vtessera_transport::Candidate>), String> {
-    let resp: serde_json::Value = agent()
-        .get(&format!("{index}/offers"))
-        .call()
-        .map_err(|e| format!("offer-index unreachable ({index}): {e}"))?
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("offer-index response unreadable: {e}"))?;
-
-    let entries = resp["offers"]
-        .as_array()
-        .ok_or("offer-index returned no list")?;
-    let node_id = node_id.to_owned();
-    index_entry_for(entries, &node_id)
-        .map(|entry| {
-            let candidates: Vec<vtessera_transport::Candidate> =
-                serde_json::from_value(entry["candidates"].clone()).unwrap_or_default();
-            let id = entry["endpoint_id"]
-                .as_str()
-                .unwrap_or(&node_id)
-                .to_string();
-            (id, candidates)
-        })
-        .ok_or_else(|| {
-            format!("no offer-index entry for endpoint_id {node_id} (is the node registered at {index}?)")
-        })
-}
-
-/// Locate the index entry identifying `node_id` — by the entry-level
+/// Find the index entry identifying `node_id` — by the entry-level
 /// `endpoint_id` (heartbeated) or the signed offer body's `endpoint_id`.
 fn index_entry_for<'a>(
     entries: &'a [serde_json::Value],
@@ -734,14 +703,117 @@ fn index_entry_for<'a>(
     })
 }
 
-/// Resolve `node_id` to a dialable `iroh::EndpointAddr` via the offer-index.
-fn resolve_addr(index: &str, node_id: &str) -> Result<iroh::EndpointAddr, String> {
-    let (id, candidates) = resolve_node_candidates(index, node_id)?;
-    if candidates.is_empty() {
-        return Err(format!(
-            "{node_id} has no dial candidates yet (node registered but no heartbeat arrived; try again shortly)"
-        ));
+/// Look up `(endpoint_id, candidates)` for `node_id` in the offer-index.
+/// `None` when the index has no entry; callers fall through to the
+/// marketplace for nodes that publish there without a heartbeat here.
+fn index_entry_for_node(
+    index: &str,
+    node_id: &str,
+) -> Result<Option<(String, Vec<vtessera_transport::Candidate>)>, String> {
+    let resp: serde_json::Value = agent()
+        .get(&format!("{index}/offers"))
+        .call()
+        .map_err(|e| format!("offer-index unreachable ({index}): {e}"))?
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("offer-index response unreadable: {e}"))?;
+    let entries = resp["offers"]
+        .as_array()
+        .ok_or("offer-index returned no list")?;
+    Ok(index_entry_for(entries, node_id).map(|entry| extract_endpoint_candidates(entry, node_id)))
+}
+
+/// Look up `(endpoint_id, candidates)` for `node_id` in the marketplace
+/// `nodes.json`. Identity is the entry's `endpoint_id` or the signed offer
+/// body's; candidates travel with the entry when the node registered them
+/// (§7d — the workflow preserves the node's `candidates` payload field).
+fn marketplace_entry_for_node(
+    marketplace: &str,
+    node_id: &str,
+) -> Result<Option<(String, Vec<vtessera_transport::Candidate>)>, String> {
+    let resp: serde_json::Value = agent()
+        .get(marketplace)
+        .call()
+        .map_err(|e| format!("marketplace unreachable ({marketplace}): {e}"))?
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("marketplace nodes.json unreadable: {e}"))?;
+    let nodes = resp["nodes"]
+        .as_array()
+        .ok_or("marketplace nodes.json malformed (no nodes list)")?;
+    Ok(marketplace_find_node(nodes, node_id)
+        .map(|entry| extract_endpoint_candidates(entry, node_id)))
+}
+
+/// Find the marketplace entry identifying `node_id` — by the entry-level
+/// `endpoint_id` or the signed offer body's `endpoint_id`.
+fn marketplace_find_node<'a>(
+    nodes: &'a [serde_json::Value],
+    node_id: &str,
+) -> Option<&'a serde_json::Value> {
+    nodes.iter().find(|entry| {
+        entry["endpoint_id"].as_str() == Some(node_id)
+            || entry["offer"]["body"]["endpoint_id"].as_str() == Some(node_id)
+    })
+}
+
+/// Pull `(endpoint_id, candidates)` out of an offer-index or marketplace
+/// entry. `endpoint_id` at entry level wins; the offer body is the fallback
+/// (pre-candidates/older payloads).
+fn extract_endpoint_candidates(
+    entry: &serde_json::Value,
+    fallback_id: &str,
+) -> (String, Vec<vtessera_transport::Candidate>) {
+    let id = entry["endpoint_id"]
+        .as_str()
+        .or_else(|| entry["offer"]["body"]["endpoint_id"].as_str())
+        .unwrap_or(fallback_id)
+        .to_string();
+    let candidates: Vec<vtessera_transport::Candidate> =
+        serde_json::from_value(entry["candidates"].clone()).unwrap_or_default();
+    (id, candidates)
+}
+
+/// Resolve `node_id` to dial candidates, trying the offer-index (freshest
+/// heartbeats) then the marketplace when provided. Returns `(endpoint_id,
+/// candidates, source)` for diagnostics; errors name both sources.
+fn resolve_node_candidates(
+    index: &str,
+    marketplace: Option<&str>,
+    node_id: &str,
+) -> Result<(String, Vec<vtessera_transport::Candidate>, &'static str), String> {
+    if let Ok(Some(hit)) = index_entry_for_node(index, node_id) {
+        if !hit.1.is_empty() {
+            return Ok((hit.0, hit.1, "offer-index"));
+        }
     }
+    if let Some(market) = marketplace {
+        if let Ok(Some(hit)) = marketplace_entry_for_node(market, node_id) {
+            if !hit.1.is_empty() {
+                return Ok((hit.0, hit.1, "marketplace"));
+            }
+        }
+    }
+    Err(match index_entry_for_node(index, node_id) {
+        Ok(Some(_)) => format!(
+            "{node_id} is registered at the offer-index but has no dialable iroh \
+             candidates yet (no heartbeat arrived; try again shortly)"
+        ),
+        _ => format!(
+            "no node with endpoint_id {node_id} (checked the offer-index at {index} and \
+             the marketplace)"
+        ),
+    })
+}
+
+/// Resolve `node_id` to a dialable `iroh::EndpointAddr` via the offer-index
+/// (freshest) or the marketplace entry's candidates (T2.1 resolver).
+fn resolve_addr(
+    index: &str,
+    marketplace: Option<&str>,
+    node_id: &str,
+) -> Result<iroh::EndpointAddr, String> {
+    let (id, candidates, _source) = resolve_node_candidates(index, marketplace, node_id)?;
     vtessera_transport::iroh_sidecar::endpoint_addr_from_candidates(&id, &candidates)
 }
 
@@ -781,13 +853,14 @@ fn parse_quic_http_response(buf: &[u8]) -> Result<(u16, Vec<u8>), String> {
 /// (status, response body).
 fn quic_round_trip(
     index: &str,
+    marketplace: Option<&str>,
     node_id: &str,
     method: &str,
     path: &str,
     headers: &[(String, String)],
     body: &[u8],
 ) -> Result<(u16, Vec<u8>), String> {
-    let addr = resolve_addr(index, node_id)?;
+    let addr = resolve_addr(index, marketplace, node_id)?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -833,11 +906,11 @@ fn quic_round_trip(
 /// `offer` over the resolver (dial by EndpointId).
 fn quic_offer(
     index: &str,
-    _marketplace: Option<&str>,
+    marketplace: Option<&str>,
     node_id: &str,
     json: bool,
 ) -> Result<(), String> {
-    let (status, body) = quic_round_trip(index, node_id, "GET", "/offer", &[], b"")?;
+    let (status, body) = quic_round_trip(index, marketplace, node_id, "GET", "/offer", &[], b"")?;
     if status != 200 {
         return Err(format!(
             "offer failed (HTTP {status}): {}",
@@ -869,7 +942,7 @@ fn quic_offer(
 /// `submit` over the resolver (dial by EndpointId).
 fn quic_submit(
     index: &str,
-    _marketplace: Option<&str>,
+    marketplace: Option<&str>,
     node_id: &str,
     agent_id: &str,
     job_path: &str,
@@ -884,6 +957,7 @@ fn quic_submit(
     }
     let (status, body) = quic_round_trip(
         index,
+        marketplace,
         node_id,
         "POST",
         "/jobs",
@@ -903,11 +977,11 @@ fn quic_submit(
 /// `health` over the resolver (dial by EndpointId).
 fn quic_health(
     index: &str,
-    _marketplace: Option<&str>,
+    marketplace: Option<&str>,
     node_id: &str,
     json: bool,
 ) -> Result<(), String> {
-    let (status, body) = quic_round_trip(index, node_id, "GET", "/healthz", &[], b"")?;
+    let (status, body) = quic_round_trip(index, marketplace, node_id, "GET", "/healthz", &[], b"")?;
     if json {
         println!(
             "{}",
@@ -1003,6 +1077,41 @@ mod tests {
         // Non-JSON body fallback keeps the raw text.
         let r = render_submit_outcome(502, &serde_json::json!({"raw": "bad gateway"}), false, true);
         assert!(r.unwrap_err().contains("bad gateway"));
+    }
+
+    #[test]
+    fn marketplace_entry_matches_by_offer_body_endpoint_id() {
+        let nodes = serde_json::json!([
+            {
+                "node_id": "hash-1",
+                "offer": {"body": {"endpoint_id": "aaa1"}},
+                "endpoint_id": "aaa1",
+                "candidates": [
+                    {"kind": "host", "transport": "iroh_quic", "addr": "192.0.2.9:1234", "priority": 200}
+                ]
+            },
+            {
+                // pre-candidates/older payload: no entry-level endpoint_id,
+                // no candidates field
+                "node_id": "hash-2",
+                "offer": {"body": {"endpoint_id": "bbb2"}}
+            }
+        ]);
+        let nodes = nodes.as_array().unwrap();
+
+        // identity resolves through the entry-level id AND the offer body.
+        let hit = marketplace_find_node(nodes, "aaa1").expect("matched by entry endpoint_id");
+        let (id, candidates) = extract_endpoint_candidates(hit, "fallback");
+        assert_eq!(id, "aaa1");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].addr, "192.0.2.9:1234");
+
+        let hit = marketplace_find_node(nodes, "bbb2").expect("matched by offer body endpoint_id");
+        let (id, candidates) = extract_endpoint_candidates(hit, "fallback");
+        assert_eq!(id, "bbb2");
+        assert!(candidates.is_empty());
+
+        assert!(marketplace_find_node(nodes, "zzz9").is_none());
     }
 
     #[test]
