@@ -23,10 +23,11 @@
 
 mod config;
 mod daemon;
+mod marketplace;
 mod offer;
 mod settings;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,6 +37,7 @@ use gtk4::prelude::*;
 
 use daemon::Daemons;
 use settings::Settings;
+use vtessera_offer::PriceQuote;
 
 const APP_ID: &str = "io.github.douglasdemaio.Vtessera";
 
@@ -94,6 +96,34 @@ struct Ui {
     avgcpu_val: gtk4::Label,
     // Dashboard: last job indicator
     last_job_label: gtk4::Label,
+    // Marketplace: Browse pane
+    market_list: gtk4::Box,
+    market_count: gtk4::Label,
+    market_status: gtk4::Label,
+    mp_all_btn: gtk4::ToggleButton,
+    mp_free_btn: gtk4::ToggleButton,
+    mp_paid_btn: gtk4::ToggleButton,
+    mp_sort_dd: gtk4::DropDown,
+    mp_refresh_btn: gtk4::Button,
+    // Marketplace authored rows; snapshots + filter shared with the worker.
+    market_nodes: Rc<RefCell<Vec<marketplace::Listing>>>,
+    market_filter: Rc<Cell<u8>>,
+    market_expanded: Rc<RefCell<Option<String>>>,
+    market_pending: Arc<Mutex<Option<Result<marketplace::MarketplaceSnapshot, String>>>>,
+    market_last_good: Rc<Cell<u64>>,
+    // Marketplace: My Listing pane
+    ml_status: gtk4::Label,
+    ml_device: gtk4::Label,
+    ml_endpoint: gtk4::Label,
+    ml_free_btn: gtk4::ToggleButton,
+    ml_paid_btn: gtk4::ToggleButton,
+    ml_price_spin: gtk4::SpinButton,
+    ml_currency: gtk4::Label,
+    ml_micros: gtk4::Label,
+    ml_preview: gtk4::Label,
+    ml_cmd_label: gtk4::Label,
+    ml_save_btn: gtk4::Button,
+    ml_hint: gtk4::Label,
 }
 
 /// Mutable node runtime state.
@@ -634,6 +664,577 @@ fn refresh_jobs_table(ui: &Ui) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Marketplace tab (docs/design/specs/2026-09-10-marketplace-ui-design.md)
+// ---------------------------------------------------------------------------
+
+/// Kick off a marketplace fetch on a worker thread. The result lands in
+/// `market_pending`; `apply_marketplace_result` drains it on the main
+/// thread (widgets must only be touched there).
+fn refresh_marketplace(ui: &Rc<Ui>) {
+    let pending = ui.market_pending.clone();
+    std::thread::spawn(move || {
+        let result = marketplace::fetch_marketplace(marketplace::DEFAULT_MARKETPLACE_URL);
+        *pending.lock().unwrap() = Some(result);
+    });
+    ui.market_status.set_text("Fetching marketplace…");
+}
+
+/// Drain a finished marketplace fetch onto the main thread.
+fn apply_marketplace_result(ui: &Rc<Ui>) {
+    let result = ui.market_pending.lock().unwrap().take();
+    let Some(result) = result else {
+        return;
+    };
+    match result {
+        Ok(snap) => {
+            ui.market_last_good.set(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            );
+            *ui.market_nodes.borrow_mut() = snap.nodes;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let age = now.saturating_sub(snap.updated_at);
+            let mins = age / 60;
+            ui.market_count
+                .set_text(&format!("{} nodes listed", ui.market_nodes.borrow().len()));
+            ui.market_status
+                .set_text(&format!("Updated {mins} min ago"));
+            rebuild_market_rows(ui);
+        }
+        Err(e) => {
+            let last = ui.market_last_good.get();
+            let last_good = if last > 0 {
+                format!(" (last good {})", fmt_clock(last))
+            } else {
+                String::new()
+            };
+            ui.market_status
+                .set_text(&format!("marketplace unreachable{last_good} — {e}"));
+        }
+    }
+}
+
+fn fmt_clock(unix: u64) -> String {
+    let (h, m) = utc_hhmm(unix);
+    format!("{h:02}:{m:02}")
+}
+
+fn utc_hhmm(unix: u64) -> (u32, u32) {
+    let days = unix / 86400;
+    let secs_of_day = unix % 86400;
+    let (h, m) = (secs_of_day / 3600, (secs_of_day % 3600) / 60);
+    let _ = days; // civil date not needed for the UI clock
+    (h as u32, m as u32)
+}
+
+/// Rebuild the Browse rows from the stored snapshot, applying filter + sort.
+fn rebuild_market_rows(ui: &Rc<Ui>) {
+    while let Some(child) = ui.market_list.first_child() {
+        ui.market_list.remove(&child);
+    }
+    let filter = ui.market_filter.get();
+    let sort = ui.mp_sort_dd.selected();
+    let mut nodes: Vec<marketplace::Listing> = ui.market_nodes.borrow().clone();
+    nodes.retain(|l| match filter {
+        1 => matches!(l.price, PriceQuote::Free),
+        2 => matches!(l.price, PriceQuote::Paid { .. }),
+        _ => true,
+    });
+    match sort {
+        0 => nodes.sort_by_key(|l| price_rank(&l.price)),
+        1 => nodes.sort_by_key(|l| size_of(&l.device)),
+        _ => nodes.sort_by_key(|l| std::cmp::Reverse(l.issued_unix)),
+    }
+    let expanded = ui.market_expanded.borrow().clone();
+    for l in nodes {
+        let is_expanded = expanded.as_deref() == Some(l.node_id.as_str());
+        ui.market_list
+            .append(&build_listing_row(ui, &l, is_expanded));
+    }
+}
+
+fn price_rank(price: &PriceQuote) -> (u8, u64) {
+    match price {
+        PriceQuote::Free => (0, 0),
+        PriceQuote::Paid {
+            per_device_second_micros,
+            ..
+        } => (1, *per_device_second_micros),
+    }
+}
+
+fn size_of(device: &vtessera_offer::AdvertisedDevice) -> u32 {
+    match device {
+        vtessera_offer::AdvertisedDevice::Cpu { vcpus, .. } => *vcpus,
+        vtessera_offer::AdvertisedDevice::NvidiaGpu { vram_mb, .. }
+        | vtessera_offer::AdvertisedDevice::AmdGpu { vram_mb, .. }
+        | vtessera_offer::AdvertisedDevice::NvidiaMig { vram_mb, .. }
+        | vtessera_offer::AdvertisedDevice::NvidiaVgpu { vram_mb, .. } => *vram_mb,
+    }
+}
+
+/// One compact Browse row: mode dot · device · price · reach, click to
+/// expand/collapse the detail box.
+fn build_listing_row(ui: &Rc<Ui>, listing: &marketplace::Listing, expanded: bool) -> gtk4::Box {
+    let row = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    row.add_css_class("market-row");
+
+    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    header.set_margin_top(6);
+    header.set_margin_bottom(6);
+    header.set_margin_start(10);
+    header.set_margin_end(10);
+
+    // Mode dot — green `●` free, purple `◆` paid.
+    let dot = gtk4::Label::new(Some(if matches!(listing.price, PriceQuote::Free) {
+        "●"
+    } else {
+        "◆"
+    }));
+    if matches!(listing.price, PriceQuote::Free) {
+        dot.add_css_class("status-green");
+    } else {
+        dot.add_css_class("status-paid");
+    }
+    dot.set_width_chars(2);
+    header.append(&dot);
+
+    let device = gtk4::Label::new(Some(&marketplace::node_label(&listing.device)));
+    device.set_xalign(0.0);
+    device.set_hexpand(true);
+    header.append(&device);
+
+    let price = gtk4::Label::new(Some(&marketplace::price_label(&listing.price)));
+    if matches!(listing.price, PriceQuote::Free) {
+        price.add_css_class("status-green");
+    } else {
+        price.add_css_class("earnings-gold");
+    }
+    price.set_xalign(1.0);
+    header.append(&price);
+
+    let reach = gtk4::Label::new(Some(&reach_label(listing)));
+    reach.add_css_class("dim-label");
+    reach.set_xalign(1.0);
+    header.append(&reach);
+
+    row.append(&header);
+
+    // Click toggles the inline detail (collapses via full rebuild).
+    let ui2 = ui.clone();
+    let node_id = listing.node_id.clone();
+    let gesture = gtk4::GestureClick::new();
+    gesture.connect_released(move |_g, _n_press, _x, _y| {
+        let mut expanded = ui2.market_expanded.borrow_mut();
+        *expanded = if expanded.as_deref() == Some(node_id.as_str()) {
+            None
+        } else {
+            Some(node_id.clone())
+        };
+        drop(expanded);
+        rebuild_market_rows(&ui2);
+    });
+    row.add_controller(gesture);
+
+    if expanded {
+        row.append(&build_listing_detail(ui, listing));
+    }
+    row
+}
+
+fn reach_label(listing: &marketplace::Listing) -> String {
+    match &listing.endpoint_host {
+        Some(host) => host.clone(),
+        None => format!("iroh:{}", marketplace::short_id(&listing.endpoint_id)),
+    }
+}
+
+/// The expanded detail box under a Browse row.
+fn build_listing_detail(ui: &Rc<Ui>, listing: &marketplace::Listing) -> gtk4::Box {
+    let detail = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    detail.add_css_class("dashboard-card");
+    detail.set_margin_start(10);
+    detail.set_margin_end(10);
+    detail.set_margin_bottom(8);
+
+    let row = |label: &str, value: &str, mono: bool| -> gtk4::Box {
+        let b = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let k = gtk4::Label::new(Some(label));
+        k.add_css_class("dim-label");
+        k.set_xalign(0.0);
+        b.append(&k);
+        let v = gtk4::Label::new(Some(value));
+        v.set_selectable(true);
+        v.set_xalign(0.0);
+        v.set_hexpand(true);
+        if mono {
+            v.add_css_class("market-mono");
+        }
+        b.append(&v);
+        b
+    };
+
+    detail.append(&row("node_id", &listing.node_id, false));
+    detail.append(&row("endpoint_id", &listing.endpoint_id, true));
+
+    let meta = format!(
+        "schema v{} · issued {} · expires {}",
+        listing.schema_ver,
+        fmt_epoch(listing.issued_unix),
+        fmt_epoch(listing.expires_unix)
+    );
+    let meta_l = gtk4::Label::new(Some(&meta));
+    meta_l.add_css_class("dim-label");
+    meta_l.set_xalign(0.0);
+    detail.append(&meta_l);
+
+    let cmd = gtk4::Label::new(Some(&marketplace::agent_command(listing)));
+    cmd.add_css_class("market-mono");
+    cmd.set_selectable(true);
+    cmd.set_xalign(0.0);
+    cmd.set_wrap(true);
+    detail.append(&cmd);
+
+    let copy = gtk4::Button::with_label("Copy agent command");
+    let cmd_text = marketplace::agent_command(listing);
+    copy.connect_clicked(move |_| {
+        set_clipboard(&cmd_text);
+    });
+    copy.set_halign(gtk4::Align::Start);
+    detail.append(&copy);
+
+    // Keep the reference to `ui` alive only if needed; dropping is fine here
+    // since the copy closure captured what it needs.
+    let _ = ui;
+    detail
+}
+
+fn fmt_epoch(unix: u64) -> String {
+    let (y, mo, d, h, mi) = utc_civil(unix);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")
+}
+
+/// Howard Hinnant's civil-from-days algorithm — same one GCC's libstdc++ uses.
+/// Returns `(year, month, day, hour, minute)` in UTC for an epoch second.
+fn utc_civil(unix: u64) -> (i64, u32, u32, u32, u32) {
+    let days = (unix / 86400) as i64;
+    let secs = unix % 86400;
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097); // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    (
+        year,
+        m,
+        d,
+        (secs / 3600) as u32,
+        ((secs % 3600) / 60) as u32,
+    )
+}
+
+fn set_clipboard(text: &str) {
+    if let Some(display) = gtk4::gdk::Display::default() {
+        let cb = display.clipboard();
+        cb.set_text(text);
+    }
+}
+
+/// Refresh the My Listing pane from the current settings + daemon state.
+fn refresh_my_listing(ui: &Rc<Ui>, state: &NodeState) {
+    let running = state.daemons.borrow().is_some();
+    let settings = ui.settings.borrow().clone();
+
+    ui.ml_status.set_text(if running {
+        current_state(state)
+    } else {
+        "offline"
+    });
+    ui.ml_status.remove_css_class("status-active");
+    ui.ml_status.remove_css_class("status-off");
+    ui.ml_status.add_css_class(if running {
+        "status-active"
+    } else {
+        "status-off"
+    });
+
+    ui.ml_device.set_text(&format!(
+        "CPU {} vCPU · {} GB",
+        offer::host_vcpus(),
+        offer::host_mem_mb() / 1024
+    ));
+    ui.ml_endpoint.set_text(if settings.endpoint.is_empty() {
+        "—"
+    } else {
+        &settings.endpoint
+    });
+
+    let is_free = settings.is_free();
+    ui.ml_free_btn.set_active(is_free);
+    ui.ml_paid_btn.set_active(!is_free);
+    ui.ml_currency.set_text(marketplace::currency_symbol(
+        match settings.currency.as_str() {
+            "usdc" => &vtessera_offer::Currency::Usdc,
+            _ => &vtessera_offer::Currency::Eurc,
+        },
+    ));
+    update_my_listing_micros(ui);
+
+    // What buyers see: re-derive the signed offer from current settings.
+    if let Ok(key) = offer::load_key_if_exists(&settings::key_path()) {
+        let json = offer::build_offer_json(&settings, &key);
+        if let Ok(signed) = serde_json::from_str::<vtessera_offer::SignedOffer>(&json) {
+            let listing = marketplace::listing_from_body(&signed.body);
+            let mut preview = format!(
+                "{} — {}",
+                marketplace::node_label(&listing.device),
+                marketplace::price_label(&listing.price)
+            );
+            if !is_free {
+                let sym = marketplace::currency_symbol(match settings.currency.as_str() {
+                    "usdc" => &vtessera_offer::Currency::Usdc,
+                    _ => &vtessera_offer::Currency::Eurc,
+                });
+                preview.push_str(&format!(" {}{}", sym, settings.currency));
+            }
+            ui.ml_preview.set_text(&preview);
+            ui.ml_cmd_label
+                .set_text(&marketplace::agent_command(&listing));
+            ui.ml_hint.set_text("");
+            ui.ml_save_btn.set_sensitive(running);
+        }
+    } else {
+        ui.ml_preview
+            .set_text("No offer yet — start the node to publish");
+        ui.ml_cmd_label.set_text("");
+        ui.ml_hint.set_text("Start the node to publish this offer");
+        ui.ml_save_btn.set_sensitive(running);
+    }
+}
+
+/// Mirror a preview to the "what buyers see" line after a price edit.
+fn update_my_listing_preview(ui: &Rc<Ui>) {
+    let settings = ui.settings.borrow().clone();
+    let json = match offer::load_key_if_exists(&settings::key_path())
+        .ok()
+        .map(|key| offer::build_offer_json(&settings, &key))
+    {
+        Some(j) => j,
+        None => {
+            ui.ml_preview
+                .set_text("No offer yet — start the node to publish");
+            return;
+        }
+    };
+    if let Ok(signed) = serde_json::from_str::<vtessera_offer::SignedOffer>(&json) {
+        let listing = marketplace::listing_from_body(&signed.body);
+        ui.ml_preview.set_text(&format!(
+            "{} — {}",
+            marketplace::node_label(&listing.device),
+            marketplace::price_label(&listing.price)
+        ));
+        ui.ml_cmd_label
+            .set_text(&marketplace::agent_command(&listing));
+    }
+}
+
+/// "≈ N micros/s per device (what buyers see)" — live from the price spin.
+fn update_my_listing_micros(ui: &Rc<Ui>) {
+    let price = ui.ml_price_spin.value();
+    let micros = offer::price_per_cpu_second_micros(price);
+    ui.ml_micros
+        .set_text(&format!("≈ {micros} micros/s per device (what buyers see)"));
+}
+
+/// Save the quick price editor: writes `mode` + `price_per_cpu_hour` to
+/// settings.toml, re-derives the offer, restarts the node if running.
+fn save_quick_price(ui: &Rc<Ui>, state: &NodeState) {
+    let mut settings = ui.settings.borrow().clone();
+    let paid = ui.ml_paid_btn.is_active();
+    settings.mode = if paid { "paid".into() } else { "free".into() };
+    settings.price_per_cpu_hour = ui.ml_price_spin.value();
+    if let Err(e) = settings.validate() {
+        ui.ml_hint.set_text(&e);
+        return;
+    }
+    *ui.settings.borrow_mut() = settings.clone();
+    if let Err(e) = settings.save(&settings::settings_path()) {
+        ui.ml_hint.set_text(&e);
+        return;
+    }
+    ui.ml_hint.set_text("");
+    update_my_listing_preview(ui);
+    refresh_my_listing(ui, state);
+
+    // Publish the new pricing immediately when the node is already up.
+    if state.daemons.borrow().is_some() {
+        ui.log_line("Listing saved — restarting node to publish updated offer...");
+        stop_node(ui, state);
+        start_node(ui, state);
+    } else {
+        ui.log_line("Listing saved — it will publish when the node starts.");
+    }
+}
+
+/// Build the whole Marketplace tab: split Browse (left) | My Listing (right).
+fn build_marketplace_page(ui: &Rc<Ui>) -> gtk4::Box {
+    let page = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    page.set_margin_top(24);
+    page.set_margin_bottom(24);
+    page.set_margin_start(24);
+    page.set_margin_end(24);
+
+    // ---- Browse pane (wide, ~2/3) -------------------------------------
+    let browse = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    browse.set_hexpand(true);
+
+    let browse_head = gtk4::Label::new(Some("Marketplace"));
+    browse_head.add_css_class("market-pane-title");
+    browse_head.set_xalign(0.0);
+    browse.append(&browse_head);
+
+    // Filter segmented toggle (All | Free | Paid), same pattern as Settings.
+    ui.mp_all_btn.set_group(None::<&gtk4::ToggleButton>);
+    ui.mp_free_btn.set_group(Some(&ui.mp_all_btn));
+    ui.mp_paid_btn.set_group(Some(&ui.mp_all_btn));
+    ui.mp_all_btn.set_active(true);
+    let filter_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    filter_box.add_css_class("mode-segmented");
+    filter_box.append(&ui.mp_all_btn);
+    filter_box.append(&ui.mp_free_btn);
+    filter_box.append(&ui.mp_paid_btn);
+    filter_box.set_halign(gtk4::Align::Start);
+
+    let header_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    header_row.append(&filter_box);
+    ui.mp_sort_dd.set_halign(gtk4::Align::Start);
+    header_row.append(&ui.mp_sort_dd);
+    ui.mp_refresh_btn.set_halign(gtk4::Align::End);
+    header_row.append(&ui.mp_refresh_btn);
+    ui.market_count.add_css_class("dim-label");
+    ui.market_count.set_xalign(0.0);
+    header_row.append(&ui.market_count);
+    browse.append(&header_row);
+
+    ui.market_status.add_css_class("market-status");
+    ui.market_status.set_xalign(0.0);
+    ui.market_status.set_wrap(true);
+    browse.append(&ui.market_status);
+
+    let scroller = gtk4::ScrolledWindow::new();
+    scroller.set_child(Some(&ui.market_list));
+    scroller.set_vexpand(true);
+    scroller.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
+    browse.append(&scroller);
+
+    // ---- My Listing pane (narrow, ~1/3) ---------------------------------
+    let mine = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    mine.set_size_request(300, -1);
+
+    let mine_head = gtk4::Label::new(Some("My Listing"));
+    mine_head.add_css_class("market-pane-title");
+    mine_head.set_xalign(0.0);
+    mine.append(&mine_head);
+
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    card.add_css_class("dashboard-card");
+
+    let status_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let status_k = gtk4::Label::new(Some("Status"));
+    status_k.add_css_class("dim-label");
+    status_row.append(&status_k);
+    ui.ml_status.set_hexpand(true);
+    ui.ml_status.set_xalign(1.0);
+    status_row.append(&ui.ml_status);
+    card.append(&status_row);
+
+    let device_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let device_k = gtk4::Label::new(Some("Device"));
+    device_k.add_css_class("dim-label");
+    device_row.append(&device_k);
+    ui.ml_device.set_hexpand(true);
+    ui.ml_device.set_xalign(1.0);
+    device_row.append(&ui.ml_device);
+    card.append(&device_row);
+
+    let endpoint_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let endpoint_k = gtk4::Label::new(Some("Endpoint"));
+    endpoint_k.add_css_class("dim-label");
+    endpoint_row.append(&endpoint_k);
+    ui.ml_endpoint.set_hexpand(true);
+    ui.ml_endpoint.set_xalign(1.0);
+    endpoint_row.append(&ui.ml_endpoint);
+    card.append(&endpoint_row);
+
+    let divider = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+    card.append(&divider);
+
+    // Quick price editor.
+    ui.ml_free_btn.set_group(None::<&gtk4::ToggleButton>);
+    ui.ml_paid_btn.set_group(Some(&ui.ml_free_btn));
+    ui.ml_free_btn.set_active(true);
+    let ml_mode_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    ml_mode_box.add_css_class("mode-segmented");
+    ml_mode_box.append(&ui.ml_free_btn);
+    ml_mode_box.append(&ui.ml_paid_btn);
+    card.append(&ml_mode_box);
+
+    let price_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    ui.ml_currency.set_xalign(1.0);
+    ui.ml_currency.add_css_class("earnings-gold");
+    price_row.append(&ui.ml_price_spin);
+    price_row.append(&ui.ml_currency);
+    card.append(&price_row);
+
+    ui.ml_micros.add_css_class("dim-label");
+    ui.ml_micros.set_xalign(0.0);
+    card.append(&ui.ml_micros);
+
+    ui.ml_save_btn.add_css_class("suggested-action");
+    card.append(&ui.ml_save_btn);
+
+    let preview_title = gtk4::Label::new(Some("What buyers see"));
+    preview_title.add_css_class("dashboard-card-title");
+    preview_title.set_xalign(0.0);
+    card.append(&preview_title);
+    ui.ml_preview.set_xalign(0.0);
+    ui.ml_preview.set_wrap(true);
+    card.append(&ui.ml_preview);
+    ui.ml_cmd_label.add_css_class("market-mono");
+    ui.ml_cmd_label.set_selectable(true);
+    ui.ml_cmd_label.set_xalign(0.0);
+    ui.ml_cmd_label.set_wrap(true);
+    card.append(&ui.ml_cmd_label);
+
+    let copy_btn = gtk4::Button::with_label("Copy command");
+    let cmd_label = ui.ml_cmd_label.clone();
+    copy_btn.connect_clicked(move |_| set_clipboard(cmd_label.text().as_ref()));
+    copy_btn.set_halign(gtk4::Align::Start);
+    card.append(&copy_btn);
+
+    ui.ml_hint.add_css_class("dim-label");
+    ui.ml_hint.set_xalign(0.0);
+    ui.ml_hint.set_wrap(true);
+    card.append(&ui.ml_hint);
+
+    mine.append(&card);
+
+    page.append(&browse);
+    page.append(&mine);
+    page
+}
+
 fn start_node(ui: &Ui, state: &NodeState) {
     let mut settings = match ui.read_settings() {
         Ok(s) => s,
@@ -905,6 +1506,26 @@ fn build_ui(app: &gtk4::Application) {
          coordinator's EndpointAddr JSON, or `endpoint=<json>` / `queue=<path>`.",
     ));
 
+    // Marketplace: Browse pane widgets.
+    let market_list = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    let market_count = gtk4::Label::new(None);
+    let market_status = gtk4::Label::new(None);
+    let mp_all_btn = gtk4::ToggleButton::with_label("All");
+    let mp_free_btn = gtk4::ToggleButton::with_label("Free");
+    let mp_paid_btn = gtk4::ToggleButton::with_label("Paid");
+    let mp_sort_dd = gtk4::DropDown::from_strings(&["Price", "Size", "Newest"]);
+    let mp_refresh_btn = gtk4::Button::with_label("Refresh");
+
+    // Marketplace: My Listing pane widgets.
+    let ml_free_btn = gtk4::ToggleButton::with_label("Donate (free)");
+    let ml_paid_btn = gtk4::ToggleButton::with_label("Sell (paid)");
+    let ml_price_spin = gtk4::SpinButton::new(
+        Some(&gtk4::Adjustment::new(0.05, 0.0, 1000.0, 0.01, 0.5, 0.0)),
+        2.0,
+        2,
+    );
+    let ml_save_btn = gtk4::Button::with_label("Save");
+
     let ui = Rc::new(Ui {
         settings: Rc::new(RefCell::new(initial.clone())),
         free_btn: gtk4::ToggleButton::with_label("Donate (free)"),
@@ -967,6 +1588,31 @@ fn build_ui(app: &gtk4::Application) {
         earnings_val,
         avgcpu_val,
         last_job_label,
+        market_list,
+        market_count,
+        market_status,
+        mp_all_btn,
+        mp_free_btn,
+        mp_paid_btn,
+        mp_sort_dd,
+        mp_refresh_btn,
+        market_nodes: Rc::new(RefCell::new(Vec::new())),
+        market_filter: Rc::new(Cell::new(0)),
+        market_expanded: Rc::new(RefCell::new(None)),
+        market_pending: Arc::new(Mutex::new(None)),
+        market_last_good: Rc::new(Cell::new(0)),
+        ml_status: gtk4::Label::new(None),
+        ml_device: gtk4::Label::new(None),
+        ml_endpoint: gtk4::Label::new(None),
+        ml_free_btn,
+        ml_paid_btn,
+        ml_price_spin,
+        ml_currency: gtk4::Label::new(None),
+        ml_micros: gtk4::Label::new(None),
+        ml_preview: gtk4::Label::new(None),
+        ml_cmd_label: gtk4::Label::new(None),
+        ml_save_btn,
+        ml_hint: gtk4::Label::new(None),
     });
 
     // ---- Settings page ---------------------------------------------------
@@ -1320,10 +1966,15 @@ fn build_ui(app: &gtk4::Application) {
     jobs_page.append(&jobs_scroller);
 
     // ---- Notebook + window ----------------------------------------------
+    let marketplace_page = build_marketplace_page(&ui);
     let notebook = gtk4::Notebook::new();
     notebook.append_page(&settings_page, Some(&gtk4::Label::new(Some("Settings"))));
     notebook.append_page(&dashboard_page, Some(&gtk4::Label::new(Some("Dashboard"))));
     notebook.append_page(&jobs_page, Some(&gtk4::Label::new(Some("Jobs"))));
+    notebook.append_page(
+        &marketplace_page,
+        Some(&gtk4::Label::new(Some("Marketplace"))),
+    );
 
     let title = gtk4::Label::new(Some("Vtessera"));
     let header = gtk4::HeaderBar::new();
@@ -1368,6 +2019,40 @@ fn build_ui(app: &gtk4::Application) {
                 start_node(&ui, &state);
             }
         }
+    });
+
+    // Marketplace: Browse filter (All | Free | Paid) + sort + manual refresh.
+    for (btn, filter) in [
+        (ui.mp_all_btn.clone(), 0u8),
+        (ui.mp_free_btn.clone(), 1u8),
+        (ui.mp_paid_btn.clone(), 2u8),
+    ] {
+        let ui = ui.clone();
+        let btn_closure = btn.clone();
+        btn.connect_toggled(move |_| {
+            if btn_closure.is_active() {
+                ui.market_filter.set(filter);
+                rebuild_market_rows(&ui);
+            }
+        });
+    }
+    ui.mp_sort_dd.connect_selected_notify({
+        let ui = ui.clone();
+        move |_| rebuild_market_rows(&ui)
+    });
+    ui.mp_refresh_btn.connect_clicked({
+        let ui = ui.clone();
+        move |_| refresh_marketplace(&ui)
+    });
+    // My Listing: live micros readout + quick price Save.
+    ui.ml_price_spin.connect_value_changed({
+        let ui = ui.clone();
+        move |_| update_my_listing_micros(&ui)
+    });
+    ui.ml_save_btn.connect_clicked({
+        let ui = ui.clone();
+        let state = state.clone();
+        move |_| save_quick_price(&ui, &state)
     });
 
     // Network dropdown: show/hide custom entry and handle mainnet confirmation.
@@ -1490,6 +2175,19 @@ fn build_ui(app: &gtk4::Application) {
             refresh_status(&ui, &state);
             refresh_dashboard(&ui);
             refresh_jobs_table(&ui);
+            apply_marketplace_result(&ui);
+            refresh_my_listing(&ui, &state);
+            glib::ControlFlow::Continue
+        }
+    });
+
+    // Marketplace: refresh on entry and auto-refresh every 60s.
+    glib::timeout_add_local(Duration::from_secs(60), {
+        let ui = ui.clone();
+        let state = state.clone();
+        move || {
+            refresh_marketplace(&ui);
+            refresh_my_listing(&ui, &state);
             glib::ControlFlow::Continue
         }
     });
@@ -1510,6 +2208,8 @@ fn build_ui(app: &gtk4::Application) {
     });
 
     refresh_status(&ui, &state);
+    refresh_marketplace(&ui);
+    refresh_my_listing(&ui, &state);
 
     // First-run consent gate (§2.1). Without recorded consent — or after a
     // copy bump (`CURRENT_CONSENT_VERSION`) — nothing is shown or started
@@ -1687,6 +2387,16 @@ fn install_css() {
          .mem-accent { color: #d2a8ff; } \
          .status-green { color: #3fb950; } \
          .earnings-gold { color: #fbbf24; } \
+         .market-pane-title { color: #e6edf3; font-size: 15px; \
+             font-weight: 700; } \
+         .market-mono { font-family: monospace; font-size: 11px; \
+             color: #8b949e; } \
+         .market-row { border-bottom: 1px solid #30363d; \
+             border-radius: 4px; padding: 6px; } \
+         .market-row:hover { background-color: #1c2128; } \
+         .market-status { color: #8b949e; font-size: 11px; } \
+         .status-paid { color: #fbbf24; } \
+         .status-free { color: #3fb950; } \
          .tab-label { color: #8b949e; }",
     );
     if let Some(display) = gtk4::gdk::Display::default() {

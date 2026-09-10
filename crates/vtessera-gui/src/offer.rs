@@ -52,6 +52,27 @@ pub fn load_or_generate_key(key_path: &Path) -> Result<SigningKey, String> {
     Ok(key)
 }
 
+/// Load the Ed25519 identity key at `key_path` if it exists. Unlike
+/// [`load_or_generate_key`] this never writes — the Marketplace preview uses
+/// it on a refresh timer so it must be side-effect-free.
+pub fn load_key_if_exists(key_path: &Path) -> Result<SigningKey, String> {
+    if !key_path.exists() {
+        return Err(format!("no identity key at {}", key_path.display()));
+    }
+    let raw = fs::read(key_path).map_err(|e| format!("read {}: {e}", key_path.display()))?;
+    if raw.len() != ed25519_dalek::SECRET_KEY_LENGTH {
+        return Err(format!(
+            "identity key {} has wrong length: expected {}, got {}",
+            key_path.display(),
+            ed25519_dalek::SECRET_KEY_LENGTH,
+            raw.len()
+        ));
+    }
+    let mut arr = [0u8; ed25519_dalek::SECRET_KEY_LENGTH];
+    arr.copy_from_slice(&raw);
+    Ok(SigningKey::from_bytes(&arr))
+}
+
 /// Read the number of logical CPUs from `/proc/cpuinfo` (0 if unavailable).
 pub fn host_vcpus() -> u32 {
     let Ok(raw) = fs::read_to_string("/proc/cpuinfo") else {
