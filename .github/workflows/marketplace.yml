@@ -53,6 +53,29 @@ jobs:
             exit 0
           fi
 
+          # iroh dial-by-EndpointId support: persist the candidates + endpoint_id
+          # the node registered alongside its offer so marketplace entries are
+          # dialable over iroh QUIC (nodes.json resolver, §7d). Optional — older
+          # nodes register without them.
+          ENDPOINT_ID=$(echo "$PAYLOAD" | jq -c '.endpoint_id? // empty')
+          [ -z "$ENDPOINT_ID" ] && ENDPOINT_ID=null
+          CANDIDATES=$(echo "$PAYLOAD" | jq -c '.candidates? // empty')
+          [ -z "$CANDIDATES" ] && CANDIDATES=null
+
+          ENTRY=$(printf '%s' "$OFFER" | jq -c \
+            --arg id "$NODE_ID" --arg sig "$SIG" --argjson ts "$(date +%s)" \
+            --argjson eid "$ENDPOINT_ID" --argjson cands "$CANDIDATES" '
+            { node_id: $id,
+              offer: .,
+              sig_hex: $sig,
+              updated_at: $ts,
+              endpoint: .body.endpoint,
+              endpoint_id: ($eid // .body.endpoint_id),
+              candidates: $cands }
+            | if $cands == null then del(.candidates) else . end
+          ')
+          [ -n "$ENTRY" ] || { echo "Failed to build entry for $NODE_ID"; exit 1; }
+
           # Read existing nodes
           NODES=$(cat marketplace/nodes.json)
 
@@ -61,15 +84,13 @@ jobs:
 
           if [ "$EXISTS" -gt 0 ]; then
             # Update existing node
-            NODES=$(echo "$NODES" | jq --arg id "$NODE_ID" --argjson offer "$OFFER" --arg sig "$SIG" --argjson ts "$(date +%s)" '
-              .nodes |= map(if .node_id == $id then
-                { node_id: $id, offer: $offer, sig_hex: $sig, updated_at: $ts, endpoint: $offer.body.endpoint }
-              else . end)
+            NODES=$(echo "$NODES" | jq --arg id "$NODE_ID" --argjson entry "$ENTRY" '
+              .nodes |= map(if .node_id == $id then $entry else . end)
             ')
           else
             # Append new node
-            NODES=$(echo "$NODES" | jq --arg id "$NODE_ID" --argjson offer "$OFFER" --arg sig "$SIG" --argjson ts "$(date +%s)" '
-              .nodes += [{ node_id: $id, offer: $offer, sig_hex: $sig, updated_at: $ts, endpoint: $offer.body.endpoint }]
+            NODES=$(echo "$NODES" | jq --argjson entry "$ENTRY" '
+              .nodes += [$entry]
             ')
           fi
 

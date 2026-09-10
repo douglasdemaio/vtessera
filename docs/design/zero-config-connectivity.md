@@ -831,13 +831,29 @@ repo**, so Phase 2 is scoped from this doc's own T2.1, §6a, and §6b text.
 | Honest reachability (4b-7/§4b) | `QueueClient::probe` performs a real QUIC dial; agent `--queue health/offer` reports `reachability` based on the actual handshake, erroring (non-zero) when the coordinator is unreachable; live-coordinator and dead-coordinator probe tests | `crates/coordinator/src/iroh.rs`, `crates/agent-cli/src/main.rs` (`queue_render`) |
 | §6b infra tests | `crates/transport/tests/infra.rs` with runbook headers: stay-relayed, relay plurality, 100-cycle disconnect/reconnect soak, two-peer resolver interdial. Network cases `#[ignore]` (run `-- --ignored`) | `crates/transport/tests/infra.rs` |
 | x402 paid parity (1.2/FR-P2)* | Agent `submit` (HTTP **and** `--node-id` QUIC) now reads the HTTP status: 402 renders the full x402 challenge + pay-then-resubmit guidance; `--payment '{"tx","amount_micros"}'` attaches the `x-payment` proof header and re-submits; a proof that is still rejected is a hard error. HTTP path builds its own ureq agent with `http_status_as_error(false)` so the 402 body survives; shared classifier + renderer | `crates/agent-cli/src/main.rs` (`post_job`, `render_submit_outcome`, `print_x402_challenge`, `--payment`) |
+| Marketplace resolver (nodes.json)** | Nodes publish iroh `candidates` + `endpoint_id` with marketplace registration (same data as an index heartbeat); the `marketplace.yml` workflow persists both into the entry. `--node-id` resolution tries the offer-index first (freshest heartbeats) then the marketplace entry's candidates, so a node visible only on the marketplace is dialable over iroh QUIC. Backward compatible: legacy entries without `candidates` keep matching by the offer body's `endpoint_id` | `crates/node-api/src/bin/vtessera_node.rs` (`register_with_marketplace_with_ip`, `spawn_marketplace_registration`), `.github/workflows/marketplace.yml`, `crates/agent-cli/src/main.rs` (`resolve_node_candidates`, `marketplace_entry_for_node`, `marketplace_find_node`) |
+| Coordinator federation (§4b-4/§4c, 6a-10)*** | Repeated `--coordinator-addr` pins a **list** of coordinators (preference order A, B, …); the node runs one pull task per coordinator. A dead coordinator is isolated/retried — jobs on the others still flow, the process never fails closed into a 503, and one coordinator's death ejects nothing globally. Per-coordinator registration is exercised by a best-effort signed lease request per coordinator. e2e failover test: node pinned to [A, B]; a job on A runs, A's router+endpoint are killed, a job on B still runs and both queues drain | `crates/node-api/src/bin/vtessera_node.rs` (`spawn_coordinator_pull`, `request_coordinator_lease`, `COORDINATOR_DIAL_TIMEOUT`), `crates/node-api/tests/coordinator_pull.rs` (`node_fails_over_from_dead_coordinator_a_to_b`); per-coordinator namespace + advisory-only gating + lease scoping already unit-tested in `crates/coordinator/src/lib.rs` |
 
 \* x402 client flow: shorter x402 parity carries the agent through the 402
 challenge; the actual `spl-token transfer` to the escrow happens out-of-band
 (AGENTS.md). Queue-rendezvous + `--payment` rejects loudly (not supported).
 
-Remaining Phase 2 debt tracked out of doc for now: marketplace `resolve`
-(nodes.json) is not yet wired to `--node-id` (only the offer-index is).
+\*\* Marketplace resolver: deploying the workflow change requires merging to
+`main` (GitHub reads the workflow from the default branch); existing
+`nodes.json` entries gain `candidates` only after their node re-registers
+(hourly).
+
+\*\*\* Coordinator federation: the node drains **all** pinned coordinators each
+poll cycle (each gets one `COORDINATOR_DIAL_TIMEOUT` budget), so a job posted
+to any of them reaches the node while that coordinator is reachable. §4c's
+"dispatch through A, fail over to B, else direct" is expressed at the agent
+(which chooses the coordinator it pins) and at the node as "A down → B still
+drains, direct dial never needed from an outbound-only node". The agent's
+`choose_dispatch_path` A→B→direct cascade is exercised at the lib level in
+`crates/coordinator`.
+
+All Phase 2 debt from this table is closed. Next-phase candidate (out of this
+doc's scope): the aggregated "go over index" overview from §6b.
 
 ---
 

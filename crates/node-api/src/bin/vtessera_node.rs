@@ -80,7 +80,7 @@ use vtessera_settlement::{
 #[cfg(feature = "serve")]
 use vtessera_coordinator::iroh::QueueClient;
 #[cfg(feature = "serve")]
-use vtessera_coordinator::CoordinatorPayload;
+use vtessera_coordinator::{CoordinatorId, CoordinatorPayload};
 #[cfg(feature = "serve")]
 use vtessera_transport::iroh_sidecar::{self, IrohEndpoint};
 
@@ -89,6 +89,10 @@ const DEFAULT_HEARTBEAT_SECS: u64 = 30;
 const DEFAULT_MARKETPLACE_INTERVAL_SECS: u64 = 3600;
 const DEFAULT_COORDINATOR_POLL_SECS: u64 = 5;
 const INDEX_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling for one coordinator dial during federated failover (6a-10). A
+/// dead coordinator must not stall the drain of the others; each coordinator
+/// gets this budget per poll pass, then the loop fails over to the next.
+const COORDINATOR_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn usage_and_exit() -> ! {
     eprintln!(
@@ -105,7 +109,7 @@ fn usage_and_exit() -> ! {
         [--publish <index-url>] [--publish-interval <secs>] \
         [--marketplace] [--marketplace-interval <secs>] \
         [--upnp] \
-        [--coordinator-addr <endpoint-addr.json>] [--coordinator-poll <secs>]"
+        [--coordinator-addr <endpoint-addr.json> ...] [--coordinator-poll <secs>]"
     );
     process::exit(2);
 }
@@ -165,13 +169,14 @@ struct Args {
     upnp: bool,
     /// How the node exposes itself (see [`ConnectivityMode`]).
     connectivity: ConnectivityMode,
-    /// Optional path to a JSON file with the coordinator's `EndpointAddr`
-    /// (its EndpointId + addrs). When set, the node runs an outbound pull
-    /// loop against that coordinator's queue and accepts work without any
-    /// inbound listener (`outbound-only`). The coordinator is pinned by this
-    /// address's EndpointId — the node verifies every dispatched offer's
-    /// signature against it (design §4b-2 / P1.5).
-    coordinator_addr: Option<PathBuf>,
+    /// Optional paths to JSON files with coordinators' `EndpointAddr`
+    /// (each: EndpointId + addrs). When set, the node runs an outbound pull
+    /// loop against those coordinators' queues (in the order given — the
+    /// federated A→B→direct degradation chain, §4b-4/§4c) and accepts work
+    /// without any inbound listener (`outbound-only`). Each coordinator is
+    /// pinned by its address's EndpointId — the node verifies every
+    /// dispatched offer's signature against it (design §4b-2 / P1.5).
+    coordinator_addrs: Vec<PathBuf>,
     /// How often to poll the coordinator queue when empty (default 5s).
     coordinator_poll_interval: Duration,
 }
@@ -296,7 +301,7 @@ where
     let mut marketplace_interval: u64 = DEFAULT_MARKETPLACE_INTERVAL_SECS;
     let mut upnp = false;
     let mut connectivity = ConnectivityMode::InboundDialable;
-    let mut coordinator_addr: Option<PathBuf> = None;
+    let mut coordinator_addrs: Vec<PathBuf> = Vec::new();
     let mut coordinator_poll: u64 = DEFAULT_COORDINATOR_POLL_SECS;
     let mut it = argv.into_iter();
     while let Some(a) = it.next() {
@@ -354,7 +359,11 @@ where
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 connectivity = ConnectivityMode::parse(&raw).unwrap_or_else(|| usage_and_exit());
             }
-            "--coordinator-addr" => coordinator_addr = it.next().map(PathBuf::from),
+            "--coordinator-addr" => {
+                if let Some(p) = it.next() {
+                    coordinator_addrs.push(PathBuf::from(p));
+                }
+            }
             "--coordinator-poll" => {
                 if let Some(s) = it.next() {
                     coordinator_poll = s.parse().unwrap_or(DEFAULT_COORDINATOR_POLL_SECS);
@@ -392,7 +401,7 @@ where
             marketplace_interval: Duration::from_secs(marketplace_interval),
             upnp,
             connectivity,
-            coordinator_addr,
+            coordinator_addrs,
             coordinator_poll_interval: Duration::from_secs(coordinator_poll),
         },
         _ => usage_and_exit(),
@@ -1133,6 +1142,15 @@ fn main() {
 
     // Marketplace registration: register via Cloudflare Worker.
     if args.marketplace {
+        // Fetch the current iroh candidates (relay + direct addrs) so the
+        // marketplace entry is dialable by EndpointId, like an index
+        // heartbeat. Empty until iroh has discovered addresses; the hourly
+        // re-register loop refreshes them (§7d marketplace resolver).
+        let ep_handle = iroh_endpoint
+            .clone()
+            .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(None)));
+        let (candidates, endpoint_id) = get_iroh_info(&ep_handle);
+
         // Parse port from bind address.
         let port = args
             .bind
@@ -1177,6 +1195,8 @@ fn main() {
             port,
             external_ip.clone(),
             has_public_forward,
+            &candidates,
+            endpoint_id.as_deref(),
         ) {
             Ok(()) => {}
             Err(e) => eprintln!("vtessera-node: marketplace registration failed (will retry): {e}"),
@@ -1188,6 +1208,7 @@ fn main() {
             args.marketplace_interval,
             external_ip,
             has_public_forward,
+            ep_handle,
         );
     }
 
@@ -1233,9 +1254,9 @@ fn main() {
             spawn_iroh_router(ep, Arc::new(state.clone()));
         }
 
-        if let Some(ref path) = args.coordinator_addr {
+        if !args.coordinator_addrs.is_empty() {
             spawn_coordinator_pull(
-                path.clone(),
+                args.coordinator_addrs.clone(),
                 signing_key_for_iroh.to_bytes(),
                 Arc::new(state.clone()),
                 args.coordinator_poll_interval,
@@ -1269,9 +1290,9 @@ fn main() {
         // Outbound-only: no TCP listener at all. If a coordinator is pinned,
         // work arrives via the outbound pull loop (no inbound socket). Keep
         // the process alive for heartbeat/publish threads and the pull loop.
-        if let Some(ref path) = args.coordinator_addr {
+        if !args.coordinator_addrs.is_empty() {
             spawn_coordinator_pull(
-                path.clone(),
+                args.coordinator_addrs.clone(),
                 signing_key_for_iroh.to_bytes(),
                 Arc::new(state.clone()),
                 args.coordinator_poll_interval,
@@ -1292,69 +1313,140 @@ fn main() {
     }
 }
 
-/// Spawn the node's outbound coordinator pull loop (P1.7b).
+/// Spawn the node's outbound coordinator pull loop (P1.7b, federated §4b-4).
 ///
-/// The loop dials the pinned coordinator's queue over iroh QUIC
-/// (`vtessera/0`), pulls the next `DispatchOffer`, **verifies its signature
-/// against the coordinator's EndpointId**, feeds the job through the same
-/// `dispatch()` used by HTTP/i roh agents, and acks. This is the outbound
-/// dispatch path for `outbound-only` nodes (P1.3) — no inbound listener is
-/// opened.
+/// One pull task is started **per pinned coordinator** (repeated
+/// `--coordinator-addr`, preferred order A, B, …). Each task dials that
+/// coordinator's queue over iroh QUIC (`vtessera/0`), pulls the next
+/// `DispatchOffer`, **verifies its signature against the coordinator's
+/// EndpointId**, feeds the job through the same `dispatch()` used by HTTP/
+/// iroh agents, and acks. This is the outbound dispatch path for
+/// `outbound-only` nodes (P1.3) — no inbound listener is opened.
 ///
-/// Degradation is fail-soft by design (6a-10, never a hard 503): an empty
-/// queue means "poll again later", a failed dial means "retry later". The
-/// process never exits here.
+/// Degradation is fail-soft by design (6a-10, never a hard 503): a
+/// coordinator whose dial times out is logged and skipped for that pass while
+/// the remaining coordinators stay drained, an empty queue means "poll again
+/// later", and the coordinator who cannot be reached is retried with backoff.
+/// The process never exits here, and one dead coordinator never ejects or
+/// starves the others (advisory-only gating, §4b-4/§4b-5).
 fn spawn_coordinator_pull(
-    coordinator_addr_path: PathBuf,
+    coordinator_paths: Vec<PathBuf>,
     node_key_bytes: [u8; 32],
     state: Arc<NodeState>,
     poll_interval: Duration,
 ) {
+    if coordinator_paths.is_empty() {
+        return;
+    }
     thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
             eprintln!("vtessera-node: cannot start coordinator-pull runtime: {e}");
             process::exit(1);
         });
         rt.block_on(async move {
-            // Resolve the pinned coordinator's address; retry on read/parse
-            // failure (the addr file may still be landing on disk).
-            let coordinator_addr: iroh::EndpointAddr = loop {
-                match read_coordinator_addr(&coordinator_addr_path) {
-                    Ok(addr) => break addr,
-                    Err(e) => {
-                        eprintln!("vtessera-node: coordinator addr unresolved (retry): {e}");
-                        tokio::time::sleep(poll_interval).await;
-                    }
-                }
-            };
-            let coordinator_id = coordinator_addr.id;
-            eprintln!(
-                "vtessera-node: coordinator pull loop pinned to {}",
-                hex::encode(coordinator_id.as_bytes())
-            );
-
             let endpoint = iroh_sidecar::create_endpoint(&node_key_bytes)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("vtessera-node: coordinator iroh endpoint failed: {e}");
                     process::exit(1);
                 });
-            let client = QueueClient::new(endpoint.iroh_endpoint().clone(), coordinator_addr);
 
-            loop {
-                match pull_once(&client, &state).await {
-                    Ok(true) => continue, // handled a job; poll again immediately
-                    Ok(false) => {
-                        tokio::time::sleep(poll_interval).await;
+            let mut tasks = Vec::new();
+            for path in coordinator_paths {
+                let path = path.clone();
+                let ep = endpoint.iroh_endpoint().clone();
+                let state = state.clone();
+                tasks.push(tokio::spawn(async move {
+                    // Resolve this coordinator's address; retry on read/parse
+                    // failure (the addr file may still be landing on disk).
+                    // Independent per coordinator: a missing file for one
+                    // never blocks the others.
+                    let addr = wait_for_coordinator_addr(&path, poll_interval).await;
+                    let client = QueueClient::new(ep, addr);
+                    eprintln!(
+                        "vtessera-node: coordinator pull pinned to {}",
+                        client.coordinator_id_hex()
+                    );
+
+                    // Register with this coordinator by holding its
+                    // per-coordinator lease (best-effort; advisory at this
+                    // stage). A dead coordinator must not take down pull.
+                    request_coordinator_lease(&client, &node_key_bytes).await;
+
+                    loop {
+                        // Fail-soft pass: a coordinator gets one dial budget.
+                        // A dead one is logged and skipped — the loop keeps
+                        // retrying it with backoff, never exiting, never 503.
+                        match tokio::time::timeout(
+                            COORDINATOR_DIAL_TIMEOUT,
+                            pull_once(&client, &state),
+                        )
+                        .await
+                        {
+                            Ok(Ok(true)) => continue, // handled a job; poll again now
+                            Ok(Ok(false)) => {
+                                tokio::time::sleep(poll_interval).await;
+                            }
+                            Ok(Err(e)) => {
+                                eprintln!("vtessera-node: coordinator pull failed (retry): {e}");
+                                tokio::time::sleep(poll_interval).await;
+                            }
+                            Err(_) => {
+                                eprintln!(
+                                    "vtessera-node: coordinator {} unreachable (failover, retry)",
+                                    client.coordinator_id_hex()
+                                );
+                                tokio::time::sleep(poll_interval).await;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("vtessera-node: coordinator pull failed (retry): {e}");
-                        tokio::time::sleep(poll_interval).await;
-                    }
-                }
+                }));
             }
+            let _ = tokio::task::JoinSet::from_iter(tasks).join_all().await;
         });
     });
+}
+
+/// Read + parse one coordinator's [`iroh::EndpointAddr`] from JSON.
+#[cfg(feature = "serve")]
+fn read_coordinator_addr(path: &Path) -> Result<iroh::EndpointAddr, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path:?}: {e}"))?;
+    serde_json::from_str::<iroh::EndpointAddr>(&raw).map_err(|e| format!("parse {path:?}: {e}"))
+}
+
+/// Wait (forever, polling) for a coordinator's addr file to become readable.
+async fn wait_for_coordinator_addr(path: &Path, poll_interval: Duration) -> iroh::EndpointAddr {
+    loop {
+        match read_coordinator_addr(path) {
+            Ok(addr) => return addr,
+            Err(e) => {
+                eprintln!("vtessera-node: coordinator addr {path:?} unresolved (retry): {e}");
+                tokio::time::sleep(poll_interval).await;
+            }
+        }
+    }
+}
+
+/// Best-effort per-coordinator registration: request a lease, verify its
+/// signature against the coordinator's pubkey (audit, §4b-2), and log the
+/// coordinator-scoped lease id. Failures are advisory — never fatal.
+async fn request_coordinator_lease(client: &QueueClient, node_key_bytes: &[u8; 32]) {
+    let node_id = CoordinatorId::from_seed(node_key_bytes);
+    match client.request_lease(node_id).await {
+        Ok(signed) => match signed.decode::<CoordinatorPayload>(&client.coordinator_id_hex()) {
+            Ok(CoordinatorPayload::LeaseGrant {
+                lease_id,
+                expires_at_unix,
+                ..
+            }) => eprintln!(
+                "vtessera-node: per-coordinator lease {} granted until {expires_at_unix}",
+                lease_id.display()
+            ),
+            Ok(_) => eprintln!("vtessera-node: coordinator returned a non-lease emission"),
+            Err(e) => eprintln!("vtessera-node: coordinator lease signature invalid: {e:?}"),
+        },
+        Err(e) => eprintln!("vtessera-node: coordinator lease request failed (advisory): {e}"),
+    }
 }
 
 /// Pull exactly one job from the coordinator queue and dispatch it.
@@ -1397,13 +1489,6 @@ async fn pull_once(client: &QueueClient, state: &Arc<NodeState>) -> Result<bool,
     // misbehaving job (the reserved entry is released).
     let _ = client.ack(&job_id).await;
     Ok(true)
-}
-
-/// Read + parse the pinned coordinator's [`iroh::EndpointAddr`] from JSON.
-#[cfg(feature = "serve")]
-fn read_coordinator_addr(path: &PathBuf) -> Result<iroh::EndpointAddr, String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path:?}: {e}"))?;
-    serde_json::from_str::<iroh::EndpointAddr>(&raw).map_err(|e| format!("parse {path:?}: {e}"))
 }
 
 /// Background loop that refreshes the node's offer at the index on an
@@ -1539,6 +1624,8 @@ fn register_with_marketplace_with_ip(
     port: u16,
     external_ip: Option<String>,
     publicly_reachable: bool,
+    candidates: &[vtessera_transport::Candidate],
+    endpoint_id: Option<&str>,
 ) -> Result<(), String> {
     // Override the endpoint (with the external IP when publicly reachable) and re-sign.
     let mut offer_body = offer.body.clone();
@@ -1550,12 +1637,21 @@ fn register_with_marketplace_with_ip(
 
     let offer_json = vtessera_offer::to_json(&re_signed);
 
-    // Build the registration payload.
-    let payload = serde_json::json!({
+    // Build the registration payload. Candidates + endpoint_id mirror the
+    // index heartbeat so a marketplace entry is dialable by EndpointId over
+    // iroh QUIC (nodes.json resolver, §7d). Both are optional: pre-iroh and
+    // outbound-only nodes report neither.
+    let mut payload = serde_json::json!({
         "offer": serde_json::from_str::<serde_json::Value>(&offer_json)
             .map_err(|e| e.to_string())?,
         "sig_hex": re_signed.sig_hex,
     });
+    if !candidates.is_empty() {
+        payload["candidates"] = serde_json::to_value(candidates).unwrap_or_default();
+    }
+    if let Some(id) = endpoint_id {
+        payload["endpoint_id"] = serde_json::Value::String(id.to_string());
+    }
 
     let url = format!("{MARKETPLACE_WORKER_URL}/register");
     let agent = ureq::Agent::new_with_defaults();
@@ -1598,6 +1694,7 @@ fn register_with_marketplace_with_ip(
 
 /// Background loop that re-registers with the marketplace on an interval.
 /// External IP may change (DHCP, VPN reconnect), so we re-detect and re-register.
+/// iroh candidates are re-fetched each tick so the public entry stays dialable.
 fn spawn_marketplace_registration(
     offer_body: vtessera_offer::OfferBody,
     signing_key: SigningKey,
@@ -1605,16 +1702,20 @@ fn spawn_marketplace_registration(
     interval: Duration,
     external_ip: Option<String>,
     publicly_reachable: bool,
+    iroh_ep: Arc<tokio::sync::RwLock<Option<IrohEndpoint>>>,
 ) {
     thread::spawn(move || loop {
         thread::sleep(interval);
         let signed = vtessera_offer::sign(offer_body.clone(), &signing_key);
+        let (candidates, endpoint_id) = get_iroh_info(&iroh_ep);
         if let Err(e) = register_with_marketplace_with_ip(
             &signed,
             &signing_key,
             port,
             external_ip.clone(),
             publicly_reachable,
+            &candidates,
+            endpoint_id.as_deref(),
         ) {
             eprintln!("vtessera-node: marketplace registration failed (will retry): {e}");
         }
