@@ -132,7 +132,7 @@ GUI, the ROADMAP, release notes, and any marketing.
 | "Earn with your idle machine" | "Vtessera lets other agents rent CPU/GPU time on your machine, settled in EURC/USDC" |
 | "Your offer is always served" | "A coordinator or index you register with can choose to stop sending you work at any time; it cannot block you globally (other coordinators are unaffected), and it never handles payment" |
 | "Your job data is private" | "Job contents and payment proofs are end-to-end encrypted to the node, but a relay/coordinator you route through can observe timing, payload sizes, availability, and which parties communicate (a metadata graph). Federation splits this across operators; it does not remove it" |
-| "Your traffic runs through one company's relay" | "The node's relay pool is plural — N0's public relays plus any relays you or your organization operate — because the relay is only a TCP/443 fallback for UDP-blocked networks. Relays see ciphertext only, never jobs, holds, or payment proofs (`docs/INTERNET-CONNECTIVITY.md`)" |
+| "Your traffic runs through one company's relay" | "The node's relay pool is plural — N0's public relays plus any relays you or your organization operate — because the relay is only a TCP/443 fallback for UDP-blocked networks. Relays see ciphertext only, never jobs, holds, or payment proofs (`docs/design/INTERNET-CONNECTIVITY.md`)" |
 
 ### 3.1 Settlement authority
 

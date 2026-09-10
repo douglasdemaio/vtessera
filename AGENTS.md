@@ -281,5 +281,5 @@ Device classes:
 
 - `vtessera-agent --help` — CLI options
 - `crates/agent-cli/src/main.rs` — Agent CLI source
-- `docs/INTERNET-CONNECTIVITY.md` — Network architecture
+- `docs/design/INTERNET-CONNECTIVITY.md` — Network architecture
 - `README.md` — Project overview

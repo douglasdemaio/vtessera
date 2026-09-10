@@ -1,6 +1,6 @@
 # Implementation Plan: Private/Enterprise Network Mode
 
-> **Spec:** `docs/superpowers/specs/2026-08-21-private-network-design.md`
+> **Spec:** `docs/complete/implemented/specs/2026-08-21-private-network-design.md`
 > **Issue:** [#52](https://github.com/douglasdemaio/vtessera/issues/52)
 > **Date:** 2026-08-21
 

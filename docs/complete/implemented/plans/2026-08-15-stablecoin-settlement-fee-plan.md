@@ -1,6 +1,6 @@
 # Plan — Direct stablecoin settlement + per-transaction SOL protocol fee
 
-Spec: `docs/superpowers/specs/2026-08-15-stablecoin-settlement-fee-design.md`
+Spec: `docs/complete/implemented/specs/2026-08-15-stablecoin-settlement-fee-design.md`
 Branch: `stablecoin-settlement` (new, off `main`; the spec commit rides along)
 Verify: per-phase gates below; full Definition of Done in the spec.
 
@@ -108,7 +108,7 @@ node-api (default + serve), offer, settlement.
 22. `docs/DESIGN.md` "Why HNT" section (~72–79) → "Why EURC/USDC, no Vtessera
     token".
 23. `programs/vtessera-escrow/README.md` (flow, constants table, status).
-24. `packaging/flatpak/README.md` (~86) + `docs/superpowers/specs/2026-08-13-
+24. `packaging/flatpak/README.md` (~86) + `docs/complete/implemented/specs/2026-08-13-
     vtessera-gui-flatpak-design.md` (~93).
 
 Verify: `grep -ri "HNT\b\|swap\|Jupiter\|pyth\|Pyth" --include=*.md --include=*.rs`

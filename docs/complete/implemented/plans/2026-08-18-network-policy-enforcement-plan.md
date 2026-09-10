@@ -1,7 +1,7 @@
 # Implementation plan — Network policy enforcement (Module 1e)
 
 **Date:** 2026-08-18
-**Spec:** `docs/superpowers/specs/2026-08-18-network-policy-enforcement-design.md`
+**Spec:** `docs/complete/implemented/specs/2026-08-18-network-policy-enforcement-design.md`
 **Branch:** `module1-ch-cpu`
 
 ## Overview

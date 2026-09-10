@@ -263,7 +263,7 @@ unachievable or in tension with another invariant.
 - **§0 invariant 4 vs. current heartbeat.** The *offer-index* heartbeat
   (`POST /offers/{node_id}/heartbeat`, `offer-index/src/lib.rs:581-607`)
   updates `candidates`/`endpoint_id` with **no signature** today. The design doc
-  `docs/INTERNET-CONNECTIVITY.md` specified a signed heartbeat
+  `docs/design/INTERNET-CONNECTIVITY.md` specified a signed heartbeat
   (X-Signature over `heartbeat:{node_id}:{timestamp}`) but it is **not
   implemented**. The directive's T1.4 "heartbeats are signed" would add this.
   This is a real code gap, not a doc-only item. **Current state does not yet
@@ -711,7 +711,7 @@ we can't provision here:
 | 1 | WSS fallback (T1.3) | **Deferred/no-op** — iroh's relay path is WebSocket-over-TCP(S), so UDP-blocked networks reach a relay over TCP/443 without a custom transport (§2 finding). Remaining edge (all-TCP-blocked) is a documented accepted gap. |
 | 2 | Queue rendezvous in Phase 1 | **Confirmed** — queue/coordinator URL rides in the offer `endpoint` field, which **stays** in the schema and accommodates a **list** (IP/port + queue URL) (§4a). Queue-reversal: coordinator **built in Phase 1**. |
 | 3 | Dual-stack flag name/default | **Confirmed** — `inbound+dialable` default during transition, flip later, remove listener last (§4). |
-| 4 | Heartbeat signature retrofit | **Confirmed** — implement to `docs/INTERNET-CONNECTIVITY.md` spec (invariant #4/T1.4). |
+| 4 | Heartbeat signature retrofit | **Confirmed** — implement to `docs/design/INTERNET-CONNECTIVITY.md` spec (invariant #4/T1.4). |
 | 5 | `endpoint`-vs-`node_id` semantics for T2.1 | **Confirmed** — offer carries the **full pubkey/EndpointId**, not truncated `node_id`; add an explicit **offer `schema_version`** field in lockstep with `canonical_bytes`; old-version offers rejected (§3). |
 | 6 | T3.2 lease-expiry receipt | **Confirmed in scope** — narrow reach into `settlement` is required to avoid hung escrows; leases are now **per-coordinator** (§5). |
 | 7 | Consent disclosure scope (§4d) | **Doc-only for now** — `docs/CONSENT.md` lines added; GUI disclosure surface deferred to P1.8 with the GUI rework (persistent-outbound T5.1) (§7c). |
@@ -738,7 +738,7 @@ node flips outbound-only, and payment/escrow modules are untouched.
 - Tests: 6a-8 schema lockstep + rejection.
 
 **P1.2 — Signed heartbeat (`crates/offer-index`, `crates/offer`).**
-- Add heartbeat signing to `docs/INTERNET-CONNECTIVITY.md` spec (invariant #4;
+- Add heartbeat signing to `docs/design/INTERNET-CONNECTIVITY.md` spec (invariant #4;
   today unsigned at `offer-index/src/lib.rs:581-607`).
 - Tests: 6a-3 sign/verify + forge-reject.
 
@@ -865,7 +865,7 @@ doc's scope): the aggregated "go over index" overview from §6b.
   `crates/vtesserad/tests/no_socket.rs`, `crates/settlement/`,
   `programs/vtessera-escrow/`.
 - `packaging/vtesserad.service`, `scripts/*.sh`.
-- `docs/INTERNET-CONNECTIVITY.md`, `docs/CONSENT.md`, `docs/PRD.md`,
+- `docs/design/INTERNET-CONNECTIVITY.md`, `docs/CONSENT.md`, `docs/PRD.md`,
   `ROADMAP.md` §2e.
 - `iroh-base-1.1.0/src/key.rs`, `iroh-base-1.1.0/src/endpoint_addr.rs`,
   `iroh-1.1.0/src/socket.rs`.

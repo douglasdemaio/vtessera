@@ -420,7 +420,7 @@ When all flags are provided, runs non-interactively (no prompts).
 | `crates/vtessera-config/` | New crate: config wizard | Yes |
 | `crates/vtessera-config/Cargo.toml` | dialoguer + toml | Yes |
 | `crates/vtessera-config/src/main.rs` | Interactive wizard | Yes |
-| `docs/superpowers/specs/2026-08-21-private-network-design.md` | This spec | Yes |
+| `docs/complete/implemented/specs/2026-08-21-private-network-design.md` | This spec | Yes |
 | `ROADMAP.md` | Update §1e with implementation status | No |
 
 ---

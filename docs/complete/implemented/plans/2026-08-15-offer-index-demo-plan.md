@@ -1,6 +1,6 @@
 # Offer-Index Live-Demo Wiring + FCFS Claims — Implementation Plan
 
-Spec: `docs/superpowers/specs/2026-08-15-offer-index-demo-design.md`
+Spec: `docs/complete/implemented/specs/2026-08-15-offer-index-demo-design.md`
 Branch: `offer-index-demo` (new, off the settlement-service head that holds
 the spec commit). After PR #34 merges, rebase onto `main` and drop the
 settlement commits; the spec commit rides along into the offer-index PR.

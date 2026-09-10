@@ -21,6 +21,16 @@ This document is an index. The authoritative design lives in:
   silent resume, legible activity, complete uninstall, honest naming,
   declared network surface), GUI consent copy, claims-precision rules,
   and the anti-misclassification checklist.
+- [PRD.md](PRD.md) — Product requirements: market sides, paid + free
+  paths, shortfalls, and the industry-safe priority order to close them.
+- [design/](design/) — Live design docs: `zero-config-connectivity.md`
+  (iroh dial-in, coordinator federation, marketplace resolver) and
+  `INTERNET-CONNECTIVITY.md` (network architecture), plus dated
+  `design/specs/*.md` for in-progress work.
+- [complete/](complete/) — Archive: `complete/implemented/`
+  (specs + plans for shipped work) and `complete/irrelevant/`
+  (superseded dated notes). Reference for historical decisions; not
+  active design.
 
 ## Workspace map
 

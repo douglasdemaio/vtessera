@@ -151,7 +151,9 @@ vtessera/
 ├── docs/
 │   ├── DESIGN.md                   # link back to ROADMAP.md / SECURITY.md
 │   ├── CONSENT.md                  # consent & disclosure spec
-│   └── superpowers/                # specs + plans (historical; specs are canonical)
+│   ├── design/                     # live design docs (connectivity, specs)
+│   ├── complete/                   # archive (implemented work / irrelevant notes)
+│   └── PRD.md                      # product requirements
 └── .github/
     └── workflows/
         ├── ci.yml                  # fmt, clippy, test, audit, deny, build, rpm

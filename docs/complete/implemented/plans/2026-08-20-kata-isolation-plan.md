@@ -1,6 +1,6 @@
 # Kata Containers isolation — Implementation Plan
 
-Spec: `docs/superpowers/specs/2026-08-20-kata-isolation-design.md`
+Spec: `docs/complete/implemented/specs/2026-08-20-kata-isolation-design.md`
 Branch: `module1-kata-isolation` (new, off `main`). One PR at the end.
 
 Host prerequisites (documented, not scripted here): containerd,
