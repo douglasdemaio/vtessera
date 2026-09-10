@@ -107,6 +107,21 @@ If you know the node's IP and port:
 vtessera-agent --node http://<ip>:<port> health
 ```
 
+### Whole-network overview
+
+`vtessera-agent overview` aggregates **every** visible offer — local index +
+marketplace, free **and** paid, claimed + unclaimed — into one table (or
+normalized JSON with `--json`). Filter with `--mode free|paid`, `--device
+cpu|nvidia_gpu|...`, and `--available` (unclaimed only):
+
+```bash
+vtessera-agent overview --marketplace https://douglasdemaio.github.io/vtessera/nodes.json
+vtessera-agent overview --mode free --available
+vtessera-agent overview --json
+```
+
+Columns: `NODE_ID  DEVICE  PRICE  REACH  DIAL  CLAIM  CAND  HEARTBEAT`.
+
 ## Node Modes
 
 Nodes operate in one of four modes. Check the `offer` output to identify:
