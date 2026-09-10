@@ -53,6 +53,9 @@ pub struct StartOptions<'a> {
     /// `vtessera-node --backend`: `"noop-cpu"` (synthetic metering) or
     /// `"local-cpu"` (runs job commands on the host, not isolated).
     pub backend: &'a str,
+    /// `vtessera-node --max-concurrent-jobs`: how many jobs may run at once.
+    /// Jobs beyond this wait in the node-local queue (any `>= 1`).
+    pub max_concurrent_jobs: u32,
     /// Node identity key (`vtessera-node --key`); the node signs per-job
     /// metering receipts with it (Module 3).
     pub key_path: PathBuf,
@@ -237,6 +240,9 @@ pub fn start(opts: &StartOptions) -> Result<Daemons, String> {
             .args(["--backend", opts.backend])
             .args(["--key", opts.key_path.to_str().unwrap_or_default()])
             .args(["--state-dir", opts.state_dir.to_str().unwrap_or_default()]);
+        node_cmd
+            .arg("--max-concurrent-jobs")
+            .arg(opts.max_concurrent_jobs.to_string());
         if outbound {
             node_cmd.args(["--connectivity", "outbound-only"]);
             if let Some(addr) = opts.coordinator_addr {

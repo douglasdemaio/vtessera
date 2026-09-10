@@ -92,6 +92,7 @@ mod tests {
             allowed_cidrs: Vec::new(),
             connectivity: crate::settings::CONNECTIVITY_INBOUND.into(),
             coordinator_addr: String::new(),
+            max_concurrent_jobs: crate::settings::DEFAULT_MAX_CONCURRENT_JOBS,
         }
     }
 

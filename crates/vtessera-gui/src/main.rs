@@ -72,6 +72,7 @@ struct Ui {
     upnp_switch: gtk4::Switch,
     cidr_entry: gtk4::Entry,
     interval_spin: gtk4::SpinButton,
+    max_jobs_spin: gtk4::SpinButton,
     backend_dd: gtk4::DropDown,
     /// "Accept workloads from others" — the second consent gate (§2.2 of
     /// `docs/CONSENT.md`). OFF by default; off until explicitly enabled.
@@ -232,6 +233,7 @@ impl Ui {
                 settings::CONNECTIVITY_INBOUND.into()
             },
             coordinator_addr: self.coordinator_entry.text().trim().to_string(),
+            max_concurrent_jobs: self.max_jobs_spin.value() as u32,
         };
         settings.validate()?;
         Ok(settings)
@@ -267,6 +269,7 @@ impl Ui {
         self.sync_connectivity_sensitivity();
         self.sync_network_sensitivity();
         self.interval_spin.set_value(s.sample_interval_secs as f64);
+        self.max_jobs_spin.set_value(s.max_concurrent_jobs as f64);
         self.backend_dd
             .set_selected(if s.backend == "local-cpu" { 1 } else { 0 });
         self.accept_switch.set_active(s.accept_workloads);
@@ -525,12 +528,38 @@ fn refresh_dashboard(ui: &Ui) {
 /// `receipt.metering.cpu_seconds` / `receipt.metering.peak_mem_kb`) and
 /// legacy vtesserad window-receipts (with
 /// `receipt.totals.cpu_pct_avg` / `receipt.totals.mem_used_kb_avg`).
-fn refresh_jobs_table(ui: &Ui) {
-    use std::time::SystemTime;
+/// A single rendered job row (status + metering + age).
+struct JobsRow {
+    age: u64,
+    id: String,
+    class: &'static str,
+    status: String,
+    cpu_pct: Option<f64>,
+    mem_kb: Option<u64>,
+}
 
-    let dir = settings::state_dir().join("job-receipts");
-    let now = SystemTime::now();
+/// Seconds since a file was last modified (`u64::MAX` when unknown).
+fn age_of(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(u64::MAX)
+}
 
+/// Truncate a full job id for the table (12 chars, like the old table).
+fn short(id: &str) -> String {
+    id.chars().take(12).collect()
+}
+
+/// Parse a job's metering into (cpu_pct, mem_kb) from any of the shapes the
+/// jobs dirs hold: a `SignedJobReceipt` (`receipt.metering.cpu_seconds` /
+/// `peak_mem_kb` / `elapsed_secs`), a runner `done` envelope (top-level
+/// `metering`, same fields), or a legacy vtesserad window receipt
+/// (`receipt.totals.cpu_pct_avg` / `mem_used_kb_avg`). Parse failures degrade
+/// to `None` — the row still shows, just without meter numbers.
+fn read_receipt_metering(path: &std::path::Path) -> (Option<f64>, Option<u64>) {
     #[derive(serde::Deserialize)]
     struct Metering {
         cpu_seconds: f64,
@@ -539,75 +568,277 @@ fn refresh_jobs_table(ui: &Ui) {
     }
     #[derive(serde::Deserialize)]
     struct JobReceiptInner {
-        metering: Metering,
+        metering: Option<Metering>,
+        totals: Option<Totals>,
     }
     #[derive(serde::Deserialize)]
-    struct SignedJobReceipt {
-        receipt: JobReceiptInner,
+    struct Totals {
+        cpu_pct_avg: f64,
+        mem_used_kb_avg: u64,
+    }
+    #[derive(serde::Deserialize)]
+    struct ReceiptWrap {
+        receipt: Option<JobReceiptInner>,
     }
 
-    let mut jobs: Vec<(u64, String, f64, u64, u64)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
+    let to_pct = |m: &Metering| {
+        let cpu = if m.elapsed_secs > 0 {
+            (m.cpu_seconds / m.elapsed_secs as f64 * 100.0).min(100.0)
+        } else {
+            0.0
+        };
+        (Some(cpu), Some(m.peak_mem_kb))
+    };
+
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let Ok(wrap) = serde_json::from_str::<ReceiptWrap>(&raw) else {
+        return (None, None);
+    };
+    if let Some(m) = wrap.receipt.as_ref().and_then(|r| r.metering.as_ref()) {
+        return to_pct(m);
+    }
+    if let Some(t) = wrap.receipt.as_ref().and_then(|r| r.totals.as_ref()) {
+        return (Some(t.cpu_pct_avg), Some(t.mem_used_kb_avg));
+    }
+    classify_from_top_level_metering(&raw).unwrap_or((None, None))
+}
+
+/// Some stored jobs carry the metering at the top level rather than under
+/// `receipt` (the node's `done` files are the raw runner 200 JSON).
+fn classify_from_top_level_metering(raw: &str) -> Option<(Option<f64>, Option<u64>)> {
+    #[derive(serde::Deserialize)]
+    struct Metering {
+        cpu_seconds: f64,
+        peak_mem_kb: u64,
+        elapsed_secs: u64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        metering: Option<Metering>,
+    }
+    let envelope: Envelope = serde_json::from_str(raw).ok()?;
+    let m = envelope.metering?;
+    let cpu = if m.elapsed_secs > 0 {
+        (m.cpu_seconds / m.elapsed_secs as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    Some((Some(cpu), Some(m.peak_mem_kb)))
+}
+
+/// Merge the signed receipts and the live job-queue dir into one table.
+/// Rows come from (newest-first) both sources; a queue job that finished has
+/// BOTH a `.json.done` marker and a signed receipt, so it is shown once.
+fn scan_jobs_from(root: &std::path::Path) -> Vec<JobsRow> {
+    let mut rows: Vec<JobsRow> = Vec::new();
+
+    // Completed jobs come from the signed receipts.
+    let mut receipt_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let receipts_dir = root.join("job-receipts");
+    if let Ok(rd) = std::fs::read_dir(receipts_dir) {
         for entry in rd.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|x| x == "json") {
-                let age = std::fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| now.duration_since(t).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(u64::MAX);
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                if let Ok(raw) = std::fs::read_to_string(&path) {
-                    if let Ok(job) = serde_json::from_str::<SignedJobReceipt>(&raw) {
-                        let m = &job.receipt.metering;
-                        // Convert cpu_seconds to approximate CPU% using elapsed_secs.
-                        let cpu_pct = if m.elapsed_secs > 0 {
-                            (m.cpu_seconds / m.elapsed_secs as f64 * 100.0).min(100.0)
-                        } else {
-                            0.0
-                        };
-                        jobs.push((age, name, cpu_pct, m.peak_mem_kb, m.elapsed_secs));
-                    } else {
-                        jobs.push((age, name, 0.0, 0, 0));
+            if path.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let id = name.trim_end_matches(".json").to_string();
+            receipt_ids.insert(id.clone());
+            let (cpu_pct, mem_kb) = read_receipt_metering(&path);
+            rows.push(JobsRow {
+                age: age_of(&path),
+                id: short(&id),
+                class: "status-green",
+                status: "completed".into(),
+                cpu_pct,
+                mem_kb,
+            });
+        }
+    }
+
+    // Live pipeline from the queue directory. Markers ride on the same base
+    // name, and a job can be seen through several files (running + base,
+    // done + base). Show the most advanced state, ranked cancelled (0) >
+    // done (1) > running (2) > queued (3).
+    let queue_dir = root.join("job-queue");
+    if let Ok(rd) = std::fs::read_dir(&queue_dir) {
+        let mut best: std::collections::BTreeMap<String, (u8, std::path::PathBuf)> =
+            std::collections::BTreeMap::new();
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let (id, rank) = if let Some(id) = name.strip_suffix(".json.cancelled") {
+                (id.to_string(), 0)
+            } else if let Some(id) = name.strip_suffix(".json.done") {
+                (id.to_string(), 1)
+            } else if let Some(id) = name.strip_suffix(".json.running") {
+                (id.to_string(), 2)
+            } else if let Some(id) = name.strip_suffix(".json") {
+                (id.to_string(), 3)
+            } else {
+                continue;
+            };
+            match best.entry(id) {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert((rank, path));
+                }
+                std::collections::btree_map::Entry::Occupied(mut e) => {
+                    if e.get().0 > rank {
+                        e.insert((rank, path));
                     }
                 }
             }
         }
+
+        // 1-based positions for queued jobs: priority desc, then seq asc —
+        // the same ordering the drainer uses.
+        #[derive(serde::Deserialize)]
+        struct QueuedMeta {
+            seq: u64,
+            job_id: String,
+            priority: u8,
+        }
+        let mut queued_meta: Vec<QueuedMeta> = Vec::new();
+        for (rank, path) in best.values() {
+            if *rank != 3 {
+                continue;
+            }
+            if let Some(q) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<QueuedMeta>(&raw).ok())
+            {
+                queued_meta.push(q);
+            }
+        }
+        queued_meta.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.seq.cmp(&b.seq)));
+        let position_of = |queued_id: &str| -> usize {
+            queued_meta
+                .iter()
+                .position(|q| q.job_id == queued_id)
+                .map(|i| i + 1)
+                .unwrap_or(0)
+        };
+
+        for (id, (rank, path)) in &best {
+            match rank {
+                0 => rows.push(JobsRow {
+                    age: age_of(path),
+                    id: short(id),
+                    class: "status-cancelled",
+                    status: "cancelled".into(),
+                    cpu_pct: None,
+                    mem_kb: None,
+                }),
+                1 => {
+                    // A completed queue job is skipped when the signed
+                    // receipt already produced a row (dedupe).
+                    if receipt_ids.contains(id) {
+                        continue;
+                    }
+                    let Ok(raw) = std::fs::read_to_string(path) else {
+                        continue;
+                    };
+                    let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                        continue;
+                    };
+                    if val["status"].as_str() == Some("failed") {
+                        let reason = val["reason"].as_str().unwrap_or("unknown");
+                        rows.push(JobsRow {
+                            age: age_of(path),
+                            id: short(id),
+                            class: "status-failed",
+                            status: format!("failed · {reason}"),
+                            cpu_pct: None,
+                            mem_kb: None,
+                        });
+                    } else {
+                        let (cpu_pct, mem_kb) = read_receipt_metering(path);
+                        rows.push(JobsRow {
+                            age: age_of(path),
+                            id: short(id),
+                            class: "status-green",
+                            status: "completed".into(),
+                            cpu_pct,
+                            mem_kb,
+                        });
+                    }
+                }
+                2 => rows.push(JobsRow {
+                    age: age_of(path),
+                    id: short(id),
+                    class: "status-running",
+                    status: "running".into(),
+                    cpu_pct: None,
+                    mem_kb: None,
+                }),
+                _ => rows.push(JobsRow {
+                    age: age_of(path),
+                    id: short(id),
+                    class: "status-queued",
+                    status: format!("queued · #{} · prio {}", position_of(id), {
+                        // The position/priority come from the base file; if it
+                        // does not parse, show a raw queued row instead.
+                        read_queued_priority(path).unwrap_or(0)
+                    }),
+                    cpu_pct: None,
+                    mem_kb: None,
+                }),
+            }
+        }
     }
-    jobs.sort_by_key(|j| j.0);
+
+    rows.sort_by_key(|r| r.age);
+    rows
+}
+
+/// Priority of a queued job from its base file, when readable.
+fn read_queued_priority(path: &std::path::Path) -> Option<u8> {
+    #[derive(serde::Deserialize)]
+    struct QueuedMeta {
+        priority: u8,
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<QueuedMeta>(&raw).ok())
+        .map(|q| q.priority)
+}
+
+fn refresh_jobs_table(ui: &Ui) {
+    let rows = scan_jobs_from(&settings::state_dir());
 
     // Summary metrics.
-    let total = jobs.len();
-    let avg_cpu = if total > 0 {
-        jobs.iter().map(|j| j.2).sum::<f64>() / total as f64
-    } else {
+    let total = rows.len();
+    let completed_cpu: Vec<f64> = rows.iter().filter_map(|r| r.cpu_pct).collect();
+    let avg_cpu = if completed_cpu.is_empty() {
         0.0
+    } else {
+        completed_cpu.iter().sum::<f64>() / completed_cpu.len() as f64
     };
-    ui.total_val.set_text(&format!("{}", total));
-    ui.avgcpu_val.set_text(&format!("{:.1}%", avg_cpu));
+    ui.total_val.set_text(&format!("{total}"));
+    ui.avgcpu_val.set_text(&format!("{avg_cpu:.1}%"));
     // Earnings — placeholder since v0 receipts don't carry price info.
     ui.earnings_val.set_text("\u{2014}");
 
-    // Last job indicator — show the age of the most recent receipt.
-    if let Some((age, name, _, _, _)) = jobs.last() {
-        let short_id = name
-            .trim_end_matches(".json")
-            .chars()
-            .take(12)
-            .collect::<String>();
-        let stamp = if *age == u64::MAX {
+    // Last job indicator — the most recent receipt/queue row.
+    if let Some(last) = rows.last() {
+        let stamp = if last.age == u64::MAX {
             "unknown".to_string()
-        } else if *age < 60 {
-            format!("{}s ago — {}", age, short_id)
-        } else if *age < 3600 {
-            format!("{}m ago — {}", age / 60, short_id)
+        } else if last.age < 60 {
+            format!("{}s ago — {}", last.age, last.id)
+        } else if last.age < 3600 {
+            format!("{}m ago — {}", last.age / 60, last.id)
         } else {
-            format!("{}h ago — {}", age / 3600, short_id)
+            format!("{}h ago — {}", last.age / 3600, last.id)
         };
         ui.last_job_label.set_text(&stamp);
     } else {
@@ -619,48 +850,59 @@ fn refresh_jobs_table(ui: &Ui) {
         ui.jobs_list.remove(&child);
     }
 
-    // Add rows.
-    for (age, name, cpu, mem_kb, _elapsed) in jobs.into_iter().rev().take(50) {
-        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        row.add_css_class("job-table-row");
+    // Add rows (newest first).
+    for row in rows.into_iter().rev().take(50) {
+        let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        row_box.add_css_class("job-table-row");
 
-        let stamp = if age == u64::MAX {
+        let stamp = if row.age == u64::MAX {
             "unknown".to_string()
-        } else if age < 60 {
-            format!("{}s ago", age)
-        } else if age < 3600 {
-            format!("{}m ago", age / 60)
+        } else if row.age < 60 {
+            format!("{}s ago", row.age)
+        } else if row.age < 3600 {
+            format!("{}m ago", row.age / 60)
         } else {
-            format!("{}h ago", age / 3600)
+            format!("{}h ago", row.age / 3600)
+        };
+        let cpu_text = match row.cpu_pct {
+            Some(p) => format!("{p:.1}%"),
+            None => "\u{2014}".to_string(),
+        };
+        let mem_text = match row.mem_kb {
+            Some(k) => format!("{:.1} GB", k as f64 / 1_048_576.0),
+            None => "\u{2014}".to_string(),
         };
 
-        let mem_gb = mem_kb as f64 / 1_048_576.0;
-        let short_id = name
-            .trim_end_matches(".json")
-            .chars()
-            .take(12)
-            .collect::<String>();
+        // Status dot (colored by state).
+        let dot = gtk4::Label::new(Some("\u{25cf}"));
+        dot.add_css_class("status-dot");
+        dot.add_css_class(row.class);
+        dot.set_margin_start(8);
+        dot.set_margin_end(8);
+        dot.set_hexpand(false);
+        row_box.append(&dot);
 
-        for text in [
-            "\u{25cf}".to_string(), // status dot
-            short_id,
-            format!("{:.1}%", cpu),
-            format!("{:.1} GB", mem_gb),
-            "\u{2014}".to_string(), // earnings placeholder
-            stamp,
-        ] {
+        let cells = [
+            (row.status, true),
+            (row.id, false),
+            (cpu_text, false),
+            (mem_text, false),
+            ("\u{2014}".to_string(), false), // earnings placeholder
+            (stamp, false),
+        ];
+        for (text, colored) in cells {
             let l = gtk4::Label::new(Some(&text));
             l.set_xalign(0.0);
             l.set_hexpand(true);
             l.set_margin_start(8);
             l.set_margin_end(8);
             l.add_css_class("job-table-cell");
-            if text == "\u{25cf}" {
-                l.add_css_class("status-green");
+            if colored {
+                l.add_css_class(row.class);
             }
-            row.append(&l);
+            row_box.append(&l);
         }
-        ui.jobs_list.append(&row);
+        ui.jobs_list.append(&row_box);
     }
 }
 
@@ -1341,6 +1583,7 @@ fn start_node(ui: &Ui, state: &NodeState) {
         } else {
             None
         },
+        max_concurrent_jobs: settings.max_concurrent_jobs,
     };
     let mut daemons = match daemon::start(&opts) {
         Ok(d) => d,
@@ -1563,6 +1806,18 @@ fn build_ui(app: &gtk4::Application) {
         cidr_entry: gtk4::Entry::new(),
         interval_spin: gtk4::SpinButton::new(
             Some(&gtk4::Adjustment::new(60.0, 1.0, 3600.0, 1.0, 10.0, 0.0)),
+            0.0,
+            0,
+        ),
+        max_jobs_spin: gtk4::SpinButton::new(
+            Some(&gtk4::Adjustment::new(
+                settings::DEFAULT_MAX_CONCURRENT_JOBS as f64,
+                1.0,
+                1024.0,
+                1.0,
+                4.0,
+                0.0,
+            )),
             0.0,
             0,
         ),
@@ -1828,6 +2083,14 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&ui.interval_spin, 1, row, 1, 1);
     row += 1;
 
+    let max_jobs_caption = gtk4::Label::new(Some("Max concurrent jobs"));
+    max_jobs_caption.set_xalign(0.0);
+    grid.attach(&max_jobs_caption, 0, row, 1, 1);
+    ui.max_jobs_spin.set_hexpand(true);
+    ui.max_jobs_spin.set_halign(gtk4::Align::Start);
+    grid.attach(&ui.max_jobs_spin, 1, row, 1, 1);
+    row += 1;
+
     let backend_caption = gtk4::Label::new(Some("Job backend"));
     backend_caption.set_xalign(0.0);
     grid.attach(&backend_caption, 0, row, 1, 1);
@@ -1949,7 +2212,9 @@ fn build_ui(app: &gtk4::Application) {
     // Jobs table — header row + scrollable list.
     let header_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     header_row.add_css_class("job-table-header");
-    for w in ["Status", "Job ID", "CPU", "Memory", "Earnings", "Time"] {
+    for w in [
+        "Status", "State", "Job ID", "CPU", "Memory", "Earnings", "Time",
+    ] {
         let l = gtk4::Label::new(Some(w));
         l.set_xalign(0.0);
         l.set_hexpand(true);
@@ -2386,6 +2651,10 @@ fn install_css() {
          .cpu-accent { color: #58a6ff; } \
          .mem-accent { color: #d2a8ff; } \
          .status-green { color: #3fb950; } \
+         .status-running { color: #58a6ff; } \
+         .status-queued { color: #fbbf24; } \
+         .status-failed { color: #f46a6a; } \
+         .status-cancelled { color: #8b949e; } \
          .earnings-gold { color: #fbbf24; } \
          .market-pane-title { color: #e6edf3; font-size: 15px; \
              font-weight: 700; } \
@@ -2412,4 +2681,129 @@ fn main() -> glib::ExitCode {
     let app = gtk4::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scan_jobs_from, JobsRow};
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    fn write(dir: &Path, name: &str, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    fn metering_json(cpu: f64, elapsed: u64, mem: u64) -> String {
+        format!(r#"{{"cpu_seconds":{cpu},"peak_mem_kb":{mem},"elapsed_secs":{elapsed}}}"#)
+    }
+
+    fn signed_receipt(id: &str, cpu: f64, elapsed: u64, mem: u64) -> String {
+        format!(
+            r#"{{"sig":"S","schema_ver":1,"receipt":{{"job_id":"{id}","node_id":"N","device_class":"cpu","metering":{}}}}}"#,
+            metering_json(cpu, elapsed, mem)
+        )
+    }
+
+    fn queued_base(id: &str, seq: u64, priority: u8) -> String {
+        format!(
+            r#"{{"seq":{seq},"job_id":"{id}","priority":{priority},"body":[],"created_unix":1}}"#
+        )
+    }
+
+    #[test]
+    fn jobs_table_merges_receipts_and_queue_pipeline() {
+        let root = std::env::temp_dir().join(format!(
+            "vtessera_gui_jobs_merge_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let receipts = root.join("job-receipts");
+        let queue = root.join("job-queue");
+
+        write(&receipts, "a.json", &signed_receipt("a", 2.0, 2, 1048576));
+        write(
+            &receipts,
+            "dup.json",
+            &signed_receipt("dup", 1.0, 1, 524288),
+        );
+
+        // running: base file + marker
+        write(&queue, "b.json", &queued_base("b", 1, 0));
+        write(&queue, "b.json.running", "");
+        // queued: one prio 2, one prio 0 (positions 1 and 2)
+        write(&queue, "c.json", &queued_base("c", 5, 2));
+        write(&queue, "c2.json", &queued_base("c2", 6, 0));
+        // failed
+        write(
+            &queue,
+            "d.json.done",
+            r#"{"status":"failed","reason":"boom"}"#,
+        );
+        // cancelled
+        write(&queue, "e.json.cancelled", "");
+        // completed dupe (deduped against dup.json receipt)
+        write(
+            &queue,
+            "dup.json.done",
+            &format!(
+                r#"{{"status":"accepted","job_id":"dup","metering":{}}}"#,
+                metering_json(1.0, 1, 524288)
+            ),
+        );
+        // completed with no receipt — metering at the top level
+        write(
+            &queue,
+            "doneonly.json.done",
+            &format!(
+                r#"{{"status":"accepted","job_id":"doneonly","metering":{}}}"#,
+                metering_json(3.0, 6, 2097152)
+            ),
+        );
+
+        let rows = scan_jobs_from(&root);
+        let by_id: HashMap<String, &JobsRow> = rows.iter().map(|r| (r.id.clone(), r)).collect();
+
+        assert_eq!(by_id["a"].status, "completed");
+        assert_eq!(by_id["a"].class, "status-green");
+        assert_eq!(by_id["a"].cpu_pct, Some(100.0));
+        assert_eq!(by_id["a"].mem_kb, Some(1048576));
+
+        assert_eq!(by_id["b"].status, "running");
+        assert_eq!(by_id["b"].class, "status-running");
+        assert_eq!(by_id["b"].cpu_pct, None);
+
+        assert_eq!(by_id["c"].status, "queued · #1 · prio 2");
+        assert_eq!(by_id["c2"].status, "queued · #2 · prio 0");
+
+        assert_eq!(by_id["d"].status, "failed · boom");
+        assert_eq!(by_id["d"].class, "status-failed");
+
+        assert_eq!(by_id["e"].status, "cancelled");
+        assert_eq!(by_id["e"].class, "status-cancelled");
+
+        // dup is deduped: only the signed-receipt row survives.
+        assert_eq!(rows.iter().filter(|r| r.id == "dup").count(), 1);
+        assert_eq!(by_id["dup"].status, "completed");
+
+        assert_eq!(by_id["doneonly"].status, "completed");
+        assert_eq!(by_id["doneonly"].cpu_pct, Some(50.0));
+        assert_eq!(by_id["doneonly"].mem_kb, Some(2097152));
+
+        // a, b, c, c2, d, e, dup, doneonly
+        assert_eq!(rows.len(), 8);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn jobs_table_empty_when_no_state() {
+        let root = std::env::temp_dir().join(format!(
+            "vtessera_gui_jobs_empty_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(scan_jobs_from(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
