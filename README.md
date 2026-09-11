@@ -17,7 +17,9 @@ the protocol is technology, not a token.
 > (`HTTP 402 Payment Required`), demonstrated end-to-end by
 > `crates/x402-client` + `scripts/x402-demo.sh`. **Module 1 shipped:**
 > `--backend cloud-hypervisor` runs each job in a disposable Cloud
-> Hypervisor microVM (CPU-only, no guest network). **Module 2 shipped:**
+> Hypervisor microVM (CPU-only, no guest network); the
+> `kata-cloud-hypervisor` backend adds a containerd + kata-shimv2
+> execution path. **Module 2 shipped:**
 > MCP offer discovery, offer index with FCFS claims, HTTP + x402 job
 > submission, off-chain Solana payment verification. **Module 3 shipped:**
 > per-job signed receipts and settlement service computing completion
@@ -63,11 +65,12 @@ agent contracts node  ──▶  job contract; price OR free
  free path  ─▶  HTTP 200, job runs, no transaction
  paid path  ─▶  HTTP 402 (x402) → agent signs stablecoin payment → retries
  executor   ─▶  --backend cloud-hypervisor boots a disposable microVM
+                 (kata-cloud-hypervisor: containerd + kata-shimv2)
 
 paid path on confirmation:
    buyer EURC/USDC  ─▶  escrow PDA (program-owned, no human withdraw)
    flat fee         ─▶  protocol fee wallet (100,000 lamports SOL)
-   job runs         ─▶  per-job signed receipts (Ed25519, vtesserad)
+   job runs         ─▶  per-job signed receipts (Ed25519, vtessera-node)
    settlement       ─▶  completion fraction f ∈ [0, 1]
    on finalize:
       f × price     ─▶  SELLER (same stablecoin mint — no swap)
@@ -91,10 +94,14 @@ vtessera/
 │   ├── vtesserad/                  # v0 metering daemon (this README's quickstart)
 │   ├── offer/                      # signed-offer types (canonical bytes + Ed25519)
 │   ├── node-api/                   # agent-facing HTTP server: offer, jobs, 402/x402
-│   ├── executor/                   # job execution backends (Module 1: noop-cpu, local-cpu, cloud-hypervisor)
+│   ├── executor/                   # job execution backends (noop-cpu, local-cpu, cloud-hypervisor, kata-cloud-hypervisor)
 │   ├── settlement/                 # receipt verification + settlement (Module 3)
 │   ├── offer-index/                # Module 2a: central offer index (verify + serve)
 │   ├── mini-http/                  # Module 2: shared HTTP/1.1 server primitives
+│   ├── transport/                  # iroh connectivity sidecar (EndpointId, dial-by-key)
+│   ├── vtessera-metrics/           # zero-dep Prometheus text-format registry
+│   ├── agent-cli/                  # vtessera-agent CLI (used throughout this README)
+│   ├── coordinator/                # opt-in iroh queue/rendezvous for outbound-only nodes
 │   ├── vtessera-gui/               # GTK4 desktop app (Flatpak-packaged)
 │   ├── marketplace-server/         # reference marketplace server (Axum)
 │   ├── vtessera-config/            # config wizard for private/enterprise deployments
@@ -103,16 +110,21 @@ vtessera/
 │   └── x402-client/                # excluded: agent that pays the escrow and submits a job
 ├── programs/
 │   └── vtessera-escrow/            # Anchor escrow program — live on Solana devnet
+├── cloudflare-worker/              # Cloudflare Worker: marketplace registration dispatch
+├── marketplace/                    # GitHub Pages node registry (nodes.json + UI)
 ├── tests/
 │   └── adversarial/                # excluded: fuzz + adversarial test suite for escrow
-├── packaging/                      # RPM spec, systemd unit, AppArmor, example config, Flatpak
+├── packaging/                      # RPM + Debian packaging, systemd unit, AppArmor, example config, Flatpak, observability
 ├── scripts/
 │   ├── local-stack.sh              # one-command dev stack: start|stop|status
 │   ├── x402-demo.sh                # one-command agent demo against devnet
 │   ├── build-initramfs.sh          # builds the CH executor's guest initramfs
+│   ├── initramfs.sha256            # deterministic initramfs checksum
 │   ├── offer-index-demo.sh         # end-to-end: two nodes, claims, MCP discover
 │   ├── settlement-demo.sh          # end-to-end: node → signed receipt → settle
-│   ├── agent-smoke-test.sh         # Flatpak agent smoke test (7 checks)
+│   ├── queue-demo.sh               # outbound-only node pulls work from a coordinator queue
+│   ├── regenerate-cri-api.sh       # regenerates the containerd CRI client (executor/src/gen)
+│   ├── agent-smoke-test.sh         # Flatpak agent smoke test (5 checks)
 │   └── kata-setup.sh               # provisions fresh nodes for Kata backend
 ├── docs/
 │   ├── DESIGN.md                   # design index
@@ -123,10 +135,11 @@ vtessera/
 └── .github/workflows/ci.yml
 ```
 
-`devnet-demo` and `x402-client` are excluded from the host workspace: they
-pin the Solana SDK 1.18.x toolchain, whose crypto dep tree conflicts with
-the host crates' newer ed25519-dalek 2. Each builds standalone with its own
-`Cargo.lock` (see the file headers).
+`devnet-demo`, `x402-client`, and `tests/adversarial` are excluded from
+the host workspace: they pin a standalone Solana SDK toolchain
+(`solana-*` 3.x), whose crypto dep tree conflicts with the host crates'
+newer ed25519-dalek 2. Each builds standalone with its own `Cargo.lock`
+(see the file headers).
 
 ## Where Vtessera fits on Solana
 
@@ -145,9 +158,10 @@ escrow program and a discovery layer; nothing else.
 - **Seller earns:** the same EURC/USDC the buyer paid, in the same mint.
 - **Protocol fee:** flat SOL fee of 100,000 lamports (0.0001 SOL) to
   `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`, charged on
-  `pay_for_compute`, `finalize_pro_rata`, and `cancel_before_start`,
-  stored in `Config` at `init_config` (immutable after). See `ROADMAP.md`
-  §0.
+  `pay_for_compute`, `finalize_pro_rata`, and `cancel_before_start`.
+  The fee wallet, fee amount, and settlement authority live in `Config`
+  at `init_config` and can be rotated afterward via `update_config` by
+  the current settlement authority. See `ROADMAP.md` §0.
 
 ## Consent & disclosure
 
@@ -405,6 +419,7 @@ cargo build -p vtessera-offer-index --locked --bin vtessera-offer-index --featur
 
 # node side: advertise, and re-register every interval (default 60s)
 ./target/debug/vtessera-node --bind 127.0.0.1:8402 --offer offer.json --key key.bin \
+    --escrow 6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma --network solana-devnet \
     --state-dir /var/lib/vtessera --publish http://127.0.0.1:8403
 ```
 
@@ -493,9 +508,11 @@ vtessera-agent discover --index http://127.0.0.1:8403
 | `GET` | `/healthz` | Returns `ok` if the node is alive |
 | `GET` | `/offer` | Returns the signed machine-readable offer (JSON) |
 | `GET` | `/.well-known/agent.json` | A2A agent card |
-| `POST` | `/mcp` | MCP 2024-11-05 JSON-RPC (tools: `discover`, `submit_job`) |
+| `POST` | `/mcp` | MCP 2024-11-05 JSON-RPC (tools: `submit_job`, `discover`) |
+| `GET` | `/mcp/manifest` | MCP tool manifest (discovery) |
 | `POST` | `/jobs` | Submit a job (HTTP API) |
-| `GET` | `/jobs/<job_id>` | Get job status |
+| `GET` | `/jobs/<job_id>/status` | Get job status |
+| `GET` | `/metrics` | Prometheus text-format metrics |
 
 ### Submit a free job (curl)
 
@@ -588,14 +605,22 @@ and serves them via an authenticated REST API. Used for internal
 # Build
 cargo build -p marketplace-server
 
-# Run (requires config.toml + key registry)
-cargo run -p marketplace-server -- path/to/server.toml
+# Run (defaults to marketplace-server.toml; needs a key registry)
+cargo run -p marketplace-server -- path/to/marketplace-server.toml
 
 # POST a signed receipt
-curl -X POST http://127.0.0.1:8443/receipts \
+curl -X POST http://127.0.0.1:8443/api/v1/receipts \
   -H 'Content-Type: application/json' \
-  -d '{"job_id":"...","pubkey":"...","signature":"...","received_at":...}'
+  -d '{"receipt":{"schema_ver":3,"node_id":"...","payout_id":"...",
+        "window_start":0,"window_end":60,"samples_digest":"...",
+        "totals":{...}},"pubkey":"<64 hex>","sig":"<128 hex>"}'
+
+# List stored receipts (optional ?node_id=...&since=...)
+curl http://127.0.0.1:8443/api/v1/receipts
 ```
+
+The server also exposes `/api/v1/health`. Receipts whose `pubkey` is not in
+the key registry are rejected.
 
 See `scripts/local-stack.sh` which starts the marketplace server
 alongside the offer-index and node.
@@ -684,6 +709,7 @@ rm -rf ~/.var/app/io.github.douglasdemaio.Vtessera
 ```bash
 flatpak run --command=vtessera-node io.github.douglasdemaio.Vtessera \
   --bind 127.0.0.1:8402 --offer offer.json --key key.bin \
+  --escrow 6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma --network solana-devnet \
   --state-dir ~/.local/share/vtessera --backend cloud-hypervisor
 ```
 
@@ -720,13 +746,10 @@ group; the daemon still starts.
 Signed receipts are written to the state directory (default
 `/var/lib/vtessera/`). Each is a JSON file containing the receipt, the
 operator's Ed25519 public key, and the signature over the canonical
-receipt bytes defined in `BUILD.md` §4.
-
-There is no CLI verify subcommand in v0 — verification is library-only.
-Downstream tools and the future settlement service verify receipts by
-calling `sign::verify` against the canonical-byte layout. The
-verification path lives in the settlement crate as it lands (see
-`ROADMAP.md` §3).
+receipt bytes defined in `BUILD.md` §4. The verification functions live
+in the settlement crate (`verify_signed_receipt`,
+`verify_signed_job_receipt`) and `vtessera-settle --once` verifies every
+receipt it sweeps before writing a settlement record.
 
 ## Config
 
