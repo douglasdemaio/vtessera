@@ -7,9 +7,9 @@
 //!
 //! Like `vtessera-node`, this binary is the composition root: it supplies
 //! the executor backend (ROADMAP.md §1) the MCP server invokes through its
-//! `JobRunner` hook. Free-offer `submit_job` calls run synchronously here
-//! and return the metering; paid offers still refuse until the on-chain
-//! verifier lands (Module 4).
+//! `JobRunner` hook, and the on-chain payment verifier. Free-offer
+//! `submit_job` calls run synchronously here and return the metering;
+//! paid offers are verified on-chain before execution.
 //!
 //! Behind the `serve` feature so the default library build opens no
 //! sockets and spawns no processes.

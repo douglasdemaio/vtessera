@@ -26,9 +26,9 @@
 //! - `GET /.well-known/agent.json` — an A2A agent card so agent-to-agent
 //!   frameworks can discover this node without bespoke client code.
 //! - `POST /jobs` — the work endpoint. For paid offers, returns 402 with
-//!   x402 payment terms. Free submissions (and, once an on-chain verifier
-//!   exists, paid ones with a verified proof) run through a [`JobRunner`]
-//!   the **binary** supplies — this crate stays executor-free by default.
+//!   x402 payment terms. Free submissions and paid ones with a verified
+//!   on-chain proof run through a [`JobRunner`] the **binary** supplies —
+//!   this crate stays executor-free by default.
 //!   With no runner wired, submissions are refused with **501 Not
 //!   Implemented** — never a fake 200/202.
 //!

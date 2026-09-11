@@ -14,8 +14,11 @@
 //! success. With a runner wired in, `submit_job` actually runs the job and
 //! returns its metering; without one it returns the x402 402 challenge as
 //! tool *content* for unpaid paid offers, and an explicit not-implemented
-//! result for everything that would have to run. Paid offers with a
-//! payment proof stay refused until the on-chain verifier lands (Module 4).
+//! result for everything that would have to run. Paid offers return their
+//! x402 challenge as tool content; when a payment proof is supplied the
+//! node verifies it on-chain (via the verifier the binary wires), then
+//! runs the job. Without a verifier the proof is refused with an honest
+//! not-implemented.
 
 #![forbid(unsafe_code)]
 
@@ -145,8 +148,8 @@ impl McpServer {
                 "then call submit_job. Paid offers negotiate via x402: submit without ",
                 "a payment to receive the 402 challenge body, sign it, and resubmit ",
                 "with the proof in the `payment` argument. Free offers run directly. ",
-                "Paid submissions with a payment proof fail with 'not implemented' ",
-                "until on-chain verification is wired."
+                "Paid submissions with a `payment` proof are verified on-chain ",
+                "and run; without a verifier wired they fail honestly."
             ),
         }))
     }
@@ -159,8 +162,8 @@ impl McpServer {
                 "call returns the x402 payment challenge (HTTP 402) as text; ",
                 "pass the signed payment back via the `payment` argument. ",
                 "Free offers run when the node has an executor backend wired; ",
-                "paid submissions with a payment proof fail honestly until ",
-                "on-chain verification lands. When the node is claim-gated, ",
+                "paid submissions with a `payment` proof are verified on-chain ",
+                "and run; without a verifier wired they fail honestly. When the node is claim-gated, ",
                 "pass the `agent_id` this node is claimed by (or claim it). If ",
                 "the node is busy it answers 202 with a `status_url` and the ",
                 "job's queue position — poll that URL until it drains."

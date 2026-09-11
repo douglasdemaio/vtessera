@@ -9,9 +9,10 @@
 //!
 //! This binary is the **composition root**: it supplies the executor backend
 //! (ROADMAP.md §1) that the node-api library — deliberately executor-free —
-//! invokes through its `JobRunner` hook. Free-offer jobs run synchronously
-//! here and the metering comes back in the response. Paid offers still
-//! refuse until the on-chain payment verifier lands (Module 4).
+//! invokes through its `JobRunner` hook, and the on-chain payment verifier
+//! ([`SolanaPaymentVerifier`]). Free-offer jobs run synchronously here and
+//! the metering comes back in the response. Paid-offer jobs verify the x402
+//! proof against the chain before executing.
 //!
 //! Behind the `serve` feature so `cargo build -p vtessera-node-api`
 //! still produces a library that opens no sockets (matching v0's
@@ -75,7 +76,8 @@ use vtessera_node_api::{
 };
 use vtessera_settlement::SigningKey;
 use vtessera_settlement::{
-    derive_node_id, load_node_key, sign_job_receipt, JobReceipt, JOB_RECEIPT_SCHEMA_VER,
+    derive_node_id, load_node_key, sign_job_receipt, JobAttestation, JobReceipt,
+    JOB_RECEIPT_SCHEMA_VER,
 };
 
 #[cfg(feature = "serve")]
@@ -462,6 +464,10 @@ impl ExecutorRunner {
             node_id: self.node_id.clone(),
             payout_id: self.payout_id.clone(),
             metering: metering.clone(),
+            // Honest scaffold (ROADMAP.md §3): no TEE backend yet — the
+            // node's signature is the only environment claim. When SEV-SNP
+            // / TDX attestation lands, the executor populates this.
+            attestation: JobAttestation::None,
         };
         let signed = sign_job_receipt(&receipt, &self.signing_key);
         let json = serde_json::to_string(&signed).map_err(|e| format!("serialize receipt: {e}"))?;

@@ -262,7 +262,7 @@ crates carry their own dependency budgets — v0's tight surface
 Per-job metering receipts are the Module 3 settlement input. They are
 **signed by `vtessera-node`** (not the v0 daemon) using the node's Ed25519
 identity key, and verified by `vtessera-settle` — the schema lives in
-`crates/settlement` (`JOB_RECEIPT_SCHEMA_VER = 2`).
+`crates/settlement` (`JOB_RECEIPT_SCHEMA_VER = 3`).
 
 **Canonical bytes** for signing (all little-endian; the tag tables below
 must not be reordered without bumping the schema — they are pinned by
@@ -270,7 +270,7 @@ must not be reordered without bumping the schema — they are pinned by
 `exit_tag_table_is_stable`):
 
 ```
-schema_ver                u16   (= 2)
+schema_ver                u16   (= 3)
 node_id_len               u16 + node_id bytes
 payout_id_len             u16 + payout_id bytes
 metering.job_id_len       u16 + job_id bytes
@@ -282,6 +282,7 @@ metering.gpu_seconds      f64
 metering.vram_gb_hours    f64
 metering.exit_status      u8 kind + optional i32 code (tag table)
 metering.elapsed_secs     u64
+attestation               u8    (tag table)
 ```
 
 Backend tags: `0` NoopCpu, `1` LocalCpu, `2` KataCloudHypervisor,
@@ -289,6 +290,9 @@ Backend tags: `0` NoopCpu, `1` LocalCpu, `2` KataCloudHypervisor,
 Device tags: `0` Cpu; `1` NvidiaGpu + `u16 len + model`; `2` NvidiaMig +
 `u16 len + parent_model` + `u16 len + profile`; `3` AmdGpu + `u16 len + model`.
 Exit tags: `0` Completed; `1` Failed + `i32 code`; `2` TimedOut; `3` Cancelled.
+Attestation tags: `0` `None` (no TEE — the node's signature is the only
+environment claim; honest scaffold until SEV-SNP/TDX lands, ROADMAP §3).
+Future quote variants append (`1` = sev_snp, `2` = tdx).
 
 On disk the receipt is JSON (`SignedJobReceipt` with hex `pubkey`/`sig`),
 written by the node to `<state-dir>/job-receipts/<job_id>.json`. `node_id`

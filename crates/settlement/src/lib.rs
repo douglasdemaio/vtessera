@@ -11,9 +11,13 @@
 //!    money back, at `f = 1.0` the seller earned it all.
 //!
 //! This crate is intentionally **non-TEE first** per the roadmap.
-//! Adding SEV-SNP / TDX confidential-VM attestation is a follow-up;
-//! the shape of [`verify_signed_receipt`] doesn't change, only the
-//! deployment story around the binary that calls it.
+//! Per-job receipts already carry a typed [`JobAttestation`] field
+//! ([`JobAttestation::None`] today — no confidential-VM backend exists),
+//! so when AMD SEV-SNP / Intel TDX attestation lands, the node populates a
+//! quote variant and settlement can require it, without a schema break.
+//! The shape of [`verify_signed_receipt`] / [`verify_signed_job_receipt`]
+//! doesn't change, only the deployment story around the binary that calls
+//! it.
 //!
 //! The receipt schema this crate verifies is documented in
 //! `BUILD.md` §4 and implemented by `crates/vtesserad/src/receipt.rs`.
@@ -151,13 +155,42 @@ pub fn verify_signed_receipt(sr: &SignedReceipt) -> Result<(), VerifyError> {
         .map_err(|_| VerifyError::SignatureMismatch)
 }
 
-// ---------- Job receipt (schema_ver 2) ------------------------------------
+// ---------- Job receipt (schema_ver 3) ------------------------------------
 
 /// Job-receipt schema version. Distinct from the window-receipt schema
 /// (`RECEIPT_SCHEMA_VER`): a job receipt is written once per executed job
 /// and wraps the executor's [`JobMetering`], whereas window receipts are
 /// the daemon's periodic usage summaries.
-pub const JOB_RECEIPT_SCHEMA_VER: u16 = 2;
+///
+/// v3 adds the [`JobAttestation`] field (honest scaffold: `None` on every
+/// receipt today). Increment when [`job_receipt_canonical_bytes`] changes.
+pub const JOB_RECEIPT_SCHEMA_VER: u16 = 3;
+
+/// TEE attestation of the execution environment for one job.
+///
+/// Honest scaffold (ROADMAP.md §3): no confidential-VM backend exists yet,
+/// so every receipt today carries [`JobAttestation::None`] — the
+/// environment is asserted only by the node's Ed25519 signature and
+/// settlement trusts the node's word for it. When AMD SEV-SNP / Intel TDX
+/// attestation lands, the node populates a quote/measurement variant here
+/// and settlement can require it against a whitelist before crediting
+/// metering, without bumping the schema again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobAttestation {
+    /// No TEE attestation available. The node's signature is the only
+    /// environment claim — this is the honest current state.
+    None,
+}
+
+/// Wire tag for [`JobAttestation`] inside [`job_receipt_canonical_bytes`].
+/// Append-only: `0` = `None`; future variants (`sev_snp`, `tdx`) must
+/// append and be locked by a stable-tag test, never reordered.
+fn attestation_tag(a: &JobAttestation) -> u8 {
+    match a {
+        JobAttestation::None => 0,
+    }
+}
 
 /// A per-job metering receipt. Signed by the node that ran the job with its
 /// Ed25519 identity key; verified by settlement before any of its metering
@@ -171,6 +204,8 @@ pub struct JobReceipt {
     pub payout_id: String,
     /// The metering the executor reported for the job.
     pub metering: JobMetering,
+    /// TEE attestation of the execution environment (see [`JobAttestation`]).
+    pub attestation: JobAttestation,
 }
 
 /// A job receipt paired with its Ed25519 signature and public key.
@@ -310,6 +345,7 @@ fn push_str(buf: &mut Vec<u8>, s: &str) {
 ///   metering.vram_gb_hours    : f64
 ///   metering.exit_status      : u8 kind + optional i32 code (tag table)
 ///   metering.elapsed_secs     : u64
+///   attestation               : u8  (tag table; 0 = none/unsupported)
 ///
 /// Any change to this layout (or a tag table) requires bumping
 /// `JOB_RECEIPT_SCHEMA_VER`.
@@ -328,6 +364,7 @@ pub fn job_receipt_canonical_bytes(r: &JobReceipt) -> Vec<u8> {
     buf.extend_from_slice(&m.vram_gb_hours.to_le_bytes());
     buf.extend_from_slice(&exit_tag(&m.exit_status));
     buf.extend_from_slice(&m.elapsed_secs.to_le_bytes());
+    buf.push(attestation_tag(&r.attestation));
     buf
 }
 
@@ -967,7 +1004,30 @@ mod tests {
             node_id: derive_node_id(&key.verifying_key().to_bytes()),
             payout_id: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".into(),
             metering: job_metering(job_id),
+            attestation: JobAttestation::None,
         }
+    }
+
+    #[test]
+    fn attestation_tag_table_is_stable() {
+        // Lock the wire tag: 0 = None. Future variants append (1 = sev_snp,
+        // 2 = tdx) and extend this test — reordering invalidates every
+        // receipt signed against the old table.
+        assert_eq!(attestation_tag(&JobAttestation::None), 0);
+    }
+
+    #[test]
+    fn job_receipt_canonical_bytes_carry_attestation_tag() {
+        // The honest scaffold: every receipt today serializes the `None`
+        // attestation as a trailing 0 byte, so the signed bytes already
+        // commit to the attestation field being present.
+        let key = det_key(23);
+        let bytes = job_receipt_canonical_bytes(&job_receipt(&key, "job-x"));
+        assert_eq!(*bytes.last().unwrap(), 0, "attestation tag must be signed");
+        assert_eq!(
+            bytes.len(),
+            job_receipt_canonical_bytes(&job_receipt(&key, "job-x")).len()
+        );
     }
 
     #[test]
