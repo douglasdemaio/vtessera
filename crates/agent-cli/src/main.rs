@@ -70,6 +70,34 @@ enum Commands {
     },
     /// Check if a node is up
     Health,
+    /// Aggregated view of every offer the agent can reach (index +
+    /// marketplace, free + paid, claimed + unclaimed)
+    Overview {
+        /// Only free or only paid offers
+        #[arg(long, value_enum)]
+        mode: Option<OverviewMode>,
+        /// Only that device class
+        #[arg(long, value_enum)]
+        device: Option<OverviewDevice>,
+        /// Only entries with no live claim
+        #[arg(long)]
+        available: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum OverviewMode {
+    Free,
+    Paid,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum OverviewDevice {
+    Cpu,
+    NvidiaGpu,
+    NvidiaMig,
+    NvidiaVgpu,
+    AmdGpu,
 }
 
 #[derive(serde::Deserialize)]
@@ -210,6 +238,18 @@ fn main() {
                 health(&node, queue.as_deref(), json)
             }
         }
+        Commands::Overview {
+            mode,
+            device,
+            available,
+        } => overview(
+            &index,
+            cli.marketplace.as_deref(),
+            *mode,
+            *device,
+            *available,
+            json,
+        ),
     };
 
     if let Err(e) = result {
@@ -234,32 +274,53 @@ fn offer_endpoint(body: &serde_json::Value) -> Option<String> {
     body["endpoint"].as_str().map(String::from)
 }
 
-fn discover(index: &str, marketplace: Option<&str>, json: bool) -> Result<(), String> {
-    // Try the local offer-index first.
-    let local_url = format!("{index}/offers?available=1&mode=free");
-    let local_result = agent()
-        .get(&local_url)
+/// Fetch the offer-index `/offers` list with an optional query string
+/// (e.g. `?available=1&mode=free`). Returns `None` when the index is
+/// unreachable or returns non-JSON.
+fn fetch_index_offers(index: &str, query: &str) -> Option<serde_json::Value> {
+    let url = format!("{index}/offers{query}");
+    agent()
+        .get(&url)
         .call()
         .ok()
-        .and_then(|mut resp| resp.body_mut().read_json::<serde_json::Value>().ok());
+        .and_then(|mut resp| resp.body_mut().read_json::<serde_json::Value>().ok())
+}
 
-    // Try the marketplace if provided.
-    let market_result = marketplace.and_then(|url| {
-        agent()
-            .get(url)
-            .call()
-            .ok()
-            .and_then(|mut resp| resp.body_mut().read_json::<serde_json::Value>().ok())
-    });
+/// Fetch a marketplace `nodes.json` document. Returns `None` on failure.
+fn fetch_marketplace(url: &str) -> Option<serde_json::Value> {
+    agent()
+        .get(url)
+        .call()
+        .ok()
+        .and_then(|mut resp| resp.body_mut().read_json::<serde_json::Value>().ok())
+}
 
-    // Merge results: local index takes priority, marketplace fills in.
-    // Identity is the iroh EndpointId when offered, else the HTTP endpoint —
-    // outbound-only nodes (no HTTP endpoint; P1.7e) stay listed by their id.
+/// Identity key for merge dedup: entry-level (heartbeated) `endpoint_id`
+/// first, then the offer body's `endpoint_id`, then the first HTTP endpoint.
+/// Empty when no key is present (the entry is skipped by `merge_offers`).
+fn offer_identity_key(entry: &serde_json::Value, body: &serde_json::Value) -> String {
+    entry["endpoint_id"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| body["endpoint_id"].as_str().map(str::to_owned))
+        .or_else(|| offer_endpoint(body))
+        .unwrap_or_default()
+}
+
+/// Merge local-index and marketplace offers into one deduplicated list.
+/// The local index takes priority; the marketplace fills in identities the
+/// index hasn't seen. Identity is the iroh EndpointId when offered, else the
+/// HTTP endpoint — outbound-only nodes (no HTTP endpoint; P1.7e) stay listed
+/// by their id.
+fn merge_offers(
+    local: Option<&serde_json::Value>,
+    market: Option<&serde_json::Value>,
+) -> Vec<serde_json::Value> {
     let mut offers: Vec<serde_json::Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Process local index results.
-    if let Some(resp) = &local_result {
+    if let Some(resp) = local {
         let arr = if resp.is_array() {
             resp.as_array().cloned().unwrap_or_default()
         } else {
@@ -267,35 +328,38 @@ fn discover(index: &str, marketplace: Option<&str>, json: bool) -> Result<(), St
         };
         for o in arr {
             let body = &o["offer"]["body"];
-            let key = body["endpoint_id"]
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| offer_endpoint(body))
-                .unwrap_or_default();
+            let key = offer_identity_key(&o, body);
             if !key.is_empty() && seen.insert(key) {
                 offers.push(o);
             }
         }
     }
 
-    // Process marketplace results.
-    if let Some(resp) = &market_result {
+    // Process marketplace results. The whole node object is kept (not just
+    // its `offer`) so entry-level `endpoint_id` and `candidates` survive for
+    // the overview row; the offer envelope keeps `discover`'s render intact.
+    if let Some(resp) = market {
         if let Some(nodes) = resp["nodes"].as_array() {
             for node in nodes {
                 if let Some(offer) = node.get("offer") {
                     let body = &offer["body"];
-                    let key = body["endpoint_id"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .or_else(|| offer_endpoint(body))
-                        .unwrap_or_default();
+                    let key = offer_identity_key(node, body);
                     if !key.is_empty() && seen.insert(key) {
-                        offers.push(offer.clone());
+                        offers.push(node.clone());
                     }
                 }
             }
         }
     }
+
+    offers
+}
+
+fn discover(index: &str, marketplace: Option<&str>, json: bool) -> Result<(), String> {
+    // Try the local offer-index first.
+    let local_result = fetch_index_offers(index, "?available=1&mode=free");
+    let market_result = marketplace.and_then(fetch_marketplace);
+    let offers = merge_offers(local_result.as_ref(), market_result.as_ref());
 
     if json {
         let merged = serde_json::json!({
@@ -348,6 +412,240 @@ fn discover(index: &str, marketplace: Option<&str>, json: bool) -> Result<(), St
     println!("\n{} node(s) found", offers.len());
     println!("(resolve by id: vtessera-agent --node-id <endpoint_id> submit --job job.json)");
     Ok(())
+}
+
+fn overview(
+    index: &str,
+    marketplace: Option<&str>,
+    mode: Option<OverviewMode>,
+    device: Option<OverviewDevice>,
+    available: bool,
+    json: bool,
+) -> Result<(), String> {
+    let query = build_overview_query(mode, device, available);
+    let local_result = fetch_index_offers(index, &query);
+    let market_result = marketplace.and_then(fetch_marketplace);
+
+    if local_result.is_none() && market_result.is_none() {
+        return Err(format!(
+            "no offer-index or marketplace reachable (index: {index}/offers{query})"
+        ));
+    }
+
+    let offers = merge_offers(local_result.as_ref(), market_result.as_ref());
+
+    if json {
+        let now_unix = now_unix();
+        let rows: Vec<serde_json::Value> = offers
+            .iter()
+            .map(|o| overview_json_row(o, now_unix))
+            .collect();
+        let doc = serde_json::json!({ "count": rows.len(), "offers": rows });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap());
+        return Ok(());
+    }
+
+    if offers.is_empty() {
+        println!("no nodes in view");
+        if marketplace.is_some() {
+            println!("(checked local index and marketplace)");
+        } else {
+            println!("(tip: use --marketplace <url> to also search the public marketplace)");
+        }
+        return Ok(());
+    }
+
+    let now_unix = now_unix();
+    println!(
+        "{:<20} {:<15} {:<15} {:<40} {:<10} {:<16} {:<5} {:<10}",
+        "NODE_ID", "DEVICE", "PRICE", "REACH", "DIAL", "CLAIM", "CAND", "HEARTBEAT"
+    );
+    println!("{}", "-".repeat(135));
+    for o in &offers {
+        let r = overview_row(o, now_unix);
+        println!(
+            "{:<20} {:<15} {:<15} {:<40} {:<10} {:<16} {:<5} {:<10}",
+            r.node_id, r.device, r.price, r.reach, r.dial, r.claim, r.cand, r.heartbeat
+        );
+    }
+    println!("\n{} node(s) in view", offers.len());
+    println!("(resolve by id: vtessera-agent --node-id <endpoint_id> submit --job job.json)");
+    Ok(())
+}
+
+/// Build the `/offers` query string from the optional overview filters.
+/// Empty string when no filter is set (the index then returns everything).
+fn build_overview_query(
+    mode: Option<OverviewMode>,
+    device: Option<OverviewDevice>,
+    available: bool,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(m) = mode {
+        parts.push(format!(
+            "mode={}",
+            match m {
+                OverviewMode::Free => "free",
+                OverviewMode::Paid => "paid",
+            }
+        ));
+    }
+    if let Some(d) = device {
+        parts.push(format!(
+            "device={}",
+            match d {
+                OverviewDevice::Cpu => "cpu",
+                OverviewDevice::NvidiaGpu => "nvidia_gpu",
+                OverviewDevice::NvidiaMig => "nvidia_mig",
+                OverviewDevice::NvidiaVgpu => "nvidia_vgpu",
+                OverviewDevice::AmdGpu => "amd_gpu",
+            }
+        ));
+    }
+    if available {
+        parts.push("available=1".to_string());
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
+/// The six fields of an offer entry, normalized to index-entry shape. The
+/// caller must adapt the "offer envelope": index entries are `{offer: {...}}`,
+/// marketplace nodes are `{offer: {...}, endpoint_id, candidates}` — both are
+/// read the same way by the helpers below.
+struct OverviewRow {
+    node_id: String,
+    device: String,
+    price: String,
+    reach: String,
+    dial: String,
+    claim: String,
+    cand: usize,
+    heartbeat: String,
+}
+
+fn offer_body_for(o: &serde_json::Value) -> &serde_json::Value {
+    if o.get("offer").is_some() {
+        &o["offer"]["body"]
+    } else {
+        &o["body"]
+    }
+}
+
+fn overview_row(o: &serde_json::Value, now_unix: u64) -> OverviewRow {
+    let body = offer_body_for(o);
+    let node_id = body["node_id"].as_str().unwrap_or("?");
+    let device = body["device"]["kind"].as_str().unwrap_or("?");
+    let endpoint_id = body["endpoint_id"].as_str().unwrap_or("");
+    let reach = offer_endpoint(body).unwrap_or_else(|| {
+        if !endpoint_id.is_empty() {
+            format!("iroh:{endpoint_id}")
+        } else {
+            "?".into()
+        }
+    });
+    let dial = if endpoint_id.is_empty() {
+        "http"
+    } else {
+        "quic"
+    };
+    let claim = o["claimed_by"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("claimed by {s}"))
+        .unwrap_or_else(|| "–".into());
+    let cand = o["candidates"].as_array().map_or(0, |a| a.len());
+    let last_hb = o["last_heartbeat"].as_u64().unwrap_or(0);
+    let heartbeat = if last_hb == 0 {
+        "never"
+    } else if now_unix.saturating_sub(last_hb) <= vtessera_transport::DEFAULT_ENTRY_TTL_SECS {
+        "fresh"
+    } else {
+        "stale"
+    };
+    OverviewRow {
+        node_id: node_id.to_string(),
+        device: device.to_string(),
+        price: price_str(body),
+        reach,
+        dial: dial.to_string(),
+        claim,
+        cand,
+        heartbeat: heartbeat.to_string(),
+    }
+}
+
+/// `free`, or `"<micros>/1_000_000> <currency>/s"` e.g. `0.002792 eurc/s`.
+/// Exact decimal conversion (no float rounding drift for micros/1e6).
+fn price_str(body: &serde_json::Value) -> String {
+    let price = &body["price"];
+    if price.get("mode").and_then(|m| m.as_str()) == Some("paid") {
+        let micros = price["per_device_second_micros"].as_u64().unwrap_or(0);
+        let currency = price["currency"].as_str().unwrap_or("?");
+        format!("{:.6} {}/s", micros as f64 / 1_000_000.0, currency)
+    } else {
+        "free".to_string()
+    }
+}
+
+/// Normalized JSON row per spec §5.4. Missing fields serialize as `null`/`0`/
+/// empty list, never `?`-style text.
+fn overview_json_row(o: &serde_json::Value, now_unix: u64) -> serde_json::Value {
+    let body = offer_body_for(o);
+    let endpoint_id = body["endpoint_id"].as_str().unwrap_or("");
+    let reach = offer_endpoint(body).unwrap_or_else(|| {
+        if !endpoint_id.is_empty() {
+            format!("iroh:{endpoint_id}")
+        } else {
+            String::new()
+        }
+    });
+    let dial = if endpoint_id.is_empty() {
+        "http"
+    } else {
+        "quic"
+    };
+    let last_hb = o["last_heartbeat"].as_u64().unwrap_or(0);
+    let heartbeat = if last_hb == 0 {
+        "never"
+    } else if now_unix.saturating_sub(last_hb) <= vtessera_transport::DEFAULT_ENTRY_TTL_SECS {
+        "fresh"
+    } else {
+        "stale"
+    };
+    let price = if body["price"].get("mode").and_then(|m| m.as_str()) == Some("paid") {
+        serde_json::json!({
+            "mode": "paid",
+            "currency": body["price"]["currency"].as_str().unwrap_or("?"),
+            "per_device_second_micros": body["price"]["per_device_second_micros"].as_u64().unwrap_or(0),
+        })
+    } else {
+        serde_json::json!({"mode": "free"})
+    };
+    serde_json::json!({
+        "node_id": body["node_id"].as_str().unwrap_or(""),
+        "endpoint_id": endpoint_id,
+        "device": body["device"],
+        "price": price,
+        "reach": reach,
+        "dial": dial,
+        "candidates": o["candidates"].clone(),
+        "claimed_by": o["claimed_by"],
+        "claimed_until_unix": o["claimed_until_unix"].as_u64().unwrap_or(0),
+        "last_heartbeat_unix": last_hb,
+        "heartbeat": heartbeat,
+    })
+}
+
+fn now_unix() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Load a coordinator `EndpointAddr` from its JSON pin (a path, or the
@@ -1165,5 +1463,226 @@ mod tests {
 
         assert!(parse_quic_http_response(b"garbage").is_err());
         assert!(parse_quic_http_response(b"HTTP/1.1 XXX\r\n\r\n").is_err());
+    }
+
+    /// Index entry JSON with a free, fresh offer and one candidate.
+    fn fixture_entry(node_id: &str, tip_endpoint: bool) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "node_id": node_id,
+            "device": {"kind": "cpu", "vcpus": 4, "mem_mb": 4096},
+            "endpoint_id": "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000",
+            "endpoint": ["http://192.168.1.10:8402"],
+            "price": {"mode": "free"},
+        });
+        if !tip_endpoint {
+            body["endpoint"] = serde_json::json!([]);
+        }
+        serde_json::json!({
+            "offer": {"body": body},
+            "source": "push",
+            "fetched_at": 1_700_000_000,
+            "claimed_by": null,
+            "claimed_until_unix": 0,
+            "candidates": [
+                {"kind": "host", "transport": "iroh_quic", "addr": "192.168.1.10:8402", "priority": 200}
+            ],
+            "endpoint_id": "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000",
+            "last_heartbeat": 1_700_000_000,
+        })
+    }
+
+    #[test]
+    fn overview_merge_prefers_index_identity() {
+        // Same endpoint_id in index + marketplace -> one merged row, index wins.
+        let id = "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000";
+        let local = serde_json::json!({"count": 1, "offers": [fixture_entry("idx-node", true)]});
+        let market = serde_json::json!({
+            "version": 1,
+            "nodes": [{"node_id": "mkt-node", "offer": {"body": {
+                "node_id": "mkt-node",
+                "device": {"kind": "cpu"},
+                "endpoint_id": id,
+                "endpoint": [],
+                "price": {"mode": "free"},
+            }}}],
+        });
+        let merged = merge_offers(Some(&local), Some(&market));
+        assert_eq!(merged.len(), 1);
+        let row = overview_row(&merged[0], 1_700_000_100);
+        assert_eq!(row.node_id, "idx-node");
+        assert_eq!(row.reach, "http://192.168.1.10:8402");
+    }
+
+    #[test]
+    fn overview_identity_falls_back_endpoint_id_to_endpoint() {
+        // Entry-level id -> offer-body id -> HTTP endpoint.
+        let local = serde_json::json!({"count": 2, "offers": [
+            fixture_entry("with-id", true),
+            // No endpoint_id anywhere: identity comes from the HTTP endpoint,
+            // DIAL stays http, reach uses the endpoint.
+            serde_json::json!({
+                "offer": {"body": {
+                    "node_id": "ep-only",
+                    "device": {"kind": "cpu"},
+                    "endpoint": ["http://10.0.0.5:8402"],
+                    "price": {"mode": "free"},
+                }},
+                "endpoint_id": null,
+                "candidates": [],
+                "last_heartbeat": 0,
+            }),
+        ]});
+        let merged = merge_offers(Some(&local), None);
+        assert_eq!(merged.len(), 2);
+        let rows: Vec<OverviewRow> = merged
+            .iter()
+            .map(|o| overview_row(o, 1_700_000_100))
+            .collect();
+        assert_eq!(rows[0].node_id, "with-id");
+        assert_eq!(rows[0].dial, "quic");
+        let ep = &rows[1];
+        assert_eq!(ep.node_id, "ep-only");
+        assert_eq!(ep.dial, "http");
+        assert_eq!(ep.reach, "http://10.0.0.5:8402");
+        assert_eq!(ep.heartbeat, "never");
+    }
+
+    #[test]
+    fn overview_price_renders_free_and_paid() {
+        let free = fixture_entry("free-node", true);
+        assert_eq!(price_str(&free["offer"]["body"]), "free");
+
+        let mut paid = fixture_entry("paid-node", true);
+        paid["offer"]["body"]["price"] = serde_json::json!({
+            "mode": "paid", "currency": "eurc", "per_device_second_micros": 2792,
+        });
+        // Exact decimal: 2792 / 1_000_000 = 0.002792, no float drift.
+        assert_eq!(price_str(&paid["offer"]["body"]), "0.002792 eurc/s");
+        let row = overview_row(&paid, 1_700_000_100);
+        assert_eq!(row.price, "0.002792 eurc/s");
+    }
+
+    #[test]
+    fn overview_claim_rendering() {
+        let mut claimed = fixture_entry("claimed-node", true);
+        claimed["claimed_by"] = serde_json::json!("agent-42");
+        claimed["claimed_until_unix"] = serde_json::json!(1_700_000_200);
+        let row = overview_row(&claimed, 1_700_000_100);
+        assert_eq!(row.claim, "claimed by agent-42");
+
+        let unclaimed = fixture_entry("free-node", true);
+        let row = overview_row(&unclaimed, 1_700_000_100);
+        assert_eq!(row.claim, "–");
+    }
+
+    #[test]
+    fn overview_heartbeat_classification() {
+        // 0 -> never.
+        let mut e = fixture_entry("n", true);
+        e["last_heartbeat"] = serde_json::json!(0);
+        assert_eq!(overview_row(&e, 1_700_000_100).heartbeat, "never");
+
+        // now - hb <= DEFAULT_ENTRY_TTL_SECS (120) -> fresh; boundary exact.
+        let mut e = fixture_entry("f", true);
+        e["last_heartbeat"] = serde_json::json!(1_700_000_100 - 120);
+        assert_eq!(overview_row(&e, 1_700_000_100).heartbeat, "fresh");
+        let mut e = fixture_entry("f2", true);
+        e["last_heartbeat"] = serde_json::json!(1_700_000_100 - 121);
+        assert_eq!(overview_row(&e, 1_700_000_100).heartbeat, "stale");
+    }
+
+    #[test]
+    fn overview_json_shape_normalized() {
+        let mut paid = fixture_entry("paid-node", true);
+        paid["offer"]["body"]["price"] = serde_json::json!({
+            "mode": "paid", "currency": "usdc", "per_device_second_micros": 1_000_000,
+        });
+        let json_row = overview_json_row(&paid, 1_700_000_100);
+        assert_eq!(json_row["node_id"], "paid-node");
+        assert_eq!(json_row["dial"], "quic");
+        assert_eq!(json_row["price"]["mode"], "paid");
+        assert_eq!(json_row["price"]["currency"], "usdc");
+        assert_eq!(json_row["price"]["per_device_second_micros"], 1_000_000);
+        assert_eq!(json_row["candidates"].as_array().unwrap().len(), 1);
+        assert!(json_row["claimed_by"].is_null());
+        assert_eq!(json_row["claimed_until_unix"], 0);
+        assert_eq!(json_row["last_heartbeat_unix"], 1_700_000_000);
+        assert_eq!(json_row["heartbeat"], "fresh");
+
+        // Free rounds to {"mode":"free"}.
+        let free_json = overview_json_row(&fixture_entry("free", true), 1_700_000_100);
+        assert_eq!(free_json["price"], serde_json::json!({"mode": "free"}));
+
+        // count matches offers.len() end to end (distinct endpoint_ids so
+        // the merge does not dedup the three into one).
+        paid["endpoint_id"] = serde_json::json!(
+            "paid0paid0paid0paid0paid0paid0paid0paid0paid0paid0paid0paid0paid0paid0paid0paid0"
+        );
+        paid["offer"]["body"]["endpoint_id"] = paid["endpoint_id"].clone();
+        let mut free_even = fixture_entry("free-even", true);
+        free_even["endpoint_id"] = serde_json::json!(
+            "even0even0even0even0even0even0even0even0even0even0even0even0even0even0even0even0"
+        );
+        free_even["offer"]["body"]["endpoint_id"] = free_even["endpoint_id"].clone();
+        let sparse = serde_json::json!({
+            "offer": {"body": {"node_id": "x", "device": {"kind": "cpu"}, "price": {"mode": "free"}}},
+            "candidates": [],
+            "endpoint_id": "xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0xxxx0",
+            "last_heartbeat": 0,
+        });
+        let local = serde_json::json!({
+            "count": 3,
+            "offers": [paid, free_even, sparse],
+        });
+        let merged = merge_offers(Some(&local), None);
+        assert_eq!(merged.len(), 3);
+        let now = 1_700_000_100;
+        let rows: Vec<serde_json::Value> =
+            merged.iter().map(|o| overview_json_row(o, now)).collect();
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn overview_filter_query_built_correctly() {
+        assert_eq!(build_overview_query(None, None, false), "");
+        assert_eq!(
+            build_overview_query(Some(OverviewMode::Free), None, false),
+            "?mode=free"
+        );
+        assert_eq!(
+            build_overview_query(None, Some(OverviewDevice::NvidiaGpu), true),
+            "?device=nvidia_gpu&available=1"
+        );
+        assert_eq!(
+            build_overview_query(Some(OverviewMode::Paid), Some(OverviewDevice::Cpu), true),
+            "?mode=paid&device=cpu&available=1"
+        );
+    }
+
+    #[test]
+    fn discover_columns_unchanged() {
+        // discover's render helper fields stay as before.
+        let offer = fixture_entry("node-free", true);
+        assert_eq!(offer["offer"]["body"]["node_id"], "node-free");
+        let body = offer["offer"]["body"].clone();
+        let node_id = body["node_id"].as_str().unwrap();
+        let device = body["device"]["kind"].as_str().unwrap();
+        let endpoint_id = body["endpoint_id"].as_str().unwrap();
+        let reach = offer_endpoint(&body).unwrap_or_else(|| {
+            if !endpoint_id.is_empty() {
+                format!("iroh:{endpoint_id}")
+            } else {
+                "?".into()
+            }
+        });
+        let dial = if endpoint_id.is_empty() {
+            "http"
+        } else {
+            "quic"
+        };
+        assert_eq!(node_id, "node-free");
+        assert_eq!(device, "cpu");
+        assert_eq!(reach, "http://192.168.1.10:8402");
+        assert_eq!(dial, "quic");
     }
 }
