@@ -39,7 +39,7 @@ gpu = ["cloud-hypervisor"]
 # Kata Containers on Cloud Hypervisor (ROADMAP.md §1a). Production isolation
 # via containerd + kata-shimv2. Pulls gRPC deps for containerd communication.
 # Depends on cloud-hypervisor for shared GPU selection and network policy functions.
-kata = ["cloud-hypervisor", "dep:tonic", "dep:prost"]
+kata = ["cloud-hypervisor", "dep:tonic", "dep:prost", "dep:tokio", "dep:tower", "dep:hyper-util"]
 
 [dependencies]
 # Pinned via the workspace. The executor crate's threat model is documented in
@@ -50,3 +50,11 @@ hex = { workspace = true }
 serde_json = { workspace = true, optional = true }
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
+# Async shim the sync Kata Executor bridges through (containerd is gRPC/async
+# underneath). `kata`-gated: the default build never links tokio.
+tokio = { workspace = true, features = ["rt", "macros", "net", "time", "io-util"], optional = true }
+# UDS connector (tower::service_fn) for tonic → containerd.sock.
+tower = { version = "0.4", features = ["util"], optional = true }
+# TokioIo adapter: tonic's connector wants hyper::rt streams, the socket is a
+# tokio stream. hyper's readapt from one io trait to the other.
+hyper-util = { version = "0.1", optional = true }

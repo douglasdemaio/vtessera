@@ -7,7 +7,7 @@ use std::process::Command;
 use ed25519_dalek::SigningKey;
 use vtessera_executor::{Backend, DeviceClass, ExitStatus, JobMetering};
 use vtessera_settlement::{
-    derive_node_id, sign_job_receipt, JobContract, JobReceipt, SettlementRecord,
+    derive_node_id, sign_job_receipt, JobAttestation, JobContract, JobReceipt, SettlementRecord,
     JOB_RECEIPT_SCHEMA_VER,
 };
 
@@ -89,6 +89,7 @@ fn write_signed_receipt(dir: &TestDir, job_id: &str, key: &SigningKey, cpu_secon
         node_id: derive_node_id(&key.verifying_key().to_bytes()),
         payout_id: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".into(),
         metering: metering(job_id, cpu_seconds),
+        attestation: JobAttestation::None,
     };
     let signed = sign_job_receipt(&receipt, key);
     let json = serde_json::to_vec_pretty(&signed).unwrap();

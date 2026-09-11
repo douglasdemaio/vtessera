@@ -131,7 +131,7 @@ impl Executor for KataExecutor {
             &CloudHypervisorConfig::default(),
         )?;
 
-        let client = ContainerdClient::new(&self.config.containerd_socket);
+        let mut client = ContainerdClient::new(&self.config.containerd_socket);
         client.pull_image(&spec.image, &self.config.image_pull_policy)?;
 
         let workload_id = format!("{}-workload", spec.job_id);

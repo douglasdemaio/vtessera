@@ -272,12 +272,14 @@ to a relay on startup, and exposes its HTTP API over iroh QUIC streams.
 The offer-index stores `EndpointId` (replacing the candidate list). Agents
 discover nodes via the index, then dial by `EndpointId` through iroh.
 
-**What gets removed:**
-- `stun_probe()`, `discover_reflexive_addr()` in `crates/transport/`
-- `vtessera-relay` binary (replaced by iroh relay infrastructure)
-- `CandidateKind::ServerReflexive`, `CandidateKind::Relayed`
-- `gather_candidates()` — iroh manages live addresses
-- mDNS `_vtessera._tcp` registration (dead code, nothing browses it)
+**What gets removed (done):**
+- `stun_probe()`, `discover_reflexive_addr()` in `crates/transport/` — **done**
+- `vtessera-relay` binary (replaced by iroh relay infrastructure) — **done**
+- `CandidateKind::ServerReflexive` — **done**; `CandidateKind::Relayed`
+  is **kept** (not dead code): the iroh sidecar still emits it for relay
+  paths, and the offer-index heartbeat schema carries it
+- `gather_candidates()` — iroh manages live addresses — **done**
+- mDNS `_vtessera._tcp` registration (dead code, nothing browses it) — **done**
 
 **What stays:** offer-index (signed offers, claims, heartbeats),
 Ed25519 identity, x402 payment flow, mini-http server.
@@ -351,7 +353,7 @@ completed**.
 into SEV-SNP/TDX before handling real value at scale.
 
 **Shipped (non-TEE first):** per-job metering receipts. `vtessera-node`
-signs a `JobReceipt` (`schema_ver 2`, wrapping the executor's
+signs a `JobReceipt` (`schema_ver 3`, wrapping the executor's
 `JobMetering`) after every job run — Completed, Failed, and TimedOut
 alike — and writes it to `<state-dir>/job-receipts/<job_id>.json`. The
 `vtessera-settle` service watches a shared state dir (contracts/
@@ -364,7 +366,10 @@ writes `settlements/<job_id>.json` with the completion fraction `f`.
 (`--key` / `--state-dir` on the node), the sweep logic, and the
 `vtessera-settle` binary. *The escrow split itself (§4b) is still the
 escrow program's job; settlement produces the `f` it needs.* The TEE
-verification layer remains follow-up.
+verification layer remains follow-up — the receipt schema already carries
+the hook (`JobAttestation`, schema_ver 3): every receipt today asserts
+`None`, so SEV-SNP/TDX quote variants splice in without another schema
+bump.
 
 ---
 
@@ -532,8 +537,11 @@ mint, no governance, no registry.
 
 ## 5. Hardening, ops, spool rotation
 
-- **Spool rotation:** v0 has no deletion logic — receipts grow forever.
-  Add archiving/rotation before long-running deployments.
+- **Spool rotation:** **done** — `vtesserad` prunes `receipt_*.json`
+  files to `max_spool_files` after every write (`spool::rotate`,
+  `crates/vtesserad/src/spool.rs`, wired at `src/main.rs`). Deletes only
+  receipt files it recognizes; set `max_spool_files` in
+  `vtessera.toml` for long-running deployments.
 - Re-run `systemd-analyze security` on every new privileged component
   (executor, dispatch API).
 - Abuse handling: rate limits, job-admission policy, a coordinator kill

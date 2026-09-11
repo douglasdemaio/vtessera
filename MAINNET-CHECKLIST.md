@@ -277,12 +277,36 @@ fast enough to fix it, or (b) accept the loss.
       - Tag the audit-ready commit hash. **Done (2026-08-16):** tag
         `escrow-audit-v1` at `06cbe70`, carrying the reproducible
         baseline SHA (`f0168411…cddf`, §5.2).
-- [ ] **4.3** Post to channels:
+- [ ] **4.3** Post to channels (copy-paste draft below):
       - Solana Discord `#auditing`
       - r/solana
       - Anchor Discord
       - Twitter / Bluesky if relevant
       Link the repo, the commit, SECURITY.md.
+
+      **Draft post (trim for Bluesky):**
+      > Audit request: **Vtessera escrow** — a small Solana Anchor program
+      > that escrows stablecoin (EURC/USDC) for a compute marketplace.
+      > `pay_for_compute` deposits buyer funds in a program-owned PDA;
+      > `finalize_pro_rata(f)` pays the seller `f × price` and refunds
+      > the buyer `(1 − f) × price`, both in the same mint. **No swap, no
+      > price oracle, no burn, no governance token.** `Config`
+      > (settlement authority, fee) is written once and immutable; the
+      > upgrade authority will be dropped `--final` at mainnet deploy, so
+      > findings found *now* can still be patched.
+      > - Repo: https://github.com/douglasdemaio/vtessera
+      > - Audit commit: tag `escrow-audit-v1` (`06cbe70`)
+      > - Threat model + deploy procedure:
+      >   `programs/vtessera-escrow/SECURITY.md`
+      > - Adversarial suite (LiteSVM) pinning each error code:
+      >   `tests/adversarial/`
+      > - Reproducible `.so` SHA-256:
+      >   `f016841145af38ecbbc7b489fa28aaa4b4bcc7412262829e5d6240662581cddf`
+      > - Devnet program ID: `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`
+      >   (stays upgradeable until the audit closes)
+      >
+      > Findings → GitHub issue, or `douglasdemaio@gmail.com` (48h ack per
+      > SECURITY.md).
 - [ ] **4.4** Triage findings. Each lands in one of:
       - **Fix** — patch, re-deploy to devnet for verification, request
         re-review
