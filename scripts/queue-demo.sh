@@ -85,7 +85,7 @@ echo "== agent enqueues a free job via the queue =="
 printf '{"job_id":"%s","image":"busybox","command":["echo","hello from queue"],"env":[],"devices":{"class":{"kind":"cpu"},"vcpus":1,"mem_kb":65536,"min_vram_mb":0},"network":"none","max_duration_secs":60}' "$JOB_ID" > "$WORK/job.json"
 QUEUED="$(vtessera-agent --queue "$COORD_ADDR" submit --job "$WORK/job.json" --json 2>&1)" || fail "agent enqueue failed: $QUEUED"
 echo "$QUEUED"
-echo "$QUEUED" | grep -q '"status": "queued"' || fail "expected queued status: $QUEUED"
+echo "$QUEUED" | grep -qE '"status"\s*:\s*"queued"' || fail "expected queued status: $QUEUED"
 
 echo "== node pulls, runs, persists signed receipt =="
 RECEIPT="$STATE/job-receipts/$JOB_ID.json"
