@@ -659,23 +659,6 @@ fn load_coordinator_addr(queue: &str) -> Result<iroh::EndpointAddr, String> {
     serde_json::from_str(&raw).map_err(|e| format!("parse coordinator EndpointAddr: {e}"))
 }
 
-/// Build a queue client for the pinned coordinator (fresh outbound iroh
-/// endpoint, no listener — mirrors the node's outbound pull path).
-fn queue_client(queue: &str) -> Result<vtessera_coordinator::iroh::QueueClient, String> {
-    let addr = load_coordinator_addr(queue)?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("tokio runtime: {e}"))?;
-    rt.block_on(async move {
-        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
-            .bind()
-            .await
-            .map_err(|e| format!("bind iroh endpoint: {e}"))?;
-        Ok(vtessera_coordinator::iroh::QueueClient::new(endpoint, addr))
-    })
-}
-
 fn offer(node: &str, queue: Option<&str>, json: bool) -> Result<(), String> {
     if let Some(q) = queue {
         return queue_render("offer", q, json);
@@ -734,14 +717,25 @@ fn submit(
         if payment.is_some() {
             return Err("x402 payment is not supported over queue rendezvous".into());
         }
-        let client = queue_client(q)?;
-        let coordinator = client.coordinator_id_hex();
+        let addr = load_coordinator_addr(q)?;
+        let coordinator = hex::encode(addr.id.as_bytes());
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("tokio runtime: {e}"))?;
+        // Bind the endpoint and enqueue on the same runtime: iroh drives its
+        // background actors from the current runtime, so letting it outlive
+        // the runtime (or jumping runtimes) kills the connection state and
+        // dials fail with RemoteStateActorStoppedError.
         let scoped_id = rt
-            .block_on(client.enqueue(job))
+            .block_on(async move {
+                let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+                    .bind()
+                    .await
+                    .map_err(|e| format!("bind iroh endpoint: {e}"))?;
+                let client = vtessera_coordinator::iroh::QueueClient::new(endpoint, addr);
+                client.enqueue(job).await
+            })
             .map_err(|e| format!("enqueue failed: {e}"))?;
         if json {
             println!(
