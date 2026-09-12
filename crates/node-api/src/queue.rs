@@ -20,6 +20,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -83,11 +84,19 @@ struct QueueInner {
 }
 
 /// A durable, bounded, priority-aware wait queue + drainer.
+///
+/// The admission gates are atomics so a running node's capacity can be
+/// re-tuned live ([`JobQueue::reconfigure`], issue #109) without dropping
+/// the queue. Reads are `Relaxed`: admission decisions are still
+/// coordinated under [`JobQueue::inner`]'s mutex, and a briefly stale cap
+/// self-corrects on the next enqueue/drain tick.
 pub struct JobQueue {
     dir: PathBuf,
     runner: Arc<dyn JobRunner>,
-    max_concurrent: u32,
-    max_queue_len: usize,
+    /// Open execution slots (live-changeable).
+    max_concurrent: AtomicU32,
+    /// Jobs allowed to wait (live-changeable; 0 disables the wait queue).
+    max_queue_len: AtomicUsize,
     inner: Mutex<QueueInner>,
 }
 
@@ -143,14 +152,45 @@ impl JobQueue {
         Arc::new(JobQueue {
             dir,
             runner,
-            max_concurrent: max_concurrent.max(1),
-            max_queue_len,
+            max_concurrent: AtomicU32::new(max_concurrent.max(1)),
+            max_queue_len: AtomicUsize::new(max_queue_len),
             inner: Mutex::new(QueueInner {
                 queued,
                 running: 0,
                 next_seq,
             }),
         })
+    }
+
+    /// Current concurrency cap. May differ from the `new` value after a
+    /// live [`JobQueue::reconfigure`].
+    pub fn max_concurrent(&self) -> u32 {
+        self.max_concurrent.load(Ordering::Relaxed)
+    }
+
+    /// Current wait-queue depth cap. May differ from the `new` value after
+    /// a live [`JobQueue::reconfigure`].
+    pub fn max_queue_len(&self) -> usize {
+        self.max_queue_len.load(Ordering::Relaxed)
+    }
+
+    /// Live-reconfigure the admission gates without restarting the node.
+    ///
+    /// `max_concurrent` is clamped to at least 1 (a node must always admit
+    /// work) and best-effort to at least the number of jobs currently
+    /// running, so a shrink never strands an in-flight job — reducing the
+    /// cap only stops *new* admissions; running jobs finish untouched.
+    /// `max_queue_len` is clamped to at least 1 (0 would silently drop
+    /// every busy submission).
+    ///
+    /// Both take effect on the next enqueue/drain tick; the watcher in
+    /// `capacity.rs` calls this when `capacity.toml` changes.
+    pub fn reconfigure(&self, max_concurrent: u32, max_queue_len: usize) {
+        let running = self.inner.lock().unwrap().running;
+        let new_concurrent = max_concurrent.max(1).max(running);
+        self.max_concurrent.store(new_concurrent, Ordering::Relaxed);
+        self.max_queue_len
+            .store(max_queue_len.max(1), Ordering::Relaxed);
     }
 
     /// Admit a job body. Runs it synchronously when a slot is free (returns
@@ -173,7 +213,7 @@ impl JobQueue {
         // drainer can't both exceed `max_concurrent` at once.
         let slot = {
             let mut inner = self.inner.lock().unwrap();
-            if inner.running < self.max_concurrent {
+            if inner.running < self.max_concurrent.load(Ordering::Relaxed) {
                 inner.running += 1;
                 true
             } else {
@@ -198,7 +238,7 @@ impl JobQueue {
 
         let position = {
             let mut inner = self.inner.lock().unwrap();
-            if inner.queued.len() >= self.max_queue_len {
+            if inner.queued.len() >= self.max_queue_len.load(Ordering::Relaxed) {
                 return Err(JobRunError::unavailable("queue full — retry later"));
             }
             let seq = inner.next_seq;
@@ -295,7 +335,9 @@ impl JobQueue {
         std::thread::spawn(move || loop {
             let next = {
                 let mut inner = q.inner.lock().unwrap();
-                if inner.queued.is_empty() || inner.running >= q.max_concurrent {
+                if inner.queued.is_empty()
+                    || inner.running >= q.max_concurrent.load(Ordering::Relaxed)
+                {
                     None
                 } else {
                     inner.running += 1;
@@ -320,7 +362,9 @@ impl JobQueue {
         for _ in 0..n.max(1) {
             let next = {
                 let mut inner = self.inner.lock().unwrap();
-                if inner.queued.is_empty() || inner.running >= self.max_concurrent {
+                if inner.queued.is_empty()
+                    || inner.running >= self.max_concurrent.load(Ordering::Relaxed)
+                {
                     None
                 } else {
                     inner.running += 1;
@@ -601,6 +645,78 @@ mod tests {
                     .is_some_and(|s| s["status"] == "completed")
             });
         }
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn reconfigure_raises_concurrency_for_the_drainer() {
+        // max_concurrent 1, one slot held by a gate runner.
+        let release = Arc::new(Mutex::new(false));
+        let dir = temp_dir("reconfig");
+        let q = JobQueue::new(&dir, gate_runner(release.clone()), 1, 16);
+        let holder = hold_slot(&q, "first");
+        wait_until(2000, || dir.join("first.json.running").exists());
+
+        // Second job must queue while only one slot exists.
+        match q.enqueue("second", 0, br#"{"job_id":"second"}"#).unwrap() {
+            EnqueueOutcome::Queued { position: 1 } => {}
+            other => panic!("expected queued at 1, got {other:?}"),
+        }
+
+        // Widen to 2 slots while the first still runs: the drainer may now
+        // start the wait job before the gate opens.
+        q.reconfigure(2, 16);
+        assert_eq!(q.max_concurrent(), 2);
+        q.spawn();
+        wait_until(2000, || dir.join("second.json.running").exists());
+        assert_eq!(q.status("first").unwrap().unwrap()["status"], "running");
+        assert_eq!(q.status("second").unwrap().unwrap()["status"], "running");
+
+        *release.lock().unwrap() = true;
+        wait_until(2000, || dir.join("second.json.done").exists());
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn reconfigure_never_drops_below_running_count() {
+        // Two slots, both busy. A shrink to "1 slot" must clamp to the 2 in
+        // flight — a running job is never told to stop.
+        let release = Arc::new(Mutex::new(false));
+        let dir = temp_dir("reconfig-clamp");
+        let q = JobQueue::new(&dir, gate_runner(release.clone()), 2, 16);
+        let a = hold_slot(&q, "a");
+        let b = hold_slot(&q, "b");
+        wait_until(2000, || dir.join("a.json.running").exists());
+        wait_until(2000, || dir.join("b.json.running").exists());
+
+        q.reconfigure(1, 16);
+        assert_eq!(q.max_concurrent(), 2, "must clamp to the running jobs");
+        assert_eq!(q.max_queue_len(), 16, "unrelated cap is untouched");
+
+        *release.lock().unwrap() = true;
+        wait_until(2000, || dir.join("a.json.done").exists());
+        wait_until(2000, || dir.join("b.json.done").exists());
+        a.join().unwrap();
+        b.join().unwrap();
+    }
+
+    #[test]
+    fn reconfigure_tightens_the_wait_queue_cap() {
+        let release = Arc::new(Mutex::new(false));
+        let dir = temp_dir("reconfig-full");
+        let q = JobQueue::new(&dir, gate_runner(release.clone()), 1, 16);
+        let holder = hold_slot(&q, "held");
+        wait_until(2000, || dir.join("held.json.running").exists());
+
+        q.reconfigure(1, 2);
+        assert_eq!(q.max_queue_len(), 2);
+        q.enqueue("a", 0, br#"{"job_id":"a"}"#).unwrap();
+        q.enqueue("b", 0, br#"{"job_id":"b"}"#).unwrap();
+        let err = q.enqueue("c", 0, br#"{"job_id":"c"}"#).unwrap_err();
+        assert_eq!(err.status, 503);
+        assert!(err.message.contains("queue full"));
+
+        *release.lock().unwrap() = true;
         holder.join().unwrap();
     }
 
