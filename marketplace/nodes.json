@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789239441,
+  "updated_at": 1789243042,
   "nodes": [
     {
       "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
@@ -27,7 +27,7 @@
         "sig_hex": "5512a5bcf4033b8fd3f02301dd545bece02e486f6a2210c9eafdfa7598f769c81e1830edea21dcce681c288a134827251ee8e3f4c549ec05c1df20364d4bd800"
       },
       "sig_hex": "5512a5bcf4033b8fd3f02301dd545bece02e486f6a2210c9eafdfa7598f769c81e1830edea21dcce681c288a134827251ee8e3f4c549ec05c1df20364d4bd800",
-      "updated_at": 1789239441,
+      "updated_at": 1789243042,
       "endpoint": [
         "http://192.168.178.22:8402"
       ],
@@ -47,18 +47,6 @@
         },
         {
           "addr": "194.15.80.73:52440",
-          "kind": "host",
-          "priority": 200,
-          "transport": "iroh_quic"
-        },
-        {
-          "addr": "[2a00:a520:216a:4400:8328:1de5:e0c:84d6]:57541",
-          "kind": "host",
-          "priority": 200,
-          "transport": "iroh_quic"
-        },
-        {
-          "addr": "[2a00:a520:216a:4400:d9f3:a6a:6c03:7e9a]:57541",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
