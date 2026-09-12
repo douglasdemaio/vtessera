@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789198268,
+  "updated_at": 1789201702,
   "nodes": [
     {
       "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
@@ -15,8 +15,8 @@
             "http://192.168.178.22:8402"
           ],
           "endpoint_id": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-          "expires_unix": 1791790251,
-          "issued_unix": 1789198251,
+          "expires_unix": 1791793686,
+          "issued_unix": 1789201686,
           "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
           "price": {
             "currency": "usdc",
@@ -27,14 +27,34 @@
           "schema_ver": 2
         },
         "pubkey_hex": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-        "sig_hex": "552871f550894c506ffd9a6a8b4ef3bb6727d4b71735e8b33e952913c5920e2943a06a047d3d37d868358b24a8d2406dfb8557858b00c42e459d6e2ba47a8f08"
+        "sig_hex": "cdb5fe3db477cac19dc1f7673a2eaf0decb77f8477bb729b683633889f8054253d6f271f0ab7bc20fd1fdb5252637e140c2a416faea763516779aaf861ccf201"
       },
-      "sig_hex": "552871f550894c506ffd9a6a8b4ef3bb6727d4b71735e8b33e952913c5920e2943a06a047d3d37d868358b24a8d2406dfb8557858b00c42e459d6e2ba47a8f08",
-      "updated_at": 1789198268,
+      "sig_hex": "cdb5fe3db477cac19dc1f7673a2eaf0decb77f8477bb729b683633889f8054253d6f271f0ab7bc20fd1fdb5252637e140c2a416faea763516779aaf861ccf201",
+      "updated_at": 1789201702,
       "endpoint": [
         "http://192.168.178.22:8402"
       ],
-      "endpoint_id": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43"
+      "endpoint_id": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
+      "candidates": [
+        {
+          "addr": "https://euc1-1.relay.n0.iroh.link./",
+          "kind": "relayed",
+          "priority": 50,
+          "transport": "iroh_quic"
+        },
+        {
+          "addr": "192.168.178.22:52550",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        },
+        {
+          "addr": "194.15.80.73:52550",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        }
+      ]
     }
   ]
 }
