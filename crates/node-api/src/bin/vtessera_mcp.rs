@@ -26,7 +26,7 @@ use std::env;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::process;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use vtessera_executor::{Backend, Executor, ExecutorError, JobMetering, JobSpec};
 use vtessera_node_api::{mcp::McpServer, parse_signed_offer, JobRunError, JobRunner, NodeState};
@@ -178,7 +178,7 @@ fn main() {
     let runner = args.backend.build(&offer.body.node_id);
 
     let server = McpServer::new(NodeState {
-        offer,
+        offer: Arc::new(RwLock::new(offer)),
         escrow_account: args.escrow_account,
         network: args.network,
         runner: Some(runner),
