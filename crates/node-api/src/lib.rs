@@ -44,6 +44,8 @@ use std::sync::Arc;
 use vtessera_offer::{PriceQuote, SignedOffer};
 
 #[cfg(feature = "serve")]
+pub mod capacity;
+#[cfg(feature = "serve")]
 pub mod index;
 pub mod mcp;
 pub mod queue;

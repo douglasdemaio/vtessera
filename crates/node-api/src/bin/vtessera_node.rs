@@ -27,6 +27,9 @@
 //! Add `--marketplace` to register with the public marketplace (GitHub
 //! Pages) and `--upnp` to auto-forward the port on a UPnP home router so
 //! the node is reachable from the internet without a manual port-forward.
+//! Add `--capacity <capacity.toml>` to live-tune the queue gate
+//! (`max_concurrent_jobs`, `max_queue_len`) whenever that file changes
+//! (issue #109), no restart needed.
 //!
 //! Where `offer.json` is the JSON output of `vtessera_offer::to_json`.
 //!
@@ -68,6 +71,7 @@ use std::time::Duration;
 
 use vtessera_executor::{Backend, Executor, ExecutorError, JobMetering, JobSpec};
 use vtessera_mini_http::{serve, Method as MiniMethod, Request as MiniRequest, Response};
+use vtessera_node_api::capacity;
 use vtessera_node_api::index::{AdmitError, IndexClient, IndexQuery};
 use vtessera_node_api::queue::JobQueue;
 use vtessera_node_api::{
@@ -113,7 +117,8 @@ fn usage_and_exit() -> ! {
         [--marketplace] [--marketplace-interval <secs>] \
         [--upnp] \
         [--coordinator-addr <endpoint-addr.json> ...] [--coordinator-poll <secs>] \
-        [--max-concurrent-jobs <n>] [--max-queue-len <n>]"
+        [--max-concurrent-jobs <n>] [--max-queue-len <n>] \
+        [--capacity <capacity.toml>]"
     );
     process::exit(2);
 }
@@ -189,6 +194,9 @@ struct Args {
     /// Maximum number of jobs that may wait in the queue before new
     /// submissions get 503 (default 16).
     max_queue_len: usize,
+    /// Optional `capacity.toml` for live reconfiguration (issue #109):
+    /// applied once at startup, then re-applied whenever the file changes.
+    capacity: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +323,7 @@ where
     let mut coordinator_poll: u64 = DEFAULT_COORDINATOR_POLL_SECS;
     let mut max_concurrent_jobs: u32 = 1;
     let mut max_queue_len: usize = 16;
+    let mut capacity: Option<PathBuf> = None;
     let mut it = argv.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -398,6 +407,7 @@ where
                     max_queue_len = s.parse().unwrap_or_else(|_| usage_and_exit());
                 }
             }
+            "--capacity" => capacity = it.next().map(PathBuf::from),
             "--help" | "-h" => usage_and_exit(),
             _ => {
                 eprintln!("unknown argument: {a}");
@@ -430,6 +440,7 @@ where
             coordinator_poll_interval: Duration::from_secs(coordinator_poll),
             max_concurrent_jobs,
             max_queue_len,
+            capacity,
         },
         _ => usage_and_exit(),
     }
@@ -1273,6 +1284,27 @@ fn main() {
         index,
         queue,
     };
+
+    // Live capacity reconfiguration (issue #109): apply `capacity.toml`
+    // once at startup, then re-apply on every change from a watcher thread.
+    // Only the queue gate is live-tunable here (the binary's `queue` is
+    // always present); when this build has no queue the file is refused.
+    if let Some(cap_path) = &args.capacity {
+        match &state.queue {
+            Some(q) => {
+                let q = q.clone();
+                capacity::apply_and_log(cap_path, &q);
+                capacity::spawn_watcher(
+                    cap_path.clone(),
+                    q,
+                    Duration::from_secs(capacity::DEFAULT_CAPACITY_POLL_SECS),
+                );
+            }
+            None => eprintln!(
+                "vtessera-node: --capacity given but this build has no node queue; ignoring"
+            ),
+        }
+    }
 
     if wants_inbound_listener(args.connectivity) {
         let listener = TcpListener::bind(&args.bind).unwrap_or_else(|e| {
