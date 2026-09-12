@@ -90,6 +90,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.2" date="2026-09-12">
+      <description>
+        <p>Zero-config connectivity: coordinator dispatch queue and outbound-only nodes over iroh; marketplace nodes.json resolver with dial-by-EndpointId; node-local job queue (200/202/503 admission, status/cancel) with GUI support; marketplace browse + pricing editor in the GUI; kata containerd CRI executor scaffold; vtessera-agent overview command for whole-network visibility; agent queue-rendezvous submit fix.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-08-16">
       <description>
         <p>First-run metering consent gate; separate off-by-default "Accept workloads from others" switch; three-state status (Off / Metering only / Accepting jobs); honest backend copy (noop-cpu simulates, local-cpu has no sandbox); v0 metering opens no sockets.</p>
