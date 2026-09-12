@@ -50,9 +50,11 @@ serve = [
     "dep:tokio",
     "dep:futures-util",
     "dep:igd-next",
-    # capacity.toml live reconfiguration (issue #109) — the lib's parse-only
-    # capacity module reads TOML; only compiled into the `serve` binaries.
-    "dep:toml",
+    # capacity.toml live reconfiguration (issue #109) — the schema and
+    # file-stamp live in the shared controller crate (vtessera-capacity); the
+    # lib's parse-only capacity module reads TOML, only compiled into the
+    # `serve` binaries.
+    "dep:vtessera-capacity",
     # Production CPU backend (ROADMAP.md §1): Cloud Hypervisor microVM. The
     # feature only pulls serde_json in the executor crate; it spawns the
     # `cloud-hypervisor` binary at runtime.
@@ -91,10 +93,9 @@ futures-util = { workspace = true, optional = true }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# capacity.toml parsing for the live-reconfiguration watch loop (issue #109).
-# Optional: the default library build stays dependency-light, and only the
-# `serve` binaries ever read a capacity file.
-toml = { workspace = true, optional = true }
+# capacity.toml schema + file-stamp (issue #109). Gated on `serve` like the
+# capacity module: only the `serve` binaries ever read a capacity file.
+vtessera-capacity = { path = "../vtessera-capacity", optional = true }
 # Vendored Solana PDA/ATA derivation for the on-chain x402 verifier.
 # Gated on `serve` so the default (library) build stays dependency-light.
 sha2 = { workspace = true, optional = true }

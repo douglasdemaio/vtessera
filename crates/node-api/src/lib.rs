@@ -41,7 +41,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use vtessera_offer::{PriceQuote, SignedOffer};
+use vtessera_offer::{AdvertisedDevice, PriceQuote, SignedOffer};
 
 #[cfg(feature = "serve")]
 pub mod capacity;
@@ -317,7 +317,8 @@ pub fn dispatch(state: &NodeState, req: HttpRequest) -> HttpResponse {
         (HttpMethod::Get, "/.well-known/agent.json") => handle_agent_card(state),
         (HttpMethod::Post, "/jobs") => handle_jobs(state, req),
         (HttpMethod::Get, "/healthz") => HttpResponse::text(200, "ok"),
-        (HttpMethod::Get, "/metrics") => handle_metrics(),
+        (HttpMethod::Get, "/metrics") => handle_metrics(state),
+        (HttpMethod::Get, "/capacity") => handle_capacity(state),
         _ => HttpResponse::text(404, "not found"),
     }
 }
@@ -382,8 +383,60 @@ fn handle_offer(state: &NodeState) -> HttpResponse {
     HttpResponse::json(200, vtessera_offer::to_json(&state.offer.read().unwrap()))
 }
 
-fn handle_metrics() -> HttpResponse {
-    let body = vtessera_metrics::render();
+fn handle_metrics(state: &NodeState) -> HttpResponse {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(queue) = &state.queue {
+        lines.push(
+            "# HELP vtessera_queue_max_concurrent Admitted execution slots (queue concurrency cap)"
+                .into(),
+        );
+        lines.push("# TYPE vtessera_queue_max_concurrent gauge".into());
+        lines.push(format!(
+            "vtessera_queue_max_concurrent {}",
+            queue.max_concurrent()
+        ));
+        lines.push(
+            "# HELP vtessera_queue_max_depth Maximum jobs allowed to wait in the on-disk queue"
+                .into(),
+        );
+        lines.push("# TYPE vtessera_queue_max_depth gauge".into());
+        lines.push(format!(
+            "vtessera_queue_max_depth {}",
+            queue.max_queue_len()
+        ));
+        lines.push("# HELP vtessera_queue_running Jobs currently running".into());
+        lines.push("# TYPE vtessera_queue_running gauge".into());
+        lines.push(format!("vtessera_queue_running {}", queue.running_count()));
+        lines.push("# HELP vtessera_queue_depth Jobs waiting in the on-disk queue".into());
+        lines.push("# TYPE vtessera_queue_depth gauge".into());
+        lines.push(format!("vtessera_queue_depth {}", queue.queued_count()));
+    }
+    let offer = state.offer.read().unwrap();
+    if let AdvertisedDevice::Cpu { vcpus, mem_mb } = &offer.body.device {
+        lines.push("# HELP vtessera_offered_cpus Advertised vCPUs in the published offer".into());
+        lines.push("# TYPE vtessera_offered_cpus gauge".into());
+        lines.push(format!("vtessera_offered_cpus {vcpus}"));
+        lines.push(
+            "# HELP vtessera_offered_mem_mb Advertised memory (MiB) in the published offer".into(),
+        );
+        lines.push("# TYPE vtessera_offered_mem_mb gauge".into());
+        lines.push(format!("vtessera_offered_mem_mb {mem_mb}"));
+    }
+
+    let mut body = vtessera_metrics::render();
+    if !lines.is_empty() {
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push('\n');
+        }
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 || !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(line);
+        }
+        body.push('\n');
+    }
+
     let body_bytes = body.into_bytes();
     HttpResponse {
         status: 200,
@@ -396,6 +449,27 @@ fn handle_metrics() -> HttpResponse {
         ],
         body: body_bytes,
     }
+}
+
+/// `GET /capacity` — the node's current admission limits and advertised
+/// device, for an operator or a controller checking that an applied
+/// `capacity.toml` took effect.
+fn handle_capacity(state: &NodeState) -> HttpResponse {
+    let offer = state.offer.read().unwrap();
+    let queue = state.queue.as_ref().map(|q| {
+        serde_json::json!({
+            "max_concurrent_jobs": q.max_concurrent(),
+            "max_queue_len": q.max_queue_len(),
+            "running": q.running_count(),
+            "queued": q.queued_count(),
+        })
+    });
+    let payload = serde_json::json!({
+        "queue": queue,
+        "device": &offer.body.device,
+    });
+    let body = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
+    HttpResponse::json(200, body)
 }
 
 fn handle_mcp_manifest(state: &NodeState) -> HttpResponse {
@@ -1687,15 +1761,60 @@ mod tests {
             content_type.contains("text/plain"),
             "expected text/plain, got {content_type}"
         );
-        // Response should be valid Prometheus text exposition format.
         let body = String::from_utf8(r.body).unwrap();
-        // Empty body is acceptable if no metrics are registered yet.
-        // If metrics exist, they should have HELP/TYPE lines.
+        // No queue → no dynamic gauges; static render may be empty.
         if !body.is_empty() {
             assert!(
                 body.contains("# HELP") || body.contains("# TYPE"),
                 "expected Prometheus format markers in: {body}"
             );
         }
+    }
+
+    #[test]
+    fn metrics_with_queue_emits_queue_gauges() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("vtq-metrics-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let q = queue::JobQueue::new(&dir, Arc::new(FakeRunner), 4, 16);
+        let mut s = state(PriceQuote::Free);
+        s.queue = Some(q);
+        let r = dispatch(&s, req(HttpMethod::Get, "/metrics", vec![]));
+        assert_eq!(r.status, 200);
+        let body = String::from_utf8(r.body).unwrap();
+        assert!(body.contains("vtessera_queue_max_concurrent 4"), "{body}");
+        assert!(body.contains("vtessera_queue_max_depth 16"), "{body}");
+        assert!(body.contains("vtessera_queue_running 0"), "{body}");
+        assert!(body.contains("vtessera_queue_depth 0"), "{body}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capacity_endpoint_without_queue() {
+        let s = state(PriceQuote::Free);
+        let r = dispatch(&s, req(HttpMethod::Get, "/capacity", vec![]));
+        assert_eq!(r.status, 200);
+        let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+        assert!(body["queue"].is_null());
+        assert_eq!(body["device"]["kind"], "cpu");
+    }
+
+    #[test]
+    fn capacity_endpoint_with_queue() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("vtq-cap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let q = queue::JobQueue::new(&dir, Arc::new(FakeRunner), 2, 32);
+        let mut s = state(PriceQuote::Free);
+        s.queue = Some(q);
+        let r = dispatch(&s, req(HttpMethod::Get, "/capacity", vec![]));
+        assert_eq!(r.status, 200);
+        let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(body["queue"]["max_concurrent_jobs"], 2);
+        assert_eq!(body["queue"]["max_queue_len"], 32);
+        assert_eq!(body["queue"]["running"], 0);
+        assert_eq!(body["queue"]["queued"], 0);
+        assert_eq!(body["device"]["kind"], "cpu");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
