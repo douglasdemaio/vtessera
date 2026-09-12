@@ -1,20 +1,24 @@
-//! `vtessera-capacity` — file-drop controller (issue #109).
+//! `vtessera-capacity` — capacity controller (issue #109).
 //!
-//! Applies an operator-dropped capacity file to a node's watched
-//! `capacity.toml`:
+//! Three modes pile on the same primitive (validate -> atomic commit to the
+//! node's watched `capacity.toml` -> audit event):
 //!
 //! ```text
 //! vtessera-capacity --apply <in.toml> --out <capacity.toml> [--events <events.jsonl>]
 //! vtessera-capacity --watch <in.toml> --out <capacity.toml> [--events <events.jsonl>] [--poll-secs <n>]
+//! vtessera-capacity --autoscale <autoscale.toml>
 //! ```
 //!
-//! `--apply` is the one-shot (CI/test-friendly) trigger; `--watch` applies
-//! on startup and mirrors every change to `<in.toml>` onto `<out>` until the
-//! process stops. Either way the node's own watcher picks the committed file
-//! up on its next poll and reconfigures its queue / re-signs its offer. This
-//! binary has no sockets — in v1 the orchestrator and the controller talk
-//! over the filesystem, and the controller needs nothing but a filesystem to
-//! drive a node.
+//! `--apply` is the one-shot (CI/test-friendly) file-drop trigger;
+//! `--watch` mirrors every change to `<in.toml>` onto `<out>` until the
+//! process stops. `--autoscale` (built with the `autoscale` feature) polls a
+//! node's `/metrics` demand gauges and scales `advertised_vcpus` /
+//! `max_concurrent_jobs` between the configured floor and ceiling. Either
+//! way the node's own watcher picks the committed file up on its next poll
+//! and reconfigures its queue / re-signs its offer. The file-drop modes have
+//! no sockets — in v1 the orchestrator and the controller talk over the
+//! filesystem; the autoscale mode's only socket is an outbound `/metrics`
+//! poll.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -26,16 +30,17 @@ use vtessera_capacity::DEFAULT_WATCH_POLL_SECS;
 enum Mode {
     Apply,
     Watch { poll: Duration },
+    Autoscale(PathBuf),
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  vtessera-capacity --apply <in.toml> --out <capacity.toml> [--events <events.jsonl>]\n  vtessera-capacity --watch <in.toml> --out <capacity.toml> [--events <events.jsonl>] [--poll-secs <n>]"
+        "usage:\n  vtessera-capacity --apply <in.toml> --out <capacity.toml> [--events <events.jsonl>]\n  vtessera-capacity --watch <in.toml> --out <capacity.toml> [--events <events.jsonl>] [--poll-secs <n>]\n  vtessera-capacity --autoscale <autoscale.toml>"
     );
     std::process::exit(2);
 }
 
-fn parse(raw: &[String]) -> (Mode, PathBuf, PathBuf, Option<PathBuf>) {
+fn parse(raw: &[String]) -> (Mode, Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
     let mut mode = None;
     let mut in_path = None;
     let mut out = None;
@@ -65,6 +70,9 @@ fn parse(raw: &[String]) -> (Mode, PathBuf, PathBuf, Option<PathBuf>) {
                     poll: Duration::from_secs(DEFAULT_WATCH_POLL_SECS),
                 });
             }
+            "--autoscale" => {
+                mode = Some(Mode::Autoscale(PathBuf::from(take_value("--autoscale"))));
+            }
             "--poll-secs" => {
                 let secs: u64 = take_value("--poll-secs").parse().unwrap_or_else(|_| {
                     eprintln!("--poll-secs must be a number");
@@ -78,7 +86,7 @@ fn parse(raw: &[String]) -> (Mode, PathBuf, PathBuf, Option<PathBuf>) {
                 out = Some(take_value("--out"));
             }
             "--events" => {
-                events = Some(take_value("--events"));
+                events = Some(PathBuf::from(take_value("--events")));
             }
             _ => usage(),
         }
@@ -96,14 +104,8 @@ fn parse(raw: &[String]) -> (Mode, PathBuf, PathBuf, Option<PathBuf>) {
             }
         }
     };
-    let in_path = in_path.unwrap_or_else(|| usage());
-    let out = out.unwrap_or_else(|| usage());
-    (
-        mode,
-        PathBuf::from(in_path),
-        PathBuf::from(out),
-        events.map(PathBuf::from),
-    )
+    let in_path = in_path.map(PathBuf::from);
+    (mode, in_path, out.map(PathBuf::from), events)
 }
 
 fn apply_and_report(in_path: &Path, out: &Path, events: Option<&Path>) -> ExitCode {
@@ -137,6 +139,31 @@ fn apply_and_report(in_path: &Path, out: &Path, events: Option<&Path>) -> ExitCo
     }
 }
 
+fn run_autoscale(cfg_path: &Path) -> ExitCode {
+    #[cfg(feature = "autoscale")]
+    {
+        match vtessera_capacity::autoscale::load_config(cfg_path) {
+            Ok(cfg) => {
+                vtessera_capacity::autoscale::run(cfg);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("vtessera-capacity: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+    #[cfg(not(feature = "autoscale"))]
+    {
+        let _ = cfg_path;
+        eprintln!(
+            "vtessera-capacity: built without the autoscale feature; \
+             rebuild with `cargo build -p vtessera-capacity --features autoscale`"
+        );
+        ExitCode::FAILURE
+    }
+}
+
 fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.is_empty() {
@@ -144,8 +171,14 @@ fn main() -> ExitCode {
     }
     let (mode, in_path, out, events) = parse(&raw);
     match mode {
-        Mode::Apply => apply_and_report(&in_path, &out, events.as_deref()),
+        Mode::Apply => {
+            let in_path = in_path.unwrap_or_else(|| usage());
+            let out = out.unwrap_or_else(|| usage());
+            apply_and_report(&in_path, &out, events.as_deref())
+        }
         Mode::Watch { poll } => {
+            let in_path = in_path.unwrap_or_else(|| usage());
+            let out = out.unwrap_or_else(|| usage());
             // Apply whatever is present at startup, then mirror changes.
             let startup = apply_and_report(&in_path, &out, events.as_deref());
             if startup != ExitCode::SUCCESS {
@@ -167,5 +200,6 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Mode::Autoscale(cfg_path) => run_autoscale(&cfg_path),
     }
 }
