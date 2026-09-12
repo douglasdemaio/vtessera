@@ -18,3 +18,15 @@ path = "src/bin/vtessera_capacity.rs"
 serde = { workspace = true }
 toml = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+# Usage-based autoscale engine (issue #109 v2): pulls the node's `/metrics`
+# demand gauges and re-writes `capacity.toml`. The only socket this crate
+# ever opens is an *outbound* client poll, so it stays off by default and
+# the base crate keeps its "no sockets" property.
+default = []
+autoscale = ["dep:ureq"]
+
+[dependencies.ureq]
+workspace = true
+optional = true
