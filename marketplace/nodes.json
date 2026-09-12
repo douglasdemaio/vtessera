@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789208904,
+  "updated_at": 1789211453,
   "nodes": [
     {
       "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
@@ -65,9 +65,7 @@
             "mem_mb": 5652,
             "vcpus": 8
           },
-          "endpoint": [
-            "http://194.15.80.73:8402"
-          ],
+          "endpoint": [],
           "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
           "expires_unix": 1791796810,
           "issued_unix": 1789204810,
@@ -81,14 +79,32 @@
           "schema_ver": 2
         },
         "pubkey_hex": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
-        "sig_hex": "c7d0b05115f604c2c4b3eab5336705dce6fb7902f65d11cc4ede7f5124ea91b1458540177891251195b7c8d02cdea0b6022050193e38e0dc47be3560bc63f50f"
+        "sig_hex": "4fd892816cb5e0ad99058b54c572c39a4c051cb9927b45ba7f59b009bbb130b61493316c0e27238c4806e7c73ed0bab1f239447600ce8564cccbeb40b5734605"
       },
-      "sig_hex": "c7d0b05115f604c2c4b3eab5336705dce6fb7902f65d11cc4ede7f5124ea91b1458540177891251195b7c8d02cdea0b6022050193e38e0dc47be3560bc63f50f",
-      "updated_at": 1789204821,
-      "endpoint": [
-        "http://194.15.80.73:8402"
-      ],
-      "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240"
+      "sig_hex": "4fd892816cb5e0ad99058b54c572c39a4c051cb9927b45ba7f59b009bbb130b61493316c0e27238c4806e7c73ed0bab1f239447600ce8564cccbeb40b5734605",
+      "updated_at": 1789211453,
+      "endpoint": [],
+      "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
+      "candidates": [
+        {
+          "addr": "192.168.178.82:41471",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        },
+        {
+          "addr": "[2a00:a520:216a:4400:16c3:ed95:1050:304a]:41777",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        },
+        {
+          "addr": "[2a00:a520:216a:4400:b98b:baf9:a38e:20ef]:41777",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        }
+      ]
     }
   ]
 }
