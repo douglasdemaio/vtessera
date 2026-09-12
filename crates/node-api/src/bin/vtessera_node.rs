@@ -1604,6 +1604,12 @@ fn detect_local_ipv4() -> Option<std::net::Ipv4Addr> {
 /// Requires a UPnP-enabled home router on the LAN. Failure is non-fatal —
 /// the caller logs and carries on (the node can still be reached on the LAN,
 /// or via iroh relay / a manual port-forward).
+///
+/// A router that *policy-denies* the mapping (e.g. a FRITZ!Box with "Allow
+/// UPnP port sharing" turned off rejects `AddPortMapping` with SOAP error
+/// 403 "Not available Action") is a common misconfiguration that reads like a
+/// port conflict. [describe_add_port_error] turns that into an actionable
+/// operator message.
 fn upnp_add_port_forward(bind: &str) -> Result<String, String> {
     use igd_next::{PortMappingProtocol, SearchOptions};
 
@@ -1636,7 +1642,7 @@ fn upnp_add_port_forward(bind: &str) -> Result<String, String> {
             0,
             "vtessera-node",
         )
-        .map_err(|e| format!("add port mapping failed: {e}"))?;
+        .map_err(|e| describe_add_port_error(e, bind_port, local))?;
 
     // Query the router for our WAN IP to confirm reachability / for the offer.
     let external_ip = gateway
@@ -1644,6 +1650,36 @@ fn upnp_add_port_forward(bind: &str) -> Result<String, String> {
         .map_err(|e| format!("get external ip failed: {e}"))?;
 
     Ok(external_ip.to_string())
+}
+
+/// Turn an `AddPortMapping` failure into a message an operator can act on.
+///
+/// A FRITZ!Box (and similar routers) with port sharing disabled rejects the
+/// request at the SOAP layer with error 403 "Not available Action" — i.e. the
+/// router *policy* blocks the mapping, not a port conflict. Give that case a
+/// specific message naming the router setting to flip; everything else keeps
+/// the crate's error text.
+fn describe_add_port_error(
+    e: igd_next::AddPortError,
+    bind_port: u16,
+    local: std::net::SocketAddr,
+) -> String {
+    use igd_next::{AddPortError, RequestError};
+    match &e {
+        AddPortError::ActionNotAuthorized => format!(
+            "router denied the port-forward request (not authorized) — enable UPnP port \
+             sharing on the router or add a static forward TCP {bind_port} -> {local}"
+        ),
+        // ErrorCode 403 is the universal SOAP policy-denial code; a FRITZ!Box
+        // describes it as "Not available Action".
+        AddPortError::RequestError(RequestError::ErrorCode(403, _)) => format!(
+            "router refused the port forward with SOAP 403 \"Not available Action\" — UPnP \
+             port sharing is likely disabled on the router (FRITZ!Box: Home Network -> \
+             Network -> Network Settings -> \"Allow UPnP port sharing\"), or the router \
+             requires a static forward: TCP {bind_port} -> {local}"
+        ),
+        _ => format!("add port mapping failed: {e}"),
+    }
 }
 
 /// Register the node's offer with the marketplace via Cloudflare Worker.
