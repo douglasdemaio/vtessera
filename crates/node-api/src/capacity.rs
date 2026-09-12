@@ -1,7 +1,10 @@
 //! Live capacity reconfiguration for a node (issue #109).
 //!
-//! A `capacity.toml` lets an operator re-tune a running node's admission
-//! and advertising knobs without a restart:
+//! The `capacity.toml` schema itself lives in the shared controller crate
+//! ([`vtessera_capacity::CapacityConfig`]) so the node and the controller can
+//! never drift — a file the controller commits is byte-for-byte what this
+//! module validates. This module is the node side of that contract: the
+//! queue-gate apply, the offer re-signing, and the change watcher.
 //!
 //! ```toml
 //! max_concurrent_jobs = 4    # open execution slots
@@ -25,65 +28,25 @@
 //!   watcher's `on_apply` callback.
 //!
 //! Wiring in the binary (`vtessera_node.rs`) picks which parts of the offer
-//! change; this module is the parser + re-signer.
+//! change; this module is the queue apply + re-signer + watcher.
 //!
 //! Watching is a cheap mtime+size poll (no inotify dependency): the node's
 //! process stays self-contained and the poll interval is seconds-scale
 //! anyway.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime};
-
-use serde::Deserialize;
+use std::time::Duration;
 
 use crate::queue::JobQueue;
+use vtessera_capacity::{file_stamp, load};
+pub use vtessera_capacity::{CapacityConfig, CapacityError};
 use vtessera_offer::{AdvertisedDevice, PriceQuote, SignedOffer};
 use vtessera_settlement::SigningKey;
 
 /// Default poll interval for the capacity watch loop.
 pub const DEFAULT_CAPACITY_POLL_SECS: u64 = 2;
-
-/// Live capacity controls read from `capacity.toml`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CapacityConfig {
-    /// Open execution slots (queue concurrency cap).
-    pub max_concurrent_jobs: Option<u32>,
-    /// Jobs allowed to wait in the on-disk queue (0 disables waiting:
-    /// a busy node always 503s).
-    pub max_queue_len: Option<usize>,
-    /// Advertised vCPUs for the offer's device. Parsed for validation now;
-    /// re-signed into the published offer by the offer-reconfig follow-up.
-    pub advertised_vcpus: Option<u32>,
-    /// Advertised RAM (MiB) for the offer's device. As [`CapacityConfig::advertised_vcpus`].
-    pub advertised_mem_mb: Option<u32>,
-    /// Scale for `per_device_second_micros` on a paid offer.
-    pub price_multiplier: Option<f64>,
-    /// Mirrors the GUI's consent toggle (only accept approved workloads).
-    pub accept_workloads: Option<bool>,
-}
-
-/// A rejected capacity file. The message is safe to show to an operator.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CapacityError(pub String);
-
-impl std::fmt::Display for CapacityError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for CapacityError {}
-
-/// Load and validate the capacity file at `path`.
-pub fn load(path: &Path) -> Result<CapacityConfig, CapacityError> {
-    let raw = fs::read_to_string(path)
-        .map_err(|e| CapacityError(format!("read {}: {e}", path.display())))?;
-    toml::from_str(&raw).map_err(|e| CapacityError(format!("{}: {e}", path.display())))
-}
 
 /// Apply the capacity file to a queue once: reconfigure the admission gate
 /// from the file's non-`None` queue knobs, leaving everything else at its
@@ -195,24 +158,12 @@ pub fn spawn_watcher(
     });
 }
 
-/// `(mtime_nanos, size)` of `path`, or `None` when the file is absent. Both
-/// are folded into the stamp so a same-second rewrite still registers.
-fn file_stamp(path: &Path) -> Option<(u128, u64)> {
-    let md = fs::metadata(path).ok()?;
-    let mt = md
-        .modified()
-        .ok()?
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
-    Some((mt, md.len()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::queue::{JobQueue, QueuedJob};
     use crate::{JobRunError, JobRunner};
+    use std::fs;
     use vtessera_offer::{
         derive_node_id, sign, AdvertisedDevice, Currency, OfferBody, PriceQuote, OFFER_SCHEMA_VER,
     };
@@ -242,45 +193,6 @@ mod tests {
             };
             Ok(r#"{"status":"accepted","job_id":"x"}"#.into())
         }
-    }
-
-    #[test]
-    fn load_rejects_unknown_fields() {
-        let p = write(&temp_dir("unknown"), "capacity.toml", "bogus_knob = 1\n");
-        let err = load(&p).unwrap_err();
-        assert!(err.to_string().contains("unknown field"), "err: {err}");
-    }
-
-    #[test]
-    fn load_parses_full_config() {
-        let p = write(
-            &temp_dir("full"),
-            "capacity.toml",
-            "max_concurrent_jobs = 4\n\
-             max_queue_len = 32\n\
-             advertised_vcpus = 8\n\
-             advertised_mem_mb = 16384\n\
-             price_multiplier = 1.5\n\
-             accept_workloads = true\n",
-        );
-        let cfg = load(&p).unwrap();
-        assert_eq!(
-            cfg,
-            CapacityConfig {
-                max_concurrent_jobs: Some(4),
-                max_queue_len: Some(32),
-                advertised_vcpus: Some(8),
-                advertised_mem_mb: Some(16384),
-                price_multiplier: Some(1.5),
-                accept_workloads: Some(true),
-            }
-        );
-    }
-
-    #[test]
-    fn load_missing_file_errors() {
-        let err = load(&temp_dir("missing").join("nope.toml")).unwrap_err();
-        assert!(err.to_string().contains("read"), "err: {err}");
     }
 
     #[test]

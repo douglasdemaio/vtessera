@@ -174,6 +174,18 @@ impl JobQueue {
         self.max_queue_len.load(Ordering::Relaxed)
     }
 
+    /// Number of jobs currently running (owning an execution slot). For the
+    /// metrics surface — the admission fast path never consults it.
+    pub fn running_count(&self) -> u32 {
+        self.inner.lock().unwrap().running
+    }
+
+    /// Number of jobs currently waiting in the on-disk queue. For the
+    /// metrics surface — the admission fast path never consults it.
+    pub fn queued_count(&self) -> usize {
+        self.inner.lock().unwrap().queued.len()
+    }
+
     /// Live-reconfigure the admission gates without restarting the node.
     ///
     /// `max_concurrent` is clamped to at least 1 (a node must always admit

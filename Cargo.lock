@@ -4521,6 +4521,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vtessera-capacity"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "vtessera-config"
 version = "0.1.0"
 dependencies = [
@@ -4604,8 +4613,8 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
- "toml 0.8.23",
  "ureq",
+ "vtessera-capacity",
  "vtessera-coordinator",
  "vtessera-executor",
  "vtessera-metrics",

@@ -13,6 +13,8 @@
 #   crates/marketplace-server  Reference marketplace server (Axum, private/enterprise)
 #   crates/vtessera-config Config wizard for private/enterprise deployments
 #   crates/transport        Transport layer — types for iroh connectivity
+#   crates/coordinator      Opt-in queue/rendezvous for outbound-only nodes
+#   crates/vtessera-capacity Shared capacity.toml schema + file-drop controller
 #   crates/metering-sidecar    Kata container guest-side metering
 #   crates/agent-cli        CLI entry point for AI agents (free jobs)
 #   programs/vtessera-escrow   Module 4 — Solana Anchor escrow program (excluded)
@@ -43,6 +45,7 @@ members = [
     "crates/transport",
     "crates/coordinator",
     "crates/vtessera-metrics",
+    "crates/vtessera-capacity",
     "crates/agent-cli",
 ]
 # Crates that live outside the host workspace because they pin Solana SDK
