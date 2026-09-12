@@ -65,7 +65,7 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -1132,6 +1132,17 @@ fn main() {
             None
         };
 
+    // The offer is re-signed live when the capacity file changes its
+    // offer-side knobs (issue #109). One shared Arc feeds every consumer —
+    // the same handle is what `state.offer`, the publisher loop and the
+    // marketplace loop read each tick, so a re-sign is visible everywhere.
+    let live_offer: Arc<RwLock<vtessera_offer::SignedOffer>> = Arc::new(RwLock::new(offer.clone()));
+    // Shared iroh endpoint handle for the marketplace registration (hourly)
+    // and the capacity-driven re-registration. Empty when no endpoint runs.
+    let ep_handle = iroh_endpoint
+        .clone()
+        .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(None)));
+
     let index: Option<Arc<dyn IndexClient>> = match &args.publish {
         Some(url) => {
             let client = UreqIndexClient::new(url.clone(), node_id.clone());
@@ -1140,7 +1151,12 @@ fn main() {
                 Ok(()) => eprintln!("vtessera-node: registered offer with index {url}"),
                 Err(e) => eprintln!("vtessera-node: publish to {url} failed (will retry): {e}"),
             }
-            spawn_publisher(url.clone(), offer_json, args.publish_interval);
+            spawn_publisher(
+                url.clone(),
+                node_id.clone(),
+                live_offer.clone(),
+                args.publish_interval,
+            );
 
             // Heartbeat on an interval regardless of iroh: liveness proof (and
             // candidate refresh when an iroh endpoint exists) works even for
@@ -1182,48 +1198,100 @@ fn main() {
         None
     };
 
+    // Advertise pieces shared by the startup marketplace registration and
+    // the live capacity-driven re-registration (the `capacity_on_apply`
+    // closure below): the bind port, whether UPnP confirmed a public
+    // forward, and the external IP to advertise. The WAN IP is only probed
+    // when the node registers with a marketplace at all.
+    let port = args
+        .bind
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8402);
+    let has_public_forward = upnp_external_ip.is_some();
+    let external_ip: Option<String> = if !args.marketplace {
+        None
+    } else if args.upnp && !has_public_forward {
+        eprintln!(
+            "vtessera-node: UPnP port forward failed; not advertising a public WAN \
+             endpoint (the node remains reachable on the LAN)"
+        );
+        None
+    } else {
+        upnp_external_ip
+            .clone()
+            .or_else(detect_external_ip)
+            .filter(|ip| !ip.is_empty())
+    };
+
+    // Offer-side capacity apply (issue #109): re-sign the live offer from
+    // the file's offer knobs, then immediately re-publish to the index and
+    // marketplace so agents see the new capacity without waiting for the
+    // next refresh tick. The queue-side apply runs first, inside
+    // `apply_and_fire`. Returns early when no offer knob applied.
+    let capacity_on_apply: Arc<dyn Fn(&capacity::CapacityConfig) + Send + Sync> = {
+        let live_offer = live_offer.clone();
+        let signing_key = signing_key_for_marketplace.clone();
+        let publish_url = args.publish.clone();
+        let node_id = node_id.clone();
+        let ep_handle = ep_handle.clone();
+        let external_ip = external_ip.clone();
+        let marketplace = args.marketplace;
+        Arc::new(move |cfg: &capacity::CapacityConfig| {
+            let signed =
+                match capacity::re_sign_offer(cfg, &live_offer.read().unwrap(), &signing_key) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return, // no offer knob present, or none applies
+                    Err(e) => {
+                        eprintln!("vtessera-node: offer re-sign from capacity file failed: {e}");
+                        return;
+                    }
+                };
+            {
+                let mut w = live_offer.write().unwrap();
+                if *w == signed {
+                    return; // re-issued at identical values — no-op
+                }
+                *w = signed.clone();
+            }
+            eprintln!("vtessera-node: re-signed offer from capacity file");
+
+            if let Some(url) = &publish_url {
+                let client = UreqIndexClient::new(url.clone(), node_id.clone());
+                match publish_offer(&client, &vtessera_offer::to_json(&signed)) {
+                    Ok(()) => eprintln!("vtessera-node: re-published offer to index {url}"),
+                    Err(e) => {
+                        eprintln!("vtessera-node: index re-publish failed (will retry): {e}")
+                    }
+                }
+            }
+            if marketplace {
+                let (candidates, endpoint_id) = get_iroh_info(&ep_handle);
+                if let Err(e) = register_with_marketplace_with_ip(
+                    &signed,
+                    &signing_key,
+                    port,
+                    external_ip.clone(),
+                    has_public_forward,
+                    &candidates,
+                    endpoint_id.as_deref(),
+                ) {
+                    eprintln!(
+                        "vtessera-node: marketplace re-registration failed (will retry): {e}"
+                    );
+                }
+            }
+        })
+    };
+
     // Marketplace registration: register via Cloudflare Worker.
     if args.marketplace {
         // Fetch the current iroh candidates (relay + direct addrs) so the
         // marketplace entry is dialable by EndpointId, like an index
         // heartbeat. Empty until iroh has discovered addresses; the hourly
         // re-register loop refreshes them (§7d marketplace resolver).
-        let ep_handle = iroh_endpoint
-            .clone()
-            .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(None)));
         let (candidates, endpoint_id) = get_iroh_info(&ep_handle);
-
-        // Parse port from bind address.
-        let port = args
-            .bind
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(8402);
-
-        // Whether we have a *confirmed* public port-forward. Only the external
-        // IP returned by a successful UPnP mapping proves the port is actually
-        // reachable from the internet; a WAN IP from an echo service knows
-        // nothing about whether any forward exists.
-        let has_public_forward = upnp_external_ip.is_some();
-
-        // Choose which endpoint to advertise. We only use a WAN IP we detected
-        // when the operator did NOT rely on UPnP to open the port (e.g. they
-        // configured a static manual forward on the router). If UPnP was
-        // requested but failed, the WAN endpoint would be unreachable, so we
-        // keep the offer's original (typically LAN) endpoint instead.
-        let external_ip = if args.upnp && !has_public_forward {
-            eprintln!(
-                "vtessera-node: UPnP port forward failed; not advertising a public WAN \
-                 endpoint (the node remains reachable on the LAN)"
-            );
-            None
-        } else {
-            upnp_external_ip
-                .clone()
-                .or_else(detect_external_ip)
-                .filter(|ip| !ip.is_empty())
-        };
 
         if external_ip.is_none() && !has_public_forward {
             eprintln!(
@@ -1232,7 +1300,7 @@ fn main() {
         }
 
         match register_with_marketplace_with_ip(
-            &offer,
+            &live_offer.read().unwrap(),
             &signing_key_for_marketplace,
             port,
             external_ip.clone(),
@@ -1244,7 +1312,7 @@ fn main() {
             Err(e) => eprintln!("vtessera-node: marketplace registration failed (will retry): {e}"),
         }
         spawn_marketplace_registration(
-            offer.body.clone(),
+            live_offer.clone(),
             signing_key_for_marketplace,
             port,
             args.marketplace_interval,
@@ -1275,7 +1343,7 @@ fn main() {
     };
 
     let state = NodeState {
-        offer: offer.clone(),
+        offer: live_offer.clone(),
         escrow_account: args.escrow_account,
         network: args.network,
         runner: Some(runner),
@@ -1287,17 +1355,18 @@ fn main() {
 
     // Live capacity reconfiguration (issue #109): apply `capacity.toml`
     // once at startup, then re-apply on every change from a watcher thread.
-    // Only the queue gate is live-tunable here (the binary's `queue` is
-    // always present); when this build has no queue the file is refused.
+    // Each pass reconfigures the queue gate AND fires `capacity_on_apply`,
+    // which re-signs the offer and re-publishes it where registered.
     if let Some(cap_path) = &args.capacity {
         match &state.queue {
             Some(q) => {
                 let q = q.clone();
-                capacity::apply_and_log(cap_path, &q);
+                capacity::apply_and_fire(cap_path, &q, capacity_on_apply.as_ref());
                 capacity::spawn_watcher(
                     cap_path.clone(),
                     q,
                     Duration::from_secs(capacity::DEFAULT_CAPACITY_POLL_SECS),
+                    capacity_on_apply,
                 );
             }
             None => eprintln!(
@@ -1571,14 +1640,22 @@ async fn pull_once(client: &QueueClient, state: &Arc<NodeState>) -> Result<bool,
     Ok(true)
 }
 
-/// Background loop that refreshes the node's offer at the index on an
-/// interval. Failures are logged and retried next tick — the process never
-/// exits on a publish failure.
-fn spawn_publisher(index_url: String, offer_json: String, interval: Duration) {
+/// Background loop that keeps the node's offer fresh on the offer-index.
+/// Reads the live offer each tick (from the shared [`RwLock`]) so a
+/// capacity-driven re-sign is picked up on the next refresh — no restart.
+/// Failures are logged and retried next tick — the process never exits on
+/// a publish failure.
+fn spawn_publisher(
+    index_url: String,
+    node_id: String,
+    live_offer: Arc<RwLock<vtessera_offer::SignedOffer>>,
+    interval: Duration,
+) {
     thread::spawn(move || {
-        let client = UreqIndexClient::new(index_url.clone(), String::new());
+        let client = UreqIndexClient::new(index_url.clone(), node_id);
         loop {
             thread::sleep(interval);
+            let offer_json = vtessera_offer::to_json(&live_offer.read().unwrap());
             match publish_offer(&client, &offer_json) {
                 Ok(()) => {}
                 Err(e) => eprintln!("vtessera-node: publish refresh failed (will retry): {e}"),
@@ -1809,10 +1886,13 @@ fn register_with_marketplace_with_ip(
 }
 
 /// Background loop that re-registers with the marketplace on an interval.
-/// External IP may change (DHCP, VPN reconnect), so we re-detect and re-register.
-/// iroh candidates are re-fetched each tick so the public entry stays dialable.
+/// External IP may change (DHCP, VPN reconnect), so we re-detect and
+/// re-register each tick. iroh candidates are re-fetched each tick so the
+/// public entry stays dialable. The offer itself is read live from the
+/// shared [`RwLock`] each tick, so a capacity-driven re-sign is picked up
+/// on the next registration — no restart.
 fn spawn_marketplace_registration(
-    offer_body: vtessera_offer::OfferBody,
+    live_offer: Arc<RwLock<vtessera_offer::SignedOffer>>,
     signing_key: SigningKey,
     port: u16,
     interval: Duration,
@@ -1822,7 +1902,7 @@ fn spawn_marketplace_registration(
 ) {
     thread::spawn(move || loop {
         thread::sleep(interval);
-        let signed = vtessera_offer::sign(offer_body.clone(), &signing_key);
+        let signed = live_offer.read().unwrap().clone();
         let (candidates, endpoint_id) = get_iroh_info(&iroh_ep);
         if let Err(e) = register_with_marketplace_with_ip(
             &signed,

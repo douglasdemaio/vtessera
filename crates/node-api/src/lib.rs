@@ -39,7 +39,7 @@
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use vtessera_offer::{PriceQuote, SignedOffer};
 
@@ -224,8 +224,10 @@ pub trait PaymentVerifier: Send + Sync {
 /// into [`dispatch`] for each request.
 #[derive(Clone)]
 pub struct NodeState {
-    /// Currently published offer.
-    pub offer: SignedOffer,
+    /// Currently published offer. Shared behind a read/write lock so the
+    /// binary can re-sign it live (capacity file, issue #109) while the
+    /// dispatcher keeps serving it — every handler takes a short read.
+    pub offer: Arc<RwLock<SignedOffer>>,
     /// On-chain account / PDA the escrow program holds funds under, for
     /// the 402 challenge body. The crate doesn't interpret this — the
     /// agent and the escrow program do.
@@ -263,10 +265,11 @@ pub struct NodeState {
 /// and lets the caller (the binary) wire the verifier — that's where the
 /// settlement crate plugs in.
 #[derive(Debug)]
-pub enum JobDecision<'a> {
+pub enum JobDecision {
     /// No payment header was supplied. Return the 402 challenge body to
-    /// the agent so it can sign and retry.
-    PaymentRequired(PaymentChallenge<'a>),
+    /// the agent so it can sign and retry. Boxed because the owned offer
+    /// clone is much larger than the other variants.
+    PaymentRequired(Box<PaymentChallenge>),
     /// A payment header was supplied. The binary should verify it (via
     /// the settlement / escrow path), then call the executor.
     VerifyAndRun {
@@ -277,12 +280,15 @@ pub enum JobDecision<'a> {
     RunFree { body: Vec<u8> },
 }
 
-/// The x402 challenge body. Serialised into the 402 response.
+/// The x402 challenge body. Serialised into the 402 response. Carries its
+/// own [`SignedOffer`] clone (not a borrow) so the dispatcher can read it
+/// out from under the `NodeState` lock and hand it on without a lifetime
+/// threading through the decision types.
 #[derive(Debug)]
-pub struct PaymentChallenge<'a> {
-    pub offer: &'a SignedOffer,
-    pub escrow_account: &'a str,
-    pub network: &'a str,
+pub struct PaymentChallenge {
+    pub offer: SignedOffer,
+    pub escrow_account: String,
+    pub network: String,
 }
 
 /// Dispatch a single request to the right handler. This is the function
@@ -373,7 +379,7 @@ pub fn parse_signed_offer(raw: &str) -> Result<SignedOffer, String> {
 }
 
 fn handle_offer(state: &NodeState) -> HttpResponse {
-    HttpResponse::json(200, vtessera_offer::to_json(&state.offer))
+    HttpResponse::json(200, vtessera_offer::to_json(&state.offer.read().unwrap()))
 }
 
 fn handle_metrics() -> HttpResponse {
@@ -419,10 +425,11 @@ fn handle_mcp(state: &NodeState, req: HttpRequest) -> HttpResponse {
 /// frameworks can index this node. Skills map one-to-one onto the MCP
 /// tool catalog.
 fn handle_agent_card(state: &NodeState) -> HttpResponse {
+    let offer = state.offer.read().unwrap();
     let card = serde_json::json!({
         "name": mcp::MCP_SERVER_NAME,
         "description": "Vtessera compute seller node: signed compute offers over MCP + x402; paid offers settle in EURC/USDC.",
-        "url": state.offer.body.endpoint.first().cloned().unwrap_or_default(),
+        "url": offer.body.endpoint.first().cloned().unwrap_or_default(),
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": { "streaming": false, "pushNotifications": false },
         "authentication": { "schemes": ["none"], "credentials": false },
@@ -439,8 +446,8 @@ fn handle_agent_card(state: &NodeState) -> HttpResponse {
 
 /// Classify an incoming `/jobs` request without running anything. The
 /// caller binary handles the executor + verifier sides.
-pub fn classify_job_request<'a>(state: &'a NodeState, req: &HttpRequest) -> JobDecision<'a> {
-    if matches!(state.offer.body.price, PriceQuote::Free) {
+pub fn classify_job_request(state: &NodeState, req: &HttpRequest) -> JobDecision {
+    if matches!(state.offer.read().unwrap().body.price, PriceQuote::Free) {
         return JobDecision::RunFree {
             body: req.body.clone(),
         };
@@ -450,11 +457,14 @@ pub fn classify_job_request<'a>(state: &'a NodeState, req: &HttpRequest) -> JobD
             payment_proof: proof,
             body: req.body.clone(),
         },
-        None => JobDecision::PaymentRequired(PaymentChallenge {
-            offer: &state.offer,
-            escrow_account: &state.escrow_account,
-            network: &state.network,
-        }),
+        None => {
+            let offer = state.offer.read().unwrap().clone();
+            JobDecision::PaymentRequired(Box::new(PaymentChallenge {
+                offer,
+                escrow_account: state.escrow_account.clone(),
+                network: state.network.clone(),
+            }))
+        }
     }
 }
 
@@ -515,10 +525,11 @@ pub fn handle_paid_job(state: &NodeState, payment_proof: &str, body: &[u8]) -> H
         }
         Err(e) => {
             // Re-challenge with a fresh 402 so the agent can retry.
+            let offer = state.offer.read().unwrap().clone();
             let challenge = PaymentChallenge {
-                offer: &state.offer,
-                escrow_account: &state.escrow_account,
-                network: &state.network,
+                offer,
+                escrow_account: state.escrow_account.clone(),
+                network: state.network.clone(),
             };
             let mut resp = HttpResponse::json(402, payment_required_body(&challenge));
             resp.headers.push(("x-payment-required".into(), "1".into()));
@@ -536,10 +547,11 @@ pub fn handle_paid_job(state: &NodeState, payment_proof: &str, body: &[u8]) -> H
     // Run synchronously through the executor, or admit to the wait queue
     // when a slot isn't free (202). On a 503 re-attach the x402 challenge so
     // an agent that retries later can re-pay cleanly against the same terms.
+    let offer = state.offer.read().unwrap().clone();
     let challenge = PaymentChallenge {
-        offer: &state.offer,
-        escrow_account: &state.escrow_account,
-        network: &state.network,
+        offer,
+        escrow_account: state.escrow_account.clone(),
+        network: state.network.clone(),
     };
     execute_or_queue(state, &spec.job_id, priority, body, Some(challenge))
 }
@@ -608,7 +620,7 @@ fn execute_or_queue(
     job_id: &str,
     priority: u8,
     body: &[u8],
-    paid_challenge: Option<PaymentChallenge<'_>>,
+    paid_challenge: Option<PaymentChallenge>,
 ) -> HttpResponse {
     let Some(q) = &state.queue else {
         return match &state.runner {
@@ -677,10 +689,11 @@ fn spec_priority(spec: &vtessera_executor::JobSpec) -> Result<u8, HttpResponse> 
 /// Logs but does not fail on I/O errors — the job proceeds regardless.
 #[cfg(feature = "serve")]
 fn create_and_write_contract(state: &NodeState, spec: &vtessera_executor::JobSpec) {
-    let device_class = device_class_from_offer(&state.offer.body.device);
+    let offer = state.offer.read().unwrap();
+    let device_class = device_class_from_offer(&offer.body.device);
     let contract = vtessera_settlement::create_contract(
         spec.job_id.clone(),
-        state.offer.body.node_id.clone(),
+        offer.body.node_id.clone(),
         device_class,
         spec.max_duration_secs,
     );
@@ -781,18 +794,18 @@ fn header(headers: &[(String, String)], name: &str) -> Option<String> {
 /// pattern: enough information for an agent to construct a stablecoin
 /// payment on the named chain, addressed to the escrow account, for the
 /// offer's price.
-pub fn payment_required_body(c: &PaymentChallenge<'_>) -> String {
+pub fn payment_required_body(c: &PaymentChallenge) -> String {
     let mut s = String::with_capacity(256);
     s.push('{');
     s.push_str("\"scheme\":\"x402\",");
     s.push_str("\"network\":");
-    json_string(c.network, &mut s);
+    json_string(&c.network, &mut s);
     s.push(',');
     s.push_str("\"escrow_account\":");
-    json_string(c.escrow_account, &mut s);
+    json_string(&c.escrow_account, &mut s);
     s.push(',');
     s.push_str("\"offer\":");
-    s.push_str(&vtessera_offer::to_json(c.offer));
+    s.push_str(&vtessera_offer::to_json(&c.offer));
     s.push('}');
     s
 }
@@ -820,16 +833,17 @@ pub fn mcp_manifest(state: &NodeState) -> String {
     s.push_str("Free offers execute directly; paid offers return 402 (x402) ");
     s.push_str("until a signed payment is attached.\",");
     s.push_str("\"endpoint\":");
-    json_string(
-        state
-            .offer
-            .body
-            .endpoint
-            .first()
-            .map(String::as_str)
-            .unwrap_or(""),
-        &mut s,
-    );
+    let endpoint = state
+        .offer
+        .read()
+        .unwrap()
+        .body
+        .endpoint
+        .first()
+        .map(String::as_str)
+        .unwrap_or("")
+        .to_string();
+    json_string(&endpoint, &mut s);
     s.push_str("}]}");
     s
 }
@@ -884,7 +898,7 @@ mod tests {
 
     fn state(price: PriceQuote) -> NodeState {
         NodeState {
-            offer: signed(price),
+            offer: Arc::new(RwLock::new(signed(price))),
             escrow_account: "Esc1111111111111111111111111111111111111111".into(),
             network: "solana-devnet".into(),
             runner: None,
@@ -1088,8 +1102,9 @@ mod tests {
         let r = dispatch(&s, req(HttpMethod::Get, "/offer", vec![]));
         let body = String::from_utf8(r.body).unwrap();
         let parsed = parse_signed_offer(&body).expect("offer JSON should parse");
-        assert_eq!(parsed.body.node_id, s.offer.body.node_id);
-        assert_eq!(parsed.pubkey_hex, s.offer.pubkey_hex);
+        let offer = s.offer.read().unwrap();
+        assert_eq!(parsed.body.node_id, offer.body.node_id);
+        assert_eq!(parsed.pubkey_hex, offer.pubkey_hex);
     }
 
     #[test]
@@ -1467,7 +1482,7 @@ mod tests {
             max_queue_len: usize,
         ) -> (NodeState, Arc<std::path::PathBuf>) {
             let (mut s, dir) = queue_state(runner, max_concurrent, max_queue_len);
-            s.offer = signed(paid());
+            *s.offer.write().unwrap() = signed(paid());
             s.verifier = Some(Arc::new(OkVerifier));
             (s, dir)
         }

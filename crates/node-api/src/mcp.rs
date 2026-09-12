@@ -374,7 +374,7 @@ impl McpServer {
                 "contents": [{
                     "uri": RESOURCE_OFFER_URI,
                     "mimeType": "application/json",
-                    "text": vtessera_offer::to_json(&self.state.offer),
+                    "text": vtessera_offer::to_json(&self.state.offer.read().unwrap()),
                 }]
             })),
             _ => Err(ERROR_RESOURCE_NOT_FOUND),
@@ -819,6 +819,7 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, RwLock};
     use vtessera_offer::{
         derive_node_id, sign, AdvertisedDevice, Currency, OfferBody, PriceQuote, OFFER_SCHEMA_VER,
     };
@@ -844,7 +845,7 @@ mod tests {
 
     fn server(price: PriceQuote) -> McpServer {
         McpServer::new(crate::NodeState {
-            offer: signed(price),
+            offer: Arc::new(RwLock::new(signed(price))),
             escrow_account: "Esc1111111111111111111111111111111111111111".into(),
             network: "solana-devnet".into(),
             runner: None,
