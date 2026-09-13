@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789318639,
+  "updated_at": 1789321184,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -8,15 +8,15 @@
         "body": {
           "device": {
             "kind": "cpu",
-            "mem_mb": 5651,
+            "mem_mb": 5120,
             "vcpus": 8
           },
           "endpoint": [
             "http://192.168.178.82:8402"
           ],
           "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
-          "expires_unix": 1791907825,
-          "issued_unix": 1789315825,
+          "expires_unix": 1791913047,
+          "issued_unix": 1789321047,
           "node_id": "793754d2844bfc814b0494560dd1c750",
           "price": {
             "mode": "free"
@@ -24,29 +24,41 @@
           "schema_ver": 2
         },
         "pubkey_hex": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
-        "sig_hex": "5249a7b2e2147efd60e79239b720942dd6744a6b164d38fe7e37bad51212b71525075ec894fb957b25d0955d208c2ca8bc1985eb4782e6ffbb437654ec2d6c05"
+        "sig_hex": "a0045f03c4a91aae1d7074ed39e1d016082d47ec88ab763a6dbbf453e21e526f3a0e559969d5940d301b8608108d9696916017f0d26826e5fd2269c35afbca03"
       },
-      "sig_hex": "5249a7b2e2147efd60e79239b720942dd6744a6b164d38fe7e37bad51212b71525075ec894fb957b25d0955d208c2ca8bc1985eb4782e6ffbb437654ec2d6c05",
-      "updated_at": 1789318639,
+      "sig_hex": "a0045f03c4a91aae1d7074ed39e1d016082d47ec88ab763a6dbbf453e21e526f3a0e559969d5940d301b8608108d9696916017f0d26826e5fd2269c35afbca03",
+      "updated_at": 1789321184,
       "endpoint": [
         "http://192.168.178.82:8402"
       ],
       "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
       "candidates": [
         {
-          "addr": "192.168.178.82:59879",
+          "addr": "https://euc1-1.relay.n0.iroh.link./",
+          "kind": "relayed",
+          "priority": 50,
+          "transport": "iroh_quic"
+        },
+        {
+          "addr": "192.168.178.82:40480",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
         },
         {
-          "addr": "[2a00:a520:2176:e400:333a:8b83:463b:a7]:57280",
+          "addr": "217.61.151.75:40480",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
         },
         {
-          "addr": "[2a00:a520:2176:e400:95b0:722e:e4e7:2133]:57280",
+          "addr": "[2a00:a520:2176:e400:333a:8b83:463b:a7]:42559",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        },
+        {
+          "addr": "[2a00:a520:2176:e400:95b0:722e:e4e7:2133]:42559",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
