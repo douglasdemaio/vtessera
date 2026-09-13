@@ -65,6 +65,13 @@ impl std::fmt::Display for CapacityError {
 
 impl std::error::Error for CapacityError {}
 
+/// Usage-based autoscale engine (issue #109 v2). A socket-free crate stays
+/// socket-free unless this feature is on: the engine's only I/O is an
+/// outbound poll of the node's `/metrics`, then the same file-drop writes
+/// every other controller input already uses.
+#[cfg(feature = "autoscale")]
+pub mod autoscale;
+
 /// Load and validate the capacity file at `path`.
 pub fn load(path: &Path) -> Result<CapacityConfig, CapacityError> {
     let raw = fs::read_to_string(path)

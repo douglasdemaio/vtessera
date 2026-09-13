@@ -410,6 +410,28 @@ fn handle_metrics(state: &NodeState) -> HttpResponse {
         lines.push("# HELP vtessera_queue_depth Jobs waiting in the on-disk queue".into());
         lines.push("# TYPE vtessera_queue_depth gauge".into());
         lines.push(format!("vtessera_queue_depth {}", queue.queued_count()));
+        // Demand gauges (issue #109 v2): the autoscale loop keys its
+        // scale-up/scale-down decisions off these. Basis points (0..=10000),
+        // capped so an over-subscribed queue reports 100%, and `max(1)`
+        // guards the ratio's denominator whenever the queue is reconfigured
+        // mid-flight.
+        let max = queue.max_concurrent().max(1);
+        let running = queue.running_count();
+        let engaged = running as u128 + queue.queued_count() as u128;
+        let demand_pct = ((engaged * 10000) / max as u128).min(10000);
+        let running_pct = ((running as u128 * 10000) / max as u128).min(10000);
+        lines.push(
+            "# HELP vtessera_demand_pct Admitted-capacity engagement, basis points ((running+queued)/max_concurrent, capped 10000)"
+                .into(),
+        );
+        lines.push("# TYPE vtessera_demand_pct gauge".into());
+        lines.push(format!("vtessera_demand_pct {demand_pct}"));
+        lines.push(
+            "# HELP vtessera_demand_running_pct Running-slot utilization, basis points (running/max_concurrent, capped 10000)"
+                .into(),
+        );
+        lines.push("# TYPE vtessera_demand_running_pct gauge".into());
+        lines.push(format!("vtessera_demand_running_pct {running_pct}"));
     }
     let offer = state.offer.read().unwrap();
     if let AdvertisedDevice::Cpu { vcpus, mem_mb } = &offer.body.device {
@@ -1008,6 +1030,24 @@ mod tests {
     /// (when the `serve` feature is active), falling back to raw byte
     /// matching for non-serve paths.
     struct FakeRunner;
+
+    /// Runner that blocks inside `run` until `release` flips — occupies an
+    /// execution slot so the demand gauges see a half-engaged queue.
+    struct GateRunner {
+        release: std::sync::Arc<std::sync::Mutex<bool>>,
+    }
+    impl JobRunner for GateRunner {
+        fn run(&self, _body: &[u8]) -> Result<String, JobRunError> {
+            loop {
+                if *self.release.lock().unwrap() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(r#"{"status":"accepted","job_id":"hold"}"#.into())
+        }
+    }
+
     impl JobRunner for FakeRunner {
         fn run(&self, body: &[u8]) -> Result<String, JobRunError> {
             #[cfg(feature = "serve")]
@@ -1786,6 +1826,46 @@ mod tests {
         assert!(body.contains("vtessera_queue_max_depth 16"), "{body}");
         assert!(body.contains("vtessera_queue_running 0"), "{body}");
         assert!(body.contains("vtessera_queue_depth 0"), "{body}");
+        assert!(body.contains("vtessera_demand_pct 0"), "{body}");
+        assert!(body.contains("vtessera_demand_running_pct 0"), "{body}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metrics_demand_gauges_track_held_slot() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("vtq-demand-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let release = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let runner: std::sync::Arc<dyn JobRunner> = std::sync::Arc::new(GateRunner {
+            release: release.clone(),
+        });
+        let q = queue::JobQueue::new(&dir, runner, 2, 8);
+        let mut s = state(PriceQuote::Free);
+        s.queue = Some(q.clone());
+
+        // Occupy one of the two slots on a background thread (the enqueue
+        // fast path runs it synchronously inside GateRunner).
+        let q2 = q.clone();
+        let held = std::thread::spawn(move || {
+            let _ = q2.enqueue("hold", 0, br#"{"job_id":"hold"}"#).unwrap();
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while q.running_count() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(q.running_count(), 1);
+
+        let r = dispatch(&s, req(HttpMethod::Get, "/metrics", vec![]));
+        assert_eq!(r.status, 200);
+        let body = String::from_utf8(r.body).unwrap();
+        // One of two slots: both demand and running utilization report 5000bps.
+        assert!(body.contains("vtessera_demand_pct 5000"), "{body}");
+        assert!(body.contains("vtessera_demand_running_pct 5000"), "{body}");
+
+        *release.lock().unwrap() = true;
+        held.join().unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 

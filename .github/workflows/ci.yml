@@ -63,6 +63,7 @@ jobs:
           cargo clippy -p vtessera-offer-index --features serve --all-targets -- -D warnings
           cargo clippy -p vtessera-settlement --all-targets -- -D warnings
           cargo clippy -p vtessera-capacity --all-targets -- -D warnings
+          cargo clippy -p vtessera-capacity --all-targets --features autoscale -- -D warnings
           cargo clippy -p vtessera-agent --all-targets -- -D warnings
 
       - name: Test module crates
@@ -76,6 +77,7 @@ jobs:
           cargo test -p vtessera-offer-index --features serve --locked
           cargo test -p vtessera-settlement --locked
           cargo test -p vtessera-capacity --locked
+          cargo test -p vtessera-capacity --features autoscale --locked
           cargo test -p vtessera-agent --locked
 
   # ── Heavy: Anchor escrow, adversarial suite, audit, deny ─────────────
