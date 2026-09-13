@@ -90,6 +90,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.4" date="2026-09-13">
+      <description>
+        <p>Usage-based autoscale engine (issue #109 v2): vtessera-capacity --autoscale polls the node's /metrics demand gauges (vtessera_demand_pct, vtessera_demand_running_pct) and scales advertised_vcpus / max_concurrent_jobs between a configured floor and ceiling with hysteresis and cooldown, committing through the same atomic write + JSONL audit log as the file-drop trigger.</p>
+      </description>
+    </release>
     <release version="0.1.3" date="2026-09-13">
       <description>
         <p>Enterprise capacity automation (issue #109): live capacity reconfiguration via capacity.toml (queue concurrency + max queue depth, atomic-drain shrink), live offer re-signing on capacity change (advertised vcpus/mem, price multiplier) with immediate index re-publish and marketplace re-registration; vtessera-capacity file-drop controller binary with atomic commit + JSONL events log; GET /capacity endpoint and vtessera_queue_* / vtessera_offered_* gauges on /metrics; UPnP SOAP 403 policy-denial now yields an actionable router-setting message instead of a generic port-failure log.</p>
