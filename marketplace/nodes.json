@@ -1,57 +1,5 @@
 {
   "version": 1,
-  "updated_at": 1789243968,
-  "nodes": [
-    {
-      "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
-      "offer": {
-        "body": {
-          "device": {
-            "kind": "cpu",
-            "mem_mb": 14738,
-            "vcpus": 16
-          },
-          "endpoint": [
-            "http://192.168.178.22:8402"
-          ],
-          "endpoint_id": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-          "expires_unix": 1791824222,
-          "issued_unix": 1789232222,
-          "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
-          "price": {
-            "mode": "free"
-          },
-          "schema_ver": 2
-        },
-        "pubkey_hex": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-        "sig_hex": "5512a5bcf4033b8fd3f02301dd545bece02e486f6a2210c9eafdfa7598f769c81e1830edea21dcce681c288a134827251ee8e3f4c549ec05c1df20364d4bd800"
-      },
-      "sig_hex": "5512a5bcf4033b8fd3f02301dd545bece02e486f6a2210c9eafdfa7598f769c81e1830edea21dcce681c288a134827251ee8e3f4c549ec05c1df20364d4bd800",
-      "updated_at": 1789243042,
-      "endpoint": [
-        "http://192.168.178.22:8402"
-      ],
-      "endpoint_id": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-      "candidates": [
-        {
-          "addr": "https://euc1-1.relay.n0.iroh.link./",
-          "kind": "relayed",
-          "priority": 50,
-          "transport": "iroh_quic"
-        },
-        {
-          "addr": "192.168.178.22:52440",
-          "kind": "host",
-          "priority": 200,
-          "transport": "iroh_quic"
-        },
-        {
-          "addr": "194.15.80.73:52440",
-          "kind": "host",
-          "priority": 200,
-          "transport": "iroh_quic"
-        }
-      ]
-    }
-  ]
+  "updated_at": 1789269635,
+  "nodes": []
 }
