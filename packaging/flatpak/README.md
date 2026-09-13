@@ -27,6 +27,8 @@ The manifest builds these binaries and installs them to `/app/bin`:
 - `vtessera-agent` — the agent CLI (for `vtessera-agent submit`)
 - `vtessera-coordinator` — the opt-in queue/rendezvous daemon for
   outbound-only nodes (P1.7; not started by default)
+- `vtessera-capacity` — the capacity-automation controller (issue #109):
+  apply/watch a `capacity.toml` file-drop onto a node and audit events
 
 ## Build
 

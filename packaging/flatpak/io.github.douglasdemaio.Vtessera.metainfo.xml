@@ -90,6 +90,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.3" date="2026-09-13">
+      <description>
+        <p>Enterprise capacity automation (issue #109): live capacity reconfiguration via capacity.toml (queue concurrency + max queue depth, atomic-drain shrink), live offer re-signing on capacity change (advertised vcpus/mem, price multiplier) with immediate index re-publish and marketplace re-registration; vtessera-capacity file-drop controller binary with atomic commit + JSONL events log; GET /capacity endpoint and vtessera_queue_* / vtessera_offered_* gauges on /metrics; UPnP SOAP 403 policy-denial now yields an actionable router-setting message instead of a generic port-failure log.</p>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-09-12">
       <description>
         <p>Zero-config connectivity: coordinator dispatch queue and outbound-only nodes over iroh; marketplace nodes.json resolver with dial-by-EndpointId; node-local job queue (200/202/503 admission, status/cancel) with GUI support; marketplace browse + pricing editor in the GUI; kata containerd CRI executor scaffold; vtessera-agent overview command for whole-network visibility; agent queue-rendezvous submit fix.</p>
@@ -104,5 +109,6 @@
   </releases>
   <provides>
     <binary>vtessera-gui</binary>
+    <binary>vtessera-capacity</binary>
   </provides>
 </component>
