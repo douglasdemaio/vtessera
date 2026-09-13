@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789281163,
+  "updated_at": 1789281191,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -8,8 +8,8 @@
         "body": {
           "device": {
             "kind": "cpu",
-            "mem_mb": 4096,
-            "vcpus": 6
+            "mem_mb": 3072,
+            "vcpus": 5
           },
           "endpoint": [],
           "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
@@ -25,10 +25,10 @@
           "schema_ver": 2
         },
         "pubkey_hex": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
-        "sig_hex": "c3fcbd80ad57aa1fdce23ddd70302c369eb15b2db8bdd1a3a48822cf857aa6c7090b575b8973c86b95f49d6af878a1fc6ba6ae23826ab16959bb280748c7d404"
+        "sig_hex": "593e6f33f81d65114c5d457b8b016f61c24056c1cfcc460dea70c60985963ab38ec2a1a102d27f3f9f52916b67c9aa23eeec850d56706da80f9fb0f97c5b4a0d"
       },
-      "sig_hex": "c3fcbd80ad57aa1fdce23ddd70302c369eb15b2db8bdd1a3a48822cf857aa6c7090b575b8973c86b95f49d6af878a1fc6ba6ae23826ab16959bb280748c7d404",
-      "updated_at": 1789281162,
+      "sig_hex": "593e6f33f81d65114c5d457b8b016f61c24056c1cfcc460dea70c60985963ab38ec2a1a102d27f3f9f52916b67c9aa23eeec850d56706da80f9fb0f97c5b4a0d",
+      "updated_at": 1789281191,
       "endpoint": [],
       "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
       "candidates": [
