@@ -156,12 +156,6 @@ const ITER_TIMEOUT: Duration = Duration::from_secs(120);
 const PROGRESS_INTERVAL: u64 = 10;
 
 #[derive(BorshSerialize)]
-struct PayForComputeArgs {
-    job_id: [u8; 32],
-    price_micros: u64,
-}
-
-#[derive(BorshSerialize)]
 struct FinalizeProRataArgs {
     f_micros: u32,
 }
@@ -618,24 +612,14 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
         return o;
     }
     let pay_disc = anchor_disc("pay_for_compute");
-    let pay_args = PayForComputeArgs {
-        job_id,
-        price_micros: price,
-    };
+    // Instruction data after the discriminator: job_id → price_micros →
+    // settlement_authority (raw 32-byte pubkey). The soak decouples the
+    // per-iteration buyer from the settlement authority, so it records
+    // env.payer here — the only key that signs finalize_pro_rata below.
     let mut pay_data = pay_disc.to_vec();
-    if let Err(e) = pay_args
-        .try_to_vec()
-        .map(|v| pay_data.extend_from_slice(&v))
-    {
-        return IterOutcome {
-            iter,
-            action: "pay/encode".into(),
-            price,
-            ok: false,
-            detail: format!("encode pay args failed: {e}"),
-            elapsed_ms: iter_start.elapsed().as_millis() as u64,
-        };
-    }
+    pay_data.extend_from_slice(&job_id);
+    pay_data.extend_from_slice(&price.to_le_bytes());
+    pay_data.extend_from_slice(&env.payer.pubkey().to_bytes());
     let pay_ix = Instruction {
         program_id: env.program_id,
         accounts: vec![

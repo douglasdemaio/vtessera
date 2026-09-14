@@ -3,6 +3,16 @@
 Operational notes and commands for switching a paid `vtessera-node` so its
 x402 flow settles instead of failing `finalize` with `NotSettlementAuthority`.
 
+> **Superseded by the per-contract settlement-authority rework.**
+> Once a program built from the reworked source (`Contract` records its
+> own `settlement_authority` at `pay_for_compute`; `finalize_pro_rata` gates
+> on that, never on `Config`) is deployed, a buyer can settle through **any**
+> deployment that accepted their payment — the config PDA owner is
+> irrelevant. The repoint below only matters for the **currently deployed
+> bytes** (`6jK6…`, `D4iX…`), which still gate on the (seized) config
+> authority. After that redeploy, nodes can keep pointing at whatever
+> program they already verify payments against.
+
 ## Why
 
 The shared escrow program `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` has a
