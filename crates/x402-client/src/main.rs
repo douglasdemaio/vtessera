@@ -9,12 +9,12 @@
 //! 3. Pays on Solana devnet: the buyer's stablecoin moves into the
 //!    escrow program's per-job contract PDA via `pay_for_compute`.
 //! 4. `POST /jobs` again with an `x-payment` proof header — the node
-//!    refuses with 501 while execution is not wired (v0). That's honest:
-//!    the payment is real and sitting in the escrow, so step 5 still
-//!    exercises the money path end to end.
+//!    verifies the SPL transfer on-chain, accepts the job, executes it and
+//!    returns a signed receipt (200).
 //! 5. `finalize_pro_rata` (f = 1.0) drains the escrow to the seller's
 //!    stablecoin ATA in the contract's mint. On devnet the settlement
-//!    authority is the payer.
+//!    authority is the config's pinned key — `--check` verifies it matches
+//!    this payer before any money moves.
 //!
 //! By default the client mints its own test stablecoin so the whole loop
 //! runs with no faucet dependency (devnet-demo's approach). Pass
@@ -22,12 +22,13 @@
 //! USDC `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`) — the payer must
 //! already hold that token, since only Circle can mint it.
 //!
-//! The node's `VerifyAndRun` branch returns 501 Not Implemented until an
-//! executor and an on-chain verifier are wired in (crates/node-api). The
-//! proof is sent anyway so the wire contract is exercised end to end.
+//! The node's `VerifyAndRun` branch verifies the payment proof on-chain and
+//! executes the paid job (no 501 on current nodes). This crate's `--check`
+//! mode runs the same diagnostics the session previously had to do by hand
+//! (offer payout, challenge escrow, config settlement authority, funds).
 //!
-//! Standalone crate (excluded from the host workspace): same pinned
-//! solana-sdk 1.18 tree as `crates/devnet-demo`.
+//! Standalone crate (excluded from the host workspace): pins the solana 3.x
+//! line (see Cargo.toml).
 
 use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -581,8 +582,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match accept_resp.status {
         200 => println!("  (paid job accepted and executed — full x402 flow succeeded)"),
         501 => println!(
-            "  (expected in v0: execution is not wired, so the node refuses. \
-             The payment is in the escrow; finalize releases it.)"
+            "  (legacy node without an executor: proof accepted at the wire level, payment is \
+             in the escrow; finalize releases it.)"
         ),
         other => {
             return Err(
