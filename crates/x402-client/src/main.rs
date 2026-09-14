@@ -633,8 +633,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== FINAL ON-CHAIN STATE ===");
     println!("escrow ATA:  {escrow_after} micros  (expected 0)");
     println!(
-        "seller ATA:  {seller_after} micros  (was {seller_before}, delta {delta} micros)",
-        delta = seller_after - seller_before,
+        "seller ATA:  [REDACTED] (balance change detected: {})",
+        seller_after != seller_before,
     );
     println!(
         "agent SOL:   {:.6} (started {:.6})",
