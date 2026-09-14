@@ -472,6 +472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let seller_before = token_balance(&rpc, &seller_ata)?;
     let pay_disc = anchor_disc("pay_for_compute");
     let pay_args = PayForComputeArgs {
         job_id,
@@ -634,7 +635,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n=== FINAL ON-CHAIN STATE ===");
     println!("escrow ATA:  {escrow_after} micros  (expected 0)");
-    println!("seller ATA:  {seller_after} micros  (expected {price_micros}, f=1.0)");
+    println!(
+        "seller ATA:  {seller_after} micros  (was {seller_before}, delta {delta} micros)",
+        delta = seller_after - seller_before,
+    );
     println!(
         "agent SOL:   {:.6} (started {:.6})",
         post_lamports as f64 / 1e9,
@@ -643,8 +647,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(escrow_after, 0, "escrow should be drained after finalize");
     assert_eq!(
-        seller_after, price_micros,
-        "seller should get the full price at f=1.0"
+        seller_after - seller_before,
+        price_micros,
+        "seller delta should equal price at f=1.0"
     );
 
     println!("\nsuccess: paid {price_micros} micros into the escrow program, node accepted the job, seller paid out.");
