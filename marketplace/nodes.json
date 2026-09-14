@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789372095,
+  "updated_at": 1789375673,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -30,38 +30,26 @@
         "sig_hex": "33ca41e9454a5c4cf40dd60f66aac710510df0d11d202c4a75a8c86d65bc3a423ce33c4af1d51ef217214f61893008d824a277e0e5f01d40996c1f746cd29206"
       },
       "sig_hex": "33ca41e9454a5c4cf40dd60f66aac710510df0d11d202c4a75a8c86d65bc3a423ce33c4af1d51ef217214f61893008d824a277e0e5f01d40996c1f746cd29206",
-      "updated_at": 1789372028,
+      "updated_at": 1789375673,
       "endpoint": [
         "http://192.168.178.82:8402"
       ],
       "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
       "candidates": [
         {
-          "addr": "https://euc1-1.relay.n0.iroh.link./",
-          "kind": "relayed",
-          "priority": 50,
-          "transport": "iroh_quic"
-        },
-        {
-          "addr": "80.245.74.64:44753",
+          "addr": "192.168.178.82:51283",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
         },
         {
-          "addr": "192.168.178.82:44753",
+          "addr": "[2a00:a520:2193:e900:253c:a385:3e55:2c8]:41580",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
         },
         {
-          "addr": "[2a00:a520:2193:e900:253c:a385:3e55:2c8]:39227",
-          "kind": "host",
-          "priority": 200,
-          "transport": "iroh_quic"
-        },
-        {
-          "addr": "[2a00:a520:2193:e900:d3ac:c2ce:2ab0:8ea1]:39227",
+          "addr": "[2a00:a520:2193:e900:d3ac:c2ce:2ab0:8ea1]:41580",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
