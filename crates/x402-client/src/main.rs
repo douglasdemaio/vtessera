@@ -361,10 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.verbose {
         for (label, ata) in [("buyer", &buyer_ata), ("seller", &seller_ata)] {
             match token_account_state(&rpc, ata)? {
-                Some(info) => println!(
-                    "  {label} ATA {ata}: {} micros  mint {}  owner {}",
-                    info.amount, info.mint, info.owner
-                ),
+                Some(_info) => println!("  {label} ATA {ata}: initialized"),
                 None => println!("  {label} ATA {ata}: not initialized yet"),
             }
         }
