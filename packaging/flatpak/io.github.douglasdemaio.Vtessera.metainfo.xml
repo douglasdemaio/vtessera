@@ -90,6 +90,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="1.0" date="2026-09-15">
+      <description>
+        <p>Per-contract settlement authority (issue #115): pay_for_compute records the settlement authority on each Contract, and finalize_pro_rata gates on it instead of the shared Config PDA, so any deployment can settle even after its config was seized. x402-client gains a pre-flight --check plus --program/--verbose for operator verification. BREAKING: pay_for_compute payload changed; escrow program redeployed to a new program ID.</p>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-09-13">
       <description>
         <p>Usage-based autoscale engine (issue #109 v2): vtessera-capacity --autoscale polls the node's /metrics demand gauges (vtessera_demand_pct, vtessera_demand_running_pct) and scales advertised_vcpus / max_concurrent_jobs between a configured floor and ceiling with hysteresis and cooldown, committing through the same atomic write + JSONL audit log as the file-drop trigger.</p>
