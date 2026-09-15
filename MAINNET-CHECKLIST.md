@@ -11,8 +11,9 @@
 > (§6) and audit (§4) are open. Devnet program at
 > `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` is the only deployment
 > and now runs the stablecoin build; program security.txt is published on
-> devnet (`security.json`, metadata PDA
-> `42YbtUqT4w2u2rECYvL5daaaZM7ANkqCsqXG6sH8wvCg`). The devnet config PDA
+> devnet (`security.json` on the `security` seed, JSON per the SPL Program
+> Metadata convention, metadata PDA `A2qRxW339iBPMiNFw7TT56z4SJPsLNEpkv6TXv72nfJs`).
+> The devnet config PDA
 > uses the `vtessera_config_v2` seed with the throwaway CI soak key as
 > settlement authority, so no operator key is used in automation.
 

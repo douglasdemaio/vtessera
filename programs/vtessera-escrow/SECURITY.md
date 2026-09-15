@@ -2,7 +2,8 @@
 
 Program: `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` (devnet)
 On-chain security.txt: Program Metadata seed `security` (metadata PDA
-`42YbtUqT4w2u2rECYvL5daaaZM7ANkqCsqXG6sH8wvCg`)
+`A2qRxW339iBPMiNFw7TT56z4SJPsLNEpkv6TXv72nfJs`; content sourced from
+`security.json`).
 Source: <https://github.com/douglasdemaio/vtessera>
 
 ## Reporting a vulnerability
