@@ -11,7 +11,7 @@ seller in the same stablecoin mint, remainder refunded to the buyer. Flat
 protocol fee: 100,000 lamports SOL. There is no Vtessera token.
 
 Program ID (devnet + localnet):
-`6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`.
+`D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`.
 
 ## Layout quirks — read before running anything
 

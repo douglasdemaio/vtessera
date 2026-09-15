@@ -14,7 +14,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${VTESSERA_PORT:-8490}"
-ESCROW="6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma"
+ESCROW="D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn"
 JOB_ID="settle-demo-$(date +%s)"
 WORK="$(mktemp -d)"
 

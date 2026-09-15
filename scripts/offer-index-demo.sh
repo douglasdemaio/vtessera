@@ -29,7 +29,7 @@ B_PORT="${VTESSERA_B_PORT:-8405}"
 INDEX="http://127.0.0.1:$INDEX_PORT"
 A_URL="http://127.0.0.1:$A_PORT"
 B_URL="http://127.0.0.1:$B_PORT"
-ESCROW="6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma"
+ESCROW="D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn"
 WORK="$(mktemp -d)"
 
 PIDS=""

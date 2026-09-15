@@ -9,7 +9,7 @@
 > 3 decided — **immutable (Option A)**, execution at mainnet deploy via
 > the §3.3 runbook; the devnet program stays upgradeable while the soak
 > (§6) and audit (§4) are open. Devnet program at
-> `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` is the only deployment
+> `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` is the only deployment
 > and now runs the stablecoin build; program security.txt is published on
 > devnet (`security.json`, metadata PDA
 > `42YbtUqT4w2u2rECYvL5daaaZM7ANkqCsqXG6sH8wvCg`). The devnet config PDA
@@ -71,7 +71,7 @@ seller nothing).
       — the production path now pays stablecoin.
 - [x] **1.5** Redeploy to devnet with the new build and run
       `init_config`. **Done** (2026-08-15): in-place upgrade of
-      `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`; `init_config` ran
+      `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`; `init_config` ran
       against the `vtessera_config_v2` seed with the **throwaway CI soak
       key** (`Dtb4KYwzrEUomtWTcBJ1DziTzHbfHDyp9RPmRbjKuGVA`) as
       settlement authority — no operator key is used in automation.
@@ -201,7 +201,7 @@ after deploy.
 - [ ] **3.4** Verify on-chain **at mainnet deploy** — `solana program
       show <MAINNET_PROGRAM_ID>` reports `Authority: None` (immutable)
       after the freeze. **Command validated (2026-08-16):** devnet
-      `solana program show 6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`
+      `solana program show D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`
       reports `Authority: 5vWdYSmcNJnoj2PM8LfLRvnviujnQCT1Eu8Csw6Jzfhs`
       (still upgradeable — the correct pre-freeze state; the freeze
       runs only at mainnet deploy per §3.3).
@@ -302,7 +302,7 @@ fast enough to fix it, or (b) accept the loss.
       >   `tests/adversarial/`
       > - Reproducible `.so` SHA-256:
       >   `f016841145af38ecbbc7b489fa28aaa4b4bcc7412262829e5d6240662581cddf`
-      > - Devnet program ID: `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`
+      > - Devnet program ID: `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`
       >   (stays upgradeable until the audit closes)
       >
       > Findings → GitHub issue, or `douglasdemaio@gmail.com` (48h ack per
