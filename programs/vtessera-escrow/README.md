@@ -13,19 +13,25 @@ completion fraction `f` produced by the settlement crate (Module 3):
 
 ## Fee and Config
 
-The protocol fee configuration lives in a single on-chain `Config` account
-(seed `CONFIG_SEED`), created once by
+The protocol fee is **pinned per contract**: `pay_for_compute` validates
+the fee wallet against the program constant `DEFAULT_FEE_WALLET` and
+records `fee_wallet` + `fee_lamports` (`DEFAULT_FEE_LAMPORTS` = 100_000
+lamports = 0.0001 SOL) on the `Contract` account. `finalize_pro_rata` and
+`cancel_before_start` charge the fee recorded on *that* contract — they
+never read a shared singleton.
+
+A single on-chain `Config` account (seed `CONFIG_SEED`), created once by
 `init_config(config_authority, fee_wallet, fee_lamports)` right after
-deploy. `Config` carries only fee governance: the **config authority**
-can rotate the fee wallet/amount via `update_config` (a mistaken
-`init_config` is recoverable on-chain). It **never gates finalize** —
-every `Contract` records its own **settlement authority** at
-`pay_for_compute` time, so a buyer settles an escrow without depending
-on who initialized the shared config PDA.
+deploy, is kept as a **default / off-chain reference only**. It carries
+the config authority (the key allowed to rotate the reference values via
+`update_config`) but it **never gates finalize and never gates the fee** —
+every `Contract` commits its own settlement authority and fee at
+`pay_for_compute` time, so a buyer settles an escrow without depending on
+who initialized the shared config PDA or what it currently contains.
 
 | Field | Value |
 | ----- | ----- |
-| `settlement_authority` | Config authority — the key allowed to rotate the fee config via `update_config`; does **not** gate finalize |
+| `settlement_authority` | Config authority — the key allowed to rotate the reference config via `update_config`; does **not** gate finalize |
 | `fee_wallet` | `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh` |
 | `fee_lamports` | `100_000` (0.0001 SOL) |
 | `bump` | PDA bump for the `Config` account |
@@ -33,8 +39,10 @@ on who initialized the shared config PDA.
 The flat fee is charged on **every agent↔node transaction** — on
 `pay_for_compute` (buyer), `finalize_pro_rata` (the contract's recorded
 settlement authority), and `cancel_before_start` (buyer) — even when a
-contract never completes. It is skipped when `fee_lamports == 0`;
-`init_config` is not charged (bootstrap).
+contract never completes. It is skipped when the contract's recorded
+`fee_lamports == 0`; `init_config` is not charged (bootstrap). Rotating
+`Config` via `update_config` affects only the reference — in-flight
+contracts keep charging the fee recorded on themselves.
 
 ## Why this crate is outside the host workspace
 
@@ -148,10 +156,12 @@ The program compiles under Anchor 0.30 and is **live on Solana devnet**
 at `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`. The production
 path is `finalize_pro_rata`: the seller is paid in the contract's
 stablecoin mint, the buyer is refunded in the same mint, and the SOL
-fee is charged from the contract's recorded settlement authority. The
-old devnet stub is deleted — there is no swap and no burn. `Config`
-holds only the fee configuration; each `Contract` records its own
-settlement authority at `pay_for_compute` — see `ROADMAP.md` §4d. Full end-to-end pay→run→settle→split
-flow exercised via `crates/devnet-demo` soak runner (20+ successful
-finalizations, 0% failure rate). See `tests/adversarial/` for the fuzz +
-adversarial test suite.
+fee is charged from the contract's recorded settlement authority,
+against the fee each contract committed at `pay_for_compute`. The old
+devnet stub is deleted — there is no swap and no burn. `Config` holds
+only fee governance, kept as an off-chain reference; each `Contract`
+commits its own settlement authority **and its own fee** at
+`pay_for_compute`. Full end-to-end pay→run→settle→split flow exercised
+via `crates/devnet-demo` soak runner (20+ successful finalizations, 0%
+failure rate). See `tests/adversarial/` for the fuzz + adversarial test
+suite.

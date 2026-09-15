@@ -158,10 +158,11 @@ escrow program and a discovery layer; nothing else.
 - **Seller earns:** the same EURC/USDC the buyer paid, in the same mint.
 - **Protocol fee:** flat SOL fee of 100,000 lamports (0.0001 SOL) to
   `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`, charged on
-  `pay_for_compute`, `finalize_pro_rata`, and `cancel_before_start`.
-  The fee wallet, fee amount, and settlement authority live in `Config`
-  at `init_config` and can be rotated afterward via `update_config` by
-  the current settlement authority. See `ROADMAP.md` §0.
+  `pay_for_compute`, `finalize_pro_rata`, and `cancel_before_start`. The
+  fee is pinned by program constants (`DEFAULT_FEE_*`) and committed
+  **per contract** at `pay_for_compute`; finalize/cancel charge what the
+  contract recorded. `Config` mirrors the values as a default/off-chain
+  reference only. See `ROADMAP.md` §0.
 
 ## Consent & disclosure
 

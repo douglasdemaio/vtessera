@@ -48,7 +48,8 @@
 //! | fee on pay | `pay_for_compute_charges_sol_fee` |
 //! | fee on finalize | `finalize_charges_sol_fee` |
 //! | fee on cancel | `cancel_charges_sol_fee` |
-//! | zero fee disables | `zero_fee_disables_fee` |
+//! | fee committed per-contract (not Config) | `fee_committed_per_contract_not_config` |
+//! | fee ignores later config rotation | `fee_charged_ignores_later_config_rotation` |
 //! | wrong fee wallet | `pay_rejects_wrong_fee_wallet` |
 //! | config init + immutability | `init_config_sets_fee_fields`, `config_immutable_after_init` |
 //! | config rotation (update_config) | `update_config_rotation_does_not_revoke_contract_authority`, `update_config_edits_fee_fields`, `update_config_rejects_non_settlement_authority` |
@@ -307,7 +308,6 @@ fn pay_ix(
     buyer_ata: &Pubkey,
     escrow_ata: &Pubkey,
     contract: &Pubkey,
-    config: &Pubkey,
     job_id: [u8; 32],
     price: u64,
     settlement_authority: &Pubkey,
@@ -326,7 +326,6 @@ fn pay_ix(
             AccountMeta::new(*escrow_ata, false),
             AccountMeta::new(*contract, false),
             AccountMeta::new(fee_wallet(), false),
-            AccountMeta::new_readonly(*config, false),
             AccountMeta::new_readonly(token_prog(), false),
             AccountMeta::new_readonly(solana_system_interface::program::id(), false),
         ],
@@ -337,7 +336,6 @@ fn pay_ix(
 #[allow(clippy::too_many_arguments)]
 fn finalize_ix(
     sa: &Pubkey,
-    config: &Pubkey,
     contract: &Pubkey,
     escrow_stable: &Pubkey,
     buyer_stable: &Pubkey,
@@ -350,7 +348,6 @@ fn finalize_ix(
         program_id: prog(),
         accounts: vec![
             AccountMeta::new(*sa, true),
-            AccountMeta::new_readonly(*config, false),
             AccountMeta::new(*contract, false),
             AccountMeta::new(*escrow_stable, false),
             AccountMeta::new(*buyer_stable, false),
@@ -368,7 +365,6 @@ fn cancel_ix(
     contract: &Pubkey,
     escrow_stable: &Pubkey,
     buyer_stable: &Pubkey,
-    config: &Pubkey,
 ) -> Instruction {
     Instruction {
         program_id: prog(),
@@ -378,7 +374,6 @@ fn cancel_ix(
             AccountMeta::new(*escrow_stable, false),
             AccountMeta::new(*buyer_stable, false),
             AccountMeta::new(fee_wallet(), false),
-            AccountMeta::new_readonly(*config, false),
             AccountMeta::new_readonly(token_prog(), false),
             AccountMeta::new_readonly(solana_system_interface::program::id(), false),
         ],
@@ -537,7 +532,6 @@ impl Harness {
             &self.buyer_stable,
             &self.escrow_stable,
             &self.contract,
-            &self.config,
             self.job_id,
             price,
             settlement_authority,
@@ -605,10 +599,22 @@ impl Harness {
         u64::from_le_bytes(acct.data[72..80].try_into().unwrap())
     }
 
+    /// The fee wallet recorded on the contract at `pay_for_compute` time —
+    /// the per-contract commitment that finalize / cancel charge, not the
+    /// shared `Config` singleton.
+    fn contract_fee_wallet(&self) -> Pubkey {
+        let acct = self.svm.get_account(&self.contract).unwrap();
+        Pubkey::new_from_array(acct.data[177..209].try_into().unwrap())
+    }
+
+    fn contract_fee_lamports(&self) -> u64 {
+        let acct = self.svm.get_account(&self.contract).unwrap();
+        u64::from_le_bytes(acct.data[209..217].try_into().unwrap())
+    }
+
     fn finalize_tx(&self, sa: &Keypair, f_micros: u32) -> Transaction {
         let ix = finalize_ix(
             &sa.pubkey(),
-            &self.config,
             &self.contract,
             &self.escrow_stable,
             &self.buyer_stable,
@@ -629,7 +635,6 @@ impl Harness {
             &self.contract,
             &self.escrow_stable,
             &self.buyer_stable,
-            &self.config,
         );
         Transaction::new_signed_with_payer(
             &[ix],
@@ -753,7 +758,6 @@ fn update_config_rotation_does_not_revoke_contract_authority() {
     assert_eq!(h.config_fee_wallet(), fee_wallet());
     assert_eq!(h.config_fee_lamports(), FEE_LAMPORTS);
 
-    let config = h.config;
     let contract = h.contract;
     let escrow_stable = h.escrow_stable;
     let buyer_stable = h.buyer_stable;
@@ -763,7 +767,6 @@ fn update_config_rotation_does_not_revoke_contract_authority() {
         Transaction::new_signed_with_payer(
             &[finalize_ix(
                 &sa.pubkey(),
-                &config,
                 &contract,
                 &escrow_stable,
                 &buyer_stable,
@@ -788,8 +791,9 @@ fn update_config_rotation_does_not_revoke_contract_authority() {
 
 #[test]
 fn update_config_edits_fee_fields() {
-    // Fee wallet and per-transaction fee can be changed by the current
-    // settlement authority.
+    // `update_config` still edits the Config account (kept as the
+    // default/off-chain reference), but the edit does not affect any
+    // in-flight contract — per-contract fees were committed at pay time.
     let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
     let new_wallet = Keypair::new().pubkey();
 
@@ -885,18 +889,64 @@ fn cancel_charges_sol_fee() {
 }
 
 #[test]
-fn zero_fee_disables_fee() {
-    // A config pinned with fee_lamports = 0 means the fee is skipped.
+fn fee_committed_per_contract_not_config() {
+    // The fee is a per-contract commitment, not a shared-singleton read:
+    // even when `Config` pins fee_lamports = 0, `pay_for_compute` still
+    // charges the program's `DEFAULT_FEE_LAMPORTS` and records it on the
+    // contract, because the fee no longer comes from `Config`.
     let mut h = Harness::setup_only_with_fee(BUYER_MINT_AMOUNT, 0);
     let wallet_before = h.sol_balance(&fee_wallet());
     h.pay(PAY_PRICE);
-    assert_eq!(h.sol_balance(&fee_wallet()), wallet_before);
+    assert_eq!(
+        h.sol_balance(&fee_wallet()),
+        wallet_before + FEE_LAMPORTS,
+        "pay must charge the per-contract fee even when Config fee is 0"
+    );
     assert_eq!(h.config_fee_lamports(), 0);
+    assert_eq!(h.contract_fee_wallet(), fee_wallet());
+    assert_eq!(h.contract_fee_lamports(), FEE_LAMPORTS);
+}
+
+#[test]
+fn fee_charged_ignores_later_config_rotation() {
+    // Settlement charges the fee recorded on *this* contract at pay time —
+    // rotating Config's fee later (even to another wallet / zero) must not
+    // change what finalize charges for the already-paid escrow.
+    let mut h = Harness::new_with(PAY_PRICE, BUYER_MINT_AMOUNT);
+    let new_wallet = Keypair::new().pubkey();
+    let ix = update_config_ix(
+        &h.payer.pubkey(),
+        &h.config,
+        &h.payer.pubkey(),
+        &new_wallet,
+        0,
+    );
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&h.payer.pubkey()),
+        &[&h.payer],
+        h.svm.latest_blockhash(),
+    );
+    h.svm.send_transaction(tx).unwrap();
+    assert_eq!(h.config_fee_wallet(), new_wallet);
+    assert_eq!(h.config_fee_lamports(), 0);
+
+    let wallet_before = h.sol_balance(&fee_wallet());
+    h.svm
+        .send_transaction(h.finalize_tx(&h.payer, 1_000_000))
+        .unwrap();
+    assert_eq!(
+        h.sol_balance(&fee_wallet()),
+        wallet_before + FEE_LAMPORTS,
+        "finalize must charge the contract's recorded fee, not Config's"
+    );
 }
 
 #[test]
 fn pay_rejects_wrong_fee_wallet() {
-    // The passed fee-wallet account must match the wallet pinned in Config.
+    // The passed fee-wallet account must match the program-pinned
+    // `DEFAULT_FEE_WALLET` (the fee is a per-contract commitment, not a
+    // mutable singleton read).
     let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
     let impostor = Keypair::new();
     h.svm.airdrop(&impostor.pubkey(), 1_000_000_000).unwrap();
@@ -915,7 +965,6 @@ fn pay_rejects_wrong_fee_wallet() {
                 AccountMeta::new(h.escrow_stable, false),
                 AccountMeta::new(h.contract, false),
                 AccountMeta::new(impostor.pubkey(), false),
-                AccountMeta::new_readonly(h.config, false),
                 AccountMeta::new_readonly(token_prog(), false),
                 AccountMeta::new_readonly(solana_system_interface::program::id(), false),
             ],
@@ -943,7 +992,6 @@ fn pay_zero_price_reverts() {
         &h.buyer_stable,
         &h.escrow_stable,
         &h.contract,
-        &h.config,
         h.job_id,
         0,
         &h.payer.pubkey(),
@@ -970,7 +1018,6 @@ fn pay_same_job_id_twice_fails() {
         &h.buyer_stable,
         &h.escrow_stable,
         &h.contract,
-        &h.config,
         h.job_id,
         PAY_PRICE,
         &h.payer.pubkey(),
@@ -997,7 +1044,6 @@ fn pay_rejects_buyer_ata_with_wrong_mint() {
         &alt_buyer_ata, // …but buyer ATA denominated in the alt mint
         &h.escrow_stable,
         &h.contract,
-        &h.config,
         h.job_id,
         PAY_PRICE,
         &h.payer.pubkey(),
@@ -1031,7 +1077,6 @@ fn pay_rejects_buyer_ata_with_wrong_owner() {
         &attacker_ata, // ATA owned by attacker, not the buyer signer
         &h.escrow_stable,
         &h.contract,
-        &h.config,
         h.job_id,
         PAY_PRICE,
         &h.payer.pubkey(),
@@ -1213,7 +1258,6 @@ fn cancel_before_start_rejects_non_buyer() {
         &h.contract,
         &h.escrow_stable,
         &h.buyer_stable,
-        &h.config,
     );
     let tx = Transaction::new_signed_with_payer(
         &[ix],

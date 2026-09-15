@@ -8,7 +8,12 @@ description: Build, test, and deploy the vtessera-escrow Anchor program (program
 One Solana Anchor program: buyer's EURC/USDC enters a program-owned escrow
 PDA; on finalize it splits by completion fraction `f` — earned slice to the
 seller in the same stablecoin mint, remainder refunded to the buyer. Flat
-protocol fee: 100,000 lamports SOL. There is no Vtessera token.
+protocol fee: 100,000 lamports SOL, **committed per contract** at
+`pay_for_compute` (pinned by the `DEFAULT_FEE_WALLET` /
+`DEFAULT_FEE_LAMPORTS` constants, recorded on the `Contract` account) —
+finalize/cancel charge the fee on the contract, never the shared `Config`
+singleton (`Config` is a default/off-chain reference only). There is no
+Vtessera token.
 
 Program ID (devnet + localnet):
 `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`.
@@ -62,4 +67,7 @@ and the repo drift apart until the next deploy; say so in the PR.
 The IDL consumed by clients changes too: rebuild (`anchor build`
 regenerates the IDL) and check `crates/devnet-demo`, `crates/x402-client`,
 and `crates/settlement` for instruction/account layout assumptions that
-must move in lockstep.
+must move in lockstep. Note the three settlement instructions
+(`pay_for_compute`, `finalize_pro_rata`, `cancel_before_start`) take **no
+`config` account** — they never read `Config`. `init_config` /
+`update_config` are the only Config-touching instructions.

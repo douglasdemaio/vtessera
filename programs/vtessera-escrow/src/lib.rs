@@ -5,10 +5,12 @@
 //! PDA** and leaves only by on-chain rules:
 //!
 //! - `pay_for_compute` deposits the contract price into the PDA and
-//!   transfers a small flat SOL fee to the configured protocol fee
-//!   wallet (0.0001 SOL, read from `Config`). It also records the
-//!   **per-contract settlement authority** — the key allowed to
-//!   finalize this specific contract — into the `Contract` account.
+//!   transfers a small flat SOL fee to the protocol fee wallet
+//!   (0.0001 SOL, pinned by the `DEFAULT_FEE_*` program constants). It
+//!   also records the **per-contract settlement authority** and the
+//!   **per-contract fee** (wallet + lamports) into the `Contract`
+//!   account — the fee is committed on the individual escrow, not read
+//!   from a shared `Config`.
 //! - `finalize_pro_rata` accepts the completion fraction `f` produced
 //!   by the settlement crate (Module 3) and splits the escrow **in the
 //!   same stablecoin**: the seller's earned slice `f × price` is paid
@@ -16,7 +18,8 @@
 //!   `(1 − f) × price` is refunded to the buyer. There is no HNT, no
 //!   token swap, no price oracle, and no burn — the protocol never
 //!   mints or holds any token of its own. The finalize call itself also
-//!   carries the flat SOL protocol fee (payer = settlement authority).
+//!   carries the flat SOL protocol fee (payer = settlement authority),
+//!   charged against the fee recorded on the contract at payment.
 //! - `cancel_before_start` lets a buyer reclaim the escrow with `f = 0`
 //!   if the seller never started the job. It pays the flat SOL protocol
 //!   fee too (payer = buyer) — the fee is per transaction, even when a
@@ -27,7 +30,10 @@
 //!   (the key allowed to rotate the fee config). There are no
 //!   governance tokens; the current authority can later rotate the
 //!   config via `update_config`, so a mistaken `init_config` value is
-//!   recoverable on-chain instead of forcing a redeploy.
+//!   recoverable on-chain instead of forcing a redeploy. On-chain
+//!   settlement no longer reads `Config` for the fee — it is a
+//!   default/off-chain reference only; every contract records its own
+//!   fee at payment.
 //!
 //! **Authority model:** `Config` never gates finalize. Every contract
 //! records its own settlement authority at `pay_for_compute` time, so a
@@ -35,7 +41,9 @@
 //! shared singleton `Config` account (e.g. a deployment whose config was
 //! seized by a throwaway CI key). The seller node verifies the recorded
 //! authority before running a paid job; the recorded key is what later
-//! signs `finalize_pro_rata`.
+//! signs `finalize_pro_rata`. The **fee** is committed the same way: each
+//! contract records its fee wallet + lamports at payment, and finalize /
+//! cancel charge that per-contract fee — never the shared singleton.
 
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
@@ -51,9 +59,9 @@ pub const CONFIG_SEED: &[u8] = b"vtessera_config_v2";
 pub const CONTRACT_SEED: &[u8] = b"contract";
 
 /// Default protocol fee wallet — the operator's SOL address. The value
-/// actually used on-chain is whatever `init_config` stored in `Config`;
-/// this constant only exists so off-chain tooling and tests have a
-/// canonical reference.
+/// actually charged on-chain is validated against this constant at
+/// `pay_for_compute` and recorded per contract; `init_config` may store
+/// any value but settlement never consults `Config` for the fee.
 pub const DEFAULT_FEE_WALLET: Pubkey = pubkey!("J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh");
 
 /// Default protocol fee per transaction, in lamports (0.0001 SOL).
@@ -68,8 +76,10 @@ pub mod vtessera_escrow {
     /// once right after deploy by whoever holds the deployer key. The
     /// account can later be rotated by the current authority via
     /// `update_config`, so all three values are recoverable after a
-    /// mistaken init. `Config` does **not** gate finalize — settlement
-    /// authority is recorded per contract at `pay_for_compute` time.
+    /// mistaken init. `Config` serves as a default/off-chain reference
+    /// only — it does **not** gate finalize, and settlement no longer
+    /// reads it for the fee (each contract records its own fee at
+    /// `pay_for_compute`).
     ///
     /// **Race note:** `init` fails if the account already exists, and
     /// anyone may call this first. The config PDA is derivable from the
@@ -95,8 +105,10 @@ pub mod vtessera_escrow {
 
     /// Rotate the protocol config — config authority, fee wallet, and/or
     /// per-transaction fee — **without redeploying**. Only the current
-    /// config authority may call this, so a wrong `init_config` is not
-    /// permanently fatal (previously changing these required a redeploy).
+    /// config authority may call this. This updates the default/off-chain
+    /// reference only: per-contract fees are committed to each `Contract`
+    /// account at `pay_for_compute` and are never re-read from `Config`,
+    /// so rotating here does not alter any escrow.
     ///
     /// Each field is set unconditionally from the args; pass the existing
     /// value for any field you want to leave unchanged. `Config` is a fixed
@@ -117,10 +129,14 @@ pub mod vtessera_escrow {
     /// Deposit the contract price into the escrow PDA and pay the flat
     /// protocol fee. Atomic — either both happen or neither. Also records
     /// the per-contract `settlement_authority` — the key allowed to call
-    /// `finalize_pro_rata` for this contract. The buyer names it (in the
+    /// `finalize_pro_rata` for this contract — and the per-contract
+    /// **fee** (wallet + lamports). The buyer names the authority (in the
     /// standard flow the node's offer advertises who settles, and the
     /// buyer pins that key); it does not have to be the buyer itself, and
-    /// it is **not** derived from the shared `Config` account.
+    /// it is **not** derived from the shared `Config` account. The fee
+    /// terms are likewise pinned to the `DEFAULT_FEE_*` program constants
+    /// and recorded on the contract, so finalize / cancel charge what was
+    /// committed to this escrow — never the shared singleton.
     pub fn pay_for_compute(
         ctx: Context<PayForCompute>,
         job_id: [u8; 32],
@@ -141,7 +157,7 @@ pub mod vtessera_escrow {
             &ctx.accounts.buyer,
             &ctx.accounts.fee_wallet,
             &ctx.accounts.system_program,
-            ctx.accounts.config.fee_lamports,
+            DEFAULT_FEE_LAMPORTS,
         )?;
 
         let contract = &mut ctx.accounts.contract;
@@ -155,6 +171,8 @@ pub mod vtessera_escrow {
         // to pass the mint account in again. Stablecoin decimals are a
         // mint property and immutable for these mints.
         contract.stablecoin_decimals = ctx.accounts.stablecoin_mint.decimals;
+        contract.fee_wallet = ctx.accounts.fee_wallet.key();
+        contract.fee_lamports = DEFAULT_FEE_LAMPORTS;
         contract.finalized = false;
         contract.bump = ctx.bumps.contract;
 
@@ -221,7 +239,7 @@ pub mod vtessera_escrow {
             &ctx.accounts.settlement_authority,
             &ctx.accounts.fee_wallet,
             &ctx.accounts.system_program,
-            ctx.accounts.config.fee_lamports,
+            ctx.accounts.contract.fee_lamports,
         )?;
 
         ctx.accounts.contract.finalized = true;
@@ -264,7 +282,7 @@ pub mod vtessera_escrow {
             &ctx.accounts.buyer,
             &ctx.accounts.fee_wallet,
             &ctx.accounts.system_program,
-            ctx.accounts.config.fee_lamports,
+            ctx.accounts.contract.fee_lamports,
         )?;
 
         ctx.accounts.contract.finalized = true;
@@ -336,12 +354,21 @@ pub struct Contract {
     pub price_micros: u64,
     pub stablecoin_mint: Pubkey,
     pub stablecoin_decimals: u8,
+    /// Per-contract protocol fee wallet, committed at `pay_for_compute`
+    /// and validated against `DEFAULT_FEE_WALLET`. `finalize_pro_rata`
+    /// and `cancel_before_start` charge this wallet — never the shared
+    /// `Config` singleton.
+    pub fee_wallet: Pubkey,
+    /// Per-contract protocol fee in lamports, committed at
+    /// `pay_for_compute` and pinned to `DEFAULT_FEE_LAMPORTS`. `fee == 0`
+    /// disables the fee entirely; `charge_fee` reads this per contract.
+    pub fee_lamports: u64,
     pub finalized: bool,
     pub bump: u8,
 }
 
 impl Contract {
-    pub const LEN: usize = 32 + 32 + 32 + 32 + 8 + 32 + 1 + 1 + 1;
+    pub const LEN: usize = 32 + 32 + 32 + 32 + 8 + 32 + 1 + 32 + 8 + 1 + 1;
 }
 
 #[derive(Accounts)]
@@ -418,18 +445,13 @@ pub struct PayForCompute<'info> {
     pub contract: Account<'info, Contract>,
 
     /// CHECK: Receiver of the flat SOL protocol fee. Validated against
-    /// the fee wallet pinned in `Config`.
+    /// the program-pinned `DEFAULT_FEE_WALLET`, and recorded into the
+    /// contract so finalize / cancel charge what this escrow committed.
     #[account(
         mut,
-        constraint = fee_wallet.key() == config.fee_wallet @ EscrowError::WrongFeeWallet,
+        constraint = fee_wallet.key() == DEFAULT_FEE_WALLET @ EscrowError::WrongFeeWallet,
     )]
     pub fee_wallet: AccountInfo<'info>,
-
-    #[account(
-        seeds = [CONFIG_SEED],
-        bump = config.bump,
-    )]
-    pub config: Account<'info, Config>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -444,14 +466,6 @@ pub struct FinalizePro<'info> {
     /// time). Signs the finalize and pays the flat SOL protocol fee.
     #[account(mut)]
     pub settlement_authority: Signer<'info>,
-
-    /// Protocol fee config (fee wallet + amount). `Config` no longer
-    /// gates authorization — it is read only for the fee.
-    #[account(
-        seeds = [CONFIG_SEED],
-        bump = config.bump,
-    )]
-    pub config: Account<'info, Config>,
 
     #[account(
         mut,
@@ -483,11 +497,11 @@ pub struct FinalizePro<'info> {
     )]
     pub seller_stablecoin_ata: Box<Account<'info, TokenAccount>>,
 
-    /// Receiver of the flat SOL protocol fee. Validated against the fee
-    /// wallet pinned in `Config`.
+    /// Receiver of the flat SOL protocol fee. Validated against the
+    /// fee wallet recorded on this contract at `pay_for_compute` time.
     #[account(
         mut,
-        constraint = fee_wallet.key() == config.fee_wallet @ EscrowError::WrongFeeWallet,
+        constraint = fee_wallet.key() == contract.fee_wallet @ EscrowError::WrongFeeWallet,
     )]
     pub fee_wallet: AccountInfo<'info>,
 
@@ -522,19 +536,13 @@ pub struct CancelBeforeStart<'info> {
     )]
     pub buyer_stablecoin_ata: Account<'info, TokenAccount>,
 
-    /// Receiver of the flat SOL protocol fee. Validated against the fee
-    /// wallet pinned in `Config`.
+    /// Receiver of the flat SOL protocol fee. Validated against the
+    /// fee wallet recorded on this contract at `pay_for_compute` time.
     #[account(
         mut,
-        constraint = fee_wallet.key() == config.fee_wallet @ EscrowError::WrongFeeWallet,
+        constraint = fee_wallet.key() == contract.fee_wallet @ EscrowError::WrongFeeWallet,
     )]
     pub fee_wallet: AccountInfo<'info>,
-
-    #[account(
-        seeds = [CONFIG_SEED],
-        bump = config.bump,
-    )]
-    pub config: Account<'info, Config>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -606,7 +614,10 @@ mod tests {
 
     #[test]
     fn contract_len_matches_field_sizes() {
-        assert_eq!(Contract::LEN, 32 + 32 + 32 + 32 + 8 + 32 + 1 + 1 + 1);
+        assert_eq!(
+            Contract::LEN,
+            32 + 32 + 32 + 32 + 8 + 32 + 1 + 32 + 8 + 1 + 1
+        );
     }
 
     #[test]
