@@ -58,7 +58,7 @@ use spl_associated_token_account::{
 use spl_token_interface::state::{Account as TokenAccount, Mint};
 
 /// Devnet escrow program ID — see ROADMAP.md §0, programs/Anchor.toml.
-const PROGRAM_ID_STR: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
+const PROGRAM_ID_STR: &str = "D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn";
 /// Protocol fee wallet from the design spec. Drives a real lamport
 /// transfer on devnet so the IX exercises every account in the production
 /// graph. The program validates it against the wallet pinned in `Config`.

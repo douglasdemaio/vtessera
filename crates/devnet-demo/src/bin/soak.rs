@@ -105,7 +105,7 @@ use spl_token_interface::state::{Account as TokenAccount, Mint};
 // hand-rolled Anchor encoding. Kept separate (not shared) because the
 // demo's file is intentionally self-contained; see its module comment.
 
-const PROGRAM_ID_STR: &str = "6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma";
+const PROGRAM_ID_STR: &str = "D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn";
 /// Protocol fee wallet from the design spec. Driven by the lamport
 /// transfer in every pay/finalize/cancel.
 const FEE_WALLET_STR: &str = "J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh";

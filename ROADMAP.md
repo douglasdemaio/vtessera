@@ -597,7 +597,7 @@ status reflects the whole project as modules come online.
 ### Devnet status
 
 The escrow program is **live on Solana devnet** at
-**`6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`** (program ID;
+**`D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`** (program ID;
 ProgramData `Gvu3Vb4ZhxnHV33KCZHcgmWWFyVUXjQ7ocW1KjjiRuuh`).
 
 The full pay → run → settle → split flow has been exercised end-to-end

@@ -73,7 +73,7 @@ cargo run -q -p vtessera-node-api --locked --example gen_offer \
     -- free --seed 42 --endpoint "queue:$COORD_ADDR" --key-out "$WORK/key.bin" > "$WORK/offer.json"
 "$ROOT/target/debug/vtessera-node" \
     --bind 127.0.0.1:1 --offer "$WORK/offer.json" \
-    --escrow 6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma --network solana-devnet \
+    --escrow D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn --network solana-devnet \
     --backend noop-cpu --key "$WORK/key.bin" --state-dir "$STATE" \
     --connectivity outbound-only \
     --coordinator-addr "$COORD_ADDR" --coordinator-poll 1 \
