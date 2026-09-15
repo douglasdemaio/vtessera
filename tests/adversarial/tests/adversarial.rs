@@ -758,7 +758,6 @@ fn update_config_rotation_does_not_revoke_contract_authority() {
     assert_eq!(h.config_fee_wallet(), fee_wallet());
     assert_eq!(h.config_fee_lamports(), FEE_LAMPORTS);
 
-    let config = h.config;
     let contract = h.contract;
     let escrow_stable = h.escrow_stable;
     let buyer_stable = h.buyer_stable;
