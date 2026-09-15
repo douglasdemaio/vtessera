@@ -147,10 +147,12 @@ Documented in `programs/vtessera-escrow/SECURITY.md` and
 
 ### 3.2 The flat fee
 
-The fee is a flat **100,000 lamports = 0.0001 SOL** per transaction, set in
-`Config` at `init_config`, immutable after deploy. It is charged on
-`pay_for_compute`, `finalize_pro_rata`, and `cancel_before_start` — including
-`cancel_before_start` on a contract that never completed. Skipped when
+The fee is a flat **100,000 lamports = 0.0001 SOL** per transaction, pinned by
+the program's `DEFAULT_FEE_*` constants and committed **per contract** at
+`pay_for_compute`; `Config` mirrors the values as a default/off-chain
+reference. It is charged on `pay_for_compute`, `finalize_pro_rata`, and
+`cancel_before_start` — including `cancel_before_start` on a contract
+that never completed. Skipped when the contract's recorded
 `fee_lamports == 0` (that escape hatch is for local testing). Documented in
 `README.md` ("Currencies") and `ROADMAP.md` §0.
 

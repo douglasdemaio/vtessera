@@ -65,8 +65,11 @@ seller nothing).
 - [x] **1.3** Per-transaction SOL fee (100,000 lamports) charged on
       `pay_for_compute` (buyer), `finalize_pro_rata` (settlement
       authority), and `cancel_before_start` (buyer), paid to
-      `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`; skipped when
-      `fee_lamports == 0`.
+      `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`. Under the
+      per-contract commitment model the fee is pinned by the
+      `DEFAULT_FEE_*` constants and recorded on each `Contract` at `pay`;
+      finalize/cancel charge that contract's record (never a shared
+      singleton), and a recorded `fee_lamports == 0` skips the fee.
 - [x] **1.4** The devnet bypass (the stub finalize instruction) deleted
       — the production path now pays stablecoin.
 - [x] **1.5** Redeploy to devnet with the new build and run
@@ -134,11 +137,13 @@ can slip through.
             the settlement_authority → fails
       - Plus §2.4 additions: fee charged on `pay_for_compute` (buyer
         SOL down by `fee_lamports`, fee wallet up), fee charged on
-        finalize, fee charged on cancel, `fee_lamports = 0` disables
-        the fee, `init_config` sets the fee fields, Config immutable
-        after init (no update instruction), fraction=0 refund-only,
-        finalize happy path (seller paid in stablecoin, escrow drained,
-        buyer refunded), buyer unilateral cancel.
+        finalize, fee charged on cancel, fee committed **per contract**
+        at `pay_for_compute` (`fee_committed_per_contract_not_config`,
+        `fee_charged_ignores_later_config_rotation`), `init_config` sets
+        the config reference fields, Config immutable after init (no
+        update instruction), fraction=0 refund-only, finalize happy path
+        (seller paid in stablecoin, escrow drained, buyer refunded),
+        buyer unilateral cancel.
 - [x] **2.3** Wire into CI — every push runs the harness.
       **Done:** `.github/workflows/ci.yml` installs Agave 3.1.14 + Anchor
       0.30.1, runs `anchor build`, the program's unit tests (which pin

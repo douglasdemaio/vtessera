@@ -242,17 +242,18 @@ new walled garden.
 - **FR-C1** `pay_for_compute`: atomically deposit the contract price in
   stablecoin into a program-owned **escrow PDA** and transfer the **flat
   SOL fee** (100,000 lamports / 0.0001 SOL) to the protocol fee wallet
-  (`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`, stored in immutable
-  `Config`).
+  (`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`, pinned by the
+  `DEFAULT_FEE_*` constants and committed **per contract** at payment).
 - **FR-C2** `finalize_pro_rata`: split the escrow **strictly by `f`** —
   `f × price` to the seller's ATA in the same mint; `(1 − f) × price`
   refunded to the buyer in the original stablecoin.
 - **FR-C3** `cancel_before_start`: full refund to buyer; fee still
   collected on the transaction.
-- **FR-C4** Only the **settlement authority** (operator key pinned in
-  `Config` at deploy) may invoke `finalize_pro_rata`.
-- **FR-C5** Disable the fee when `fee_lamports == 0`; charge **once per
-  job/session** (never per x402 micro-payment).
+- **FR-C4** Only the **per-contract settlement authority** (recorded on
+  the `Contract` at `pay_for_compute`, not a shared `Config` key) may
+  invoke `finalize_pro_rata` for that contract.
+- **FR-C5** Skip the fee when a contract's recorded `fee_lamports == 0`;
+  charge **once per job/session** (never per x402 micro-payment).
 - **FR-C6** The program is **immutable** before mainnet (no upgrade-key
   custodian); no governance instructions.
 

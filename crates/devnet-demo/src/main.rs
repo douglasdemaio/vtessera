@@ -346,7 +346,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   escrow_stablecoin_ata (mut)
     //   contract (init, mut)
     //   fee_wallet (mut)
-    //   config
     //   token_program
     //   system_program
     let pay_ix = Instruction {
@@ -359,7 +358,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(fee_wallet, false),
-            AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
         ],
@@ -399,7 +397,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Anchor account order in FinalizePro:
     //   settlement_authority (signer, mut)
-    //   config
     //   contract (mut)
     //   escrow_stablecoin_ata (mut)
     //   buyer_stablecoin_ata (mut)
@@ -411,7 +408,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         program_id,
         accounts: vec![
             AccountMeta::new(payer.pubkey(), true), // settlement authority = payer (devnet)
-            AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(buyer_ata, false),

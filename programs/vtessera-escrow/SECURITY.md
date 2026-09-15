@@ -18,19 +18,24 @@ stablecoin (EURC or USDC, whichever mint the buyer's offer specifies)
 in a program-owned PDA and distributes it by on-chain rules:
 
 - `init_config(config_authority, fee_wallet, fee_lamports)` — creates the
-  single `Config` account (config authority, fee wallet, fee lamports).
-- `update_config(…)` — the config authority can rotate the fee config
-  without redeploying. `Config` does **not** gate finalize.
+  single `Config` account (config authority, fee wallet, fee lamports),
+  kept as a default/off-chain reference only.
+- `update_config(…)` — the config authority can rotate the reference
+  config without redeploying. `Config` neither gates finalize nor gates
+  the fee: every contract commits its own fee at `pay_for_compute`.
 - `pay_for_compute(job_id, price_micros, settlement_authority)` — deposits
   price into the escrow PDA and records the **per-contract settlement
-  authority** (the key allowed to finalize this job); charges the flat
-  SOL fee (default 100,000 lamports).
+  authority** (the key allowed to finalize this job) **and the
+  per-contract fee** (wallet validated against `DEFAULT_FEE_WALLET`,
+  amount pinned to `DEFAULT_FEE_LAMPORTS`); charges the flat SOL fee
+  (100,000 lamports).
 - `finalize_pro_rata(f_micros)` — pays seller `f × price` and refunds
-  buyer `(1 − f) × price`, both in the contract's mint; charges fee.
-  Signed by the **contract's recorded** settlement authority.
+  buyer `(1 − f) × price`, both in the contract's mint; charges the fee
+  recorded on the contract. Signed by the **contract's recorded**
+  settlement authority.
 - `cancel_before_start` — buyer reclaims full escrow at `f = 0` before
-  finalize; charges fee (per-transaction fee even on never-completed
-  contracts).
+  finalize; charges the contract's recorded fee (per-transaction fee even
+  on never-completed contracts).
 
 There is **no swap, no price oracle, no burn, and no governance token**.
 The program never mints or holds a token of its own; stablecoin flows
@@ -51,9 +56,10 @@ only between the buyer's ATA, the escrow PDA, and the seller's ATA.
   `Config` account — devnet deployments whose config was seized by a
   throwaway CI key still settle normally. Mainnet plan pins a Squads
   vault as the recorded authority (MAINNET-CHECKLIST §3).
-- **Config authority** (`Config.settlement_authority`) — only gates
-  `update_config` (fee configuration). It has no power over escrowed
-  funds.
+- `Config` authority (`Config.settlement_authority`) — only gates
+  `update_config` (the reference fee config). It has no power over
+  escrowed funds and no power over the fee any contract charges (each
+  contract commits its own fee at `pay_for_compute`).
 - **Upgrade authority** — until the program is made immutable (mainnet
   decision: Option A, `set-upgrade-authority --final`), whoever holds
   this keypair can replace the on-chain bytecode with anything. On
@@ -96,7 +102,10 @@ Coverage in `tests/adversarial/tests/adversarial.rs`:
   contract's recorded authority (the recorded authority still settles)
 - `cancel_before_start` by a non-buyer → signer check
 - `cancel_before_start` after finalize → `AlreadyFinal`
-- fee charged on pay / finalize / cancel, `fee_lamports = 0` disables it
+- fee charged on pay / finalize / cancel, committed **per contract** at
+  `pay_for_compute` (`fee_committed_per_contract_not_config`,
+  `fee_charged_ignores_later_config_rotation`) — rotating `Config` after
+  payment does not change what finalize charges
 - math: `price = u64::MAX, f = 999_999` (no silent overflow) and
   `price = 1, f = 1` (consistent rounding) — u128 checked arithmetic
 - `update_config` signed by a non-config-authority → `NotSettlementAuthority`
@@ -111,18 +120,20 @@ Coverage in `tests/adversarial/tests/adversarial.rs`:
   settlement authority is lost, that specific job can no longer finalize
   (the buyer can still cancel). Other contracts are unaffected because
   the authority is per-contract, not global.
-- **Config rotation scope.** `update_config` can change the fee wallet
-  and amount without a redeploy; changing the program's behavior (the
-  `pay_for_compute` ABI, constraint logic, etc.) still requires a
-  redeploy to a new program ID.
+- **Config rotation scope.** `update_config` can change the reference fee
+  wallet and amount without a redeploy, but in-flight contracts keep the
+  fee they committed at `pay_for_compute`; changing the program's actual
+  behavior (the `pay_for_compute` ABI, constraint logic, fee constants,
+  etc.) still requires a redeploy to a new program ID.
 - **SPL token program only.** Token-2022 mints (or any mint that needs
   the Token-2022 program) are unsupported.
 - **`init_config` front-running.** The config PDA is derivable from the
   program ID, so on a fresh program ID a griefer could call
-  `init_config` first, locking the fee config to their values. Mitigation:
-  initialize in the same block as the deploy. Under the per-contract
-  authority model this no longer gates finalize, so the impact is limited
-  to a fee-config DoS, not fund theft.
+  `init_config` first, locking the reference fee config to their values.
+  Mitigation: initialize in the same block as the deploy. Under the
+  per-contract authority + per-contract fee model this no longer gates
+  finalize or the fee, so the impact is limited to clobbering the
+  off-chain reference, not fund theft.
 
 ## Deploy procedure
 

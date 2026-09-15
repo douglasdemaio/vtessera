@@ -489,7 +489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Anchor account order in PayForCompute (programs/vtessera-escrow):
     //   buyer (signer, mut), seller_payout, stablecoin_mint,
     //   buyer_stablecoin_ata (mut), escrow_stablecoin_ata (mut),
-    //   contract (init, mut), fee_wallet (mut), config,
+    //   contract (init, mut), fee_wallet (mut),
     //   token_program, system_program
     let pay_ix = Instruction {
         program_id,
@@ -501,7 +501,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(fee_wallet, false),
-            AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
         ],
@@ -613,7 +612,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fin_data.extend_from_slice(&fin_args.try_to_vec()?);
 
     // Anchor account order in FinalizePro (programs/vtessera-escrow):
-    //   settlement_authority (signer, mut), config,
+    //   settlement_authority (signer, mut),
     //   contract (mut), escrow_stablecoin_ata (mut),
     //   buyer_stablecoin_ata (mut), seller_stablecoin_ata (mut),
     //   fee_wallet (mut), token_program, system_program
@@ -621,7 +620,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         program_id,
         accounts: vec![
             AccountMeta::new(payer.pubkey(), true),
-            AccountMeta::new_readonly(config_pda, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(buyer_ata, false),
