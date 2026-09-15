@@ -41,6 +41,8 @@
 //! | 2.2h cancel after finalize | `cancel_after_finalize_fails` |
 //! | 2.2j tiny-fraction rounding | `finalize_rounds_tiny_fraction_consistently` |
 //! | 2.2k finalize by non-authority | `finalize_rejects_non_settlement_authority` |
+//! | 2.2m pay records per-contract authority | `pay_records_contract_settlement_authority` |
+//! | 2.2n config rotation doesn't revoke contract authority | `update_config_rotation_does_not_revoke_contract_authority` |
 //! | §2.4 happy path (seller paid) | `finalize_happy_path` |
 //! | §2.4 fraction = 0 (refund only) | `finalize_fraction_zero_refunds_buyer` |
 //! | fee on pay | `pay_for_compute_charges_sol_fee` |
@@ -49,7 +51,7 @@
 //! | zero fee disables | `zero_fee_disables_fee` |
 //! | wrong fee wallet | `pay_rejects_wrong_fee_wallet` |
 //! | config init + immutability | `init_config_sets_fee_fields`, `config_immutable_after_init` |
-//! | config rotation (update_config) | `update_config_rotates_settlement_authority`, `update_config_edits_fee_fields`, `update_config_rejects_non_settlement_authority` |
+//! | config rotation (update_config) | `update_config_rotation_does_not_revoke_contract_authority`, `update_config_edits_fee_fields`, `update_config_rejects_non_settlement_authority` |
 //! | buyer unilateral cancel | `cancel_before_start_refunds_buyer` |
 
 use litesvm::types::TransactionResult;
@@ -308,10 +310,12 @@ fn pay_ix(
     config: &Pubkey,
     job_id: [u8; 32],
     price: u64,
+    settlement_authority: &Pubkey,
 ) -> Instruction {
     let mut data = disc("pay_for_compute").to_vec();
     data.extend_from_slice(&job_id);
     data.extend_from_slice(&price.to_le_bytes());
+    data.extend_from_slice(&settlement_authority.to_bytes());
     Instruction {
         program_id: prog(),
         accounts: vec![
@@ -390,9 +394,10 @@ fn cancel_ix(
 /// 1. stablecoin mint (6 decimals, mint authority = payer/buyer)
 /// 2. buyer/seller/escrow ATAs for the stablecoin mint
 /// 3. `BUYER_MINT_AMOUNT` minted to the buyer
-/// 4. `init_config` with settlement authority = payer, the protocol fee
+/// 4. `init_config` with config authority = payer, the protocol fee
 ///    wallet + `FEE_LAMPORTS`
-/// 5. `pay_for_compute(price)` into the contract PDA
+/// 5. `pay_for_compute(price)` into the contract PDA, recording the
+///    payer as the per-contract settlement authority
 struct Harness {
     svm: LiteSVM,
     payer: Keypair,
@@ -515,8 +520,16 @@ impl Harness {
     }
 
     /// `pay_for_compute` — separated out so callers can test the guard on
-    /// the instruction itself.
+    /// the instruction itself. Records `self.payer` as the per-contract
+    /// settlement authority (the key that finalizes below).
     fn pay(&mut self, price: u64) {
+        self.pay_with_authority(price, &self.payer.pubkey());
+    }
+
+    /// As `pay`, but records an explicit per-contract settlement
+    /// authority (any pubkey) — pins that `pay_for_compute`'s authority
+    /// argument is what gates finalize, not the buyer or the config.
+    fn pay_with_authority(&mut self, price: u64, settlement_authority: &Pubkey) {
         let pay = pay_ix(
             &self.payer.pubkey(),
             &self.seller.pubkey(),
@@ -527,6 +540,7 @@ impl Harness {
             &self.config,
             self.job_id,
             price,
+            settlement_authority,
         );
         send(&mut self.svm, &self.payer, &[&self.payer], &[pay]);
     }
@@ -710,9 +724,12 @@ fn config_immutable_after_init() {
 }
 
 #[test]
-fn update_config_rotates_settlement_authority() {
-    // The current settlement authority can rotate the pinned authority,
-    // so a wrong `init_config` value is recoverable on-chain.
+fn update_config_rotation_does_not_revoke_contract_authority() {
+    // Finalize is gated by the *per-contract* authority recorded at pay
+    // time, not by `Config`. Rotating the config authority to a
+    // throwaway key (the shared-devnet CI-key scenario that used to
+    // orphan every buyer) must not lock an in-flight contract out: the
+    // recorded authority (the payer) can still settle.
     let mut h = Harness::new_with(PAY_PRICE, BUYER_MINT_AMOUNT);
     let new_sa = Keypair::new();
     h.svm.airdrop(&new_sa.pubkey(), 1_000_000_000).unwrap();
@@ -735,7 +752,7 @@ fn update_config_rotates_settlement_authority() {
     assert_eq!(h.config_authority(), new_sa.pubkey());
     assert_eq!(h.config_fee_wallet(), fee_wallet());
     assert_eq!(h.config_fee_lamports(), FEE_LAMPORTS);
-    // The old authority can no longer finalize; the new one can.
+
     let config = h.config;
     let contract = h.contract;
     let escrow_stable = h.escrow_stable;
@@ -758,11 +775,15 @@ fn update_config_rotates_settlement_authority() {
             bh,
         )
     };
+    // The config's *new* authority cannot settle — it is not this
+    // contract's recorded authority.
     expect_custom(
-        h.svm.send_transaction(finalize_tx(&h.payer)),
+        h.svm.send_transaction(finalize_tx(&new_sa)),
         EscrowError::NotSettlementAuthority,
     );
-    h.svm.send_transaction(finalize_tx(&new_sa)).unwrap();
+    // The recorded per-contract authority (the payer) settles fine even
+    // though it no longer owns the config PDA.
+    h.svm.send_transaction(finalize_tx(&h.payer)).unwrap();
 }
 
 #[test]
@@ -883,6 +904,7 @@ fn pay_rejects_wrong_fee_wallet() {
         let mut data = disc("pay_for_compute").to_vec();
         data.extend_from_slice(&h.job_id);
         data.extend_from_slice(&PAY_PRICE.to_le_bytes());
+        data.extend_from_slice(&h.payer.pubkey().to_bytes());
         Instruction {
             program_id: prog(),
             accounts: vec![
@@ -924,6 +946,7 @@ fn pay_zero_price_reverts() {
         &h.config,
         h.job_id,
         0,
+        &h.payer.pubkey(),
     );
     let tx = Transaction::new_signed_with_payer(
         &[pay],
@@ -950,6 +973,7 @@ fn pay_same_job_id_twice_fails() {
         &h.config,
         h.job_id,
         PAY_PRICE,
+        &h.payer.pubkey(),
     );
     let tx = Transaction::new_signed_with_payer(
         &[pay],
@@ -976,6 +1000,7 @@ fn pay_rejects_buyer_ata_with_wrong_mint() {
         &h.config,
         h.job_id,
         PAY_PRICE,
+        &h.payer.pubkey(),
     );
     let tx = Transaction::new_signed_with_payer(
         &[pay],
@@ -1009,6 +1034,7 @@ fn pay_rejects_buyer_ata_with_wrong_owner() {
         &h.config,
         h.job_id,
         PAY_PRICE,
+        &h.payer.pubkey(),
     );
     let tx = Transaction::new_signed_with_payer(
         &[pay],
@@ -1020,6 +1046,26 @@ fn pay_rejects_buyer_ata_with_wrong_owner() {
 }
 
 // ---------- Finalize: adversarial -----------------------------------------
+
+#[test]
+fn pay_records_contract_settlement_authority() {
+    // The per-contract authority recorded in `pay_for_compute` gates
+    // finalize — not the buyer and not the config authority. Pay with an
+    // operator key recorded as the authority: the buyer can't settle, the
+    // recorded operator can.
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    h.price = PAY_PRICE;
+    let operator = Keypair::new();
+    h.svm.airdrop(&operator.pubkey(), 1_000_000_000).unwrap();
+    h.pay_with_authority(PAY_PRICE, &operator.pubkey());
+
+    let res = h.svm.send_transaction(h.finalize_tx(&h.payer, 1_000_000));
+    expect_custom(res, EscrowError::NotSettlementAuthority);
+
+    h.svm
+        .send_transaction(h.finalize_tx(&operator, 1_000_000))
+        .unwrap();
+}
 
 #[test]
 fn finalize_rejects_non_settlement_authority() {

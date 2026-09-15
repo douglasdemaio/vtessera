@@ -6,7 +6,9 @@
 //!
 //! - `pay_for_compute` deposits the contract price into the PDA and
 //!   transfers a small flat SOL fee to the configured protocol fee
-//!   wallet (0.0001 SOL, read from `Config`).
+//!   wallet (0.0001 SOL, read from `Config`). It also records the
+//!   **per-contract settlement authority** — the key allowed to
+//!   finalize this specific contract — into the `Contract` account.
 //! - `finalize_pro_rata` accepts the completion fraction `f` produced
 //!   by the settlement crate (Module 3) and splits the escrow **in the
 //!   same stablecoin**: the seller's earned slice `f × price` is paid
@@ -21,11 +23,19 @@
 //!   contract never completes.
 //! - `init_config` is the **only** setup call, run once right after
 //!   deploy. It creates the single on-chain `Config` account holding
-//!   the **settlement authority** (the operator's key, pinned at deploy)
-//!   and the protocol fee wallet + amount. There are no governance
-//!   tokens; the current settlement authority can later rotate the
+//!   the protocol **fee** wallet + amount and the config authority
+//!   (the key allowed to rotate the fee config). There are no
+//!   governance tokens; the current authority can later rotate the
 //!   config via `update_config`, so a mistaken `init_config` value is
 //!   recoverable on-chain instead of forcing a redeploy.
+//!
+//! **Authority model:** `Config` never gates finalize. Every contract
+//! records its own settlement authority at `pay_for_compute` time, so a
+//! buyer can settle an escrow without depending on who initialized the
+//! shared singleton `Config` account (e.g. a deployment whose config was
+//! seized by a throwaway CI key). The seller node verifies the recorded
+//! authority before running a paid job; the recorded key is what later
+//! signs `finalize_pro_rata`.
 
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
@@ -53,11 +63,13 @@ pub const DEFAULT_FEE_LAMPORTS: u64 = 100_000;
 pub mod vtessera_escrow {
     use super::*;
 
-    /// Create the program's `Config` account and pin the settlement
-    /// authority + protocol fee configuration. Called once right after
-    /// deploy by whoever holds the deployer key. The account can later
-    /// be rotated by the current settlement authority via `update_config`,
-    /// so all three values are recoverable after a mistaken init.
+    /// Create the program's `Config` account and pin the config authority
+    /// (fee-config governance key) + protocol fee configuration. Called
+    /// once right after deploy by whoever holds the deployer key. The
+    /// account can later be rotated by the current authority via
+    /// `update_config`, so all three values are recoverable after a
+    /// mistaken init. `Config` does **not** gate finalize — settlement
+    /// authority is recorded per contract at `pay_for_compute` time.
     ///
     /// **Race note:** `init` fails if the account already exists, and
     /// anyone may call this first. The config PDA is derivable from the
@@ -81,9 +93,9 @@ pub mod vtessera_escrow {
         Ok(())
     }
 
-    /// Rotate the protocol config — settlement authority, fee wallet, and/or
+    /// Rotate the protocol config — config authority, fee wallet, and/or
     /// per-transaction fee — **without redeploying**. Only the current
-    /// settlement authority may call this, so a wrong `init_config` is not
+    /// config authority may call this, so a wrong `init_config` is not
     /// permanently fatal (previously changing these required a redeploy).
     ///
     /// Each field is set unconditionally from the args; pass the existing
@@ -103,11 +115,17 @@ pub mod vtessera_escrow {
     }
 
     /// Deposit the contract price into the escrow PDA and pay the flat
-    /// protocol fee. Atomic — either both happen or neither.
+    /// protocol fee. Atomic — either both happen or neither. Also records
+    /// the per-contract `settlement_authority` — the key allowed to call
+    /// `finalize_pro_rata` for this contract. The buyer names it (in the
+    /// standard flow the node's offer advertises who settles, and the
+    /// buyer pins that key); it does not have to be the buyer itself, and
+    /// it is **not** derived from the shared `Config` account.
     pub fn pay_for_compute(
         ctx: Context<PayForCompute>,
         job_id: [u8; 32],
         price_micros: u64,
+        settlement_authority: Pubkey,
     ) -> Result<()> {
         require!(price_micros > 0, EscrowError::ZeroPrice);
 
@@ -129,6 +147,7 @@ pub mod vtessera_escrow {
         let contract = &mut ctx.accounts.contract;
         contract.job_id = job_id;
         contract.buyer = ctx.accounts.buyer.key();
+        contract.settlement_authority = settlement_authority;
         contract.seller_payout = ctx.accounts.seller_payout.key();
         contract.price_micros = price_micros;
         contract.stablecoin_mint = ctx.accounts.stablecoin_mint.key();
@@ -145,10 +164,10 @@ pub mod vtessera_escrow {
     /// Finalize a paid job with the completion fraction `f` produced by
     /// settlement. Pays the seller's earned slice `f × price` in the
     /// contract's stablecoin mint and refunds `(1 − f) × price` to the
-    /// buyer in the same mint. The settlement authority signs this and
-    /// pays the flat SOL protocol fee, so no arbitrary caller can
-    /// finalize an escrow with a fabricated `f` (which would refund the
-    /// buyer and pay the seller nothing).
+    /// buyer in the same mint. The contract's recorded settlement
+    /// authority signs this and pays the flat SOL protocol fee, so no
+    /// arbitrary caller can finalize an escrow with a fabricated `f`
+    /// (which would refund the buyer and pay the seller nothing).
     ///
     /// `f_micros` is `f` scaled by 1_000_000.
     pub fn finalize_pro_rata(ctx: Context<FinalizePro>, f_micros: u32) -> Result<()> {
@@ -285,11 +304,12 @@ fn charge_fee<'info>(
 
 // ---------- Accounts ------------------------------------------------------
 
-/// Program configuration: the settlement authority (the single key that
-/// may finalize jobs — the operator's key on devnet and mainnet) and the
-/// protocol fee wallet + per-transaction fee amount. Written once by
-/// `init_config`, but the current settlement authority can rotate any of
-/// these via `update_config` (recoverable without a redeploy).
+/// Program configuration: the config authority (the key allowed to
+/// rotate the fee config below — the operator's key on devnet and
+/// mainnet) and the protocol fee wallet + per-transaction fee amount.
+/// Written once by `init_config`, and rotatable by the current
+/// authority via `update_config`. `Config` does **not** gate finalize:
+/// each `Contract` records its own settlement authority at payment.
 #[account]
 pub struct Config {
     pub settlement_authority: Pubkey,
@@ -306,6 +326,10 @@ impl Config {
 pub struct Contract {
     pub job_id: [u8; 32],
     pub buyer: Pubkey,
+    /// Per-contract settlement authority — the key allowed to call
+    /// `finalize_pro_rata` for this contract. Recorded at
+    /// `pay_for_compute` time; **not** derived from the shared `Config`.
+    pub settlement_authority: Pubkey,
     /// Address whose stablecoin ATA (in the contract's mint) receives
     /// the earned slice at finalize.
     pub seller_payout: Pubkey,
@@ -317,7 +341,7 @@ pub struct Contract {
 }
 
 impl Contract {
-    pub const LEN: usize = 32 + 32 + 32 + 8 + 32 + 1 + 1 + 1;
+    pub const LEN: usize = 32 + 32 + 32 + 32 + 8 + 32 + 1 + 1 + 1;
 }
 
 #[derive(Accounts)]
@@ -341,9 +365,10 @@ pub struct InitConfig<'info> {
 
 #[derive(Accounts)]
 pub struct UpdateConfig<'info> {
-    /// The **current** settlement authority. Must equal
+    /// The **current** config authority. Must equal
     /// `Config::settlement_authority`. Signs and pays for the tx; this is
-    /// the only party allowed to rotate the config.
+    /// the only party allowed to rotate the fee config. It does not gate
+    /// finalize — settlement authority is per-contract.
     #[account(mut)]
     pub settlement_authority: Signer<'info>,
 
@@ -414,17 +439,17 @@ pub struct PayForCompute<'info> {
 /// stablecoin mint, so only the stablecoin side is needed.
 #[derive(Accounts)]
 pub struct FinalizePro<'info> {
-    /// Settlement authority. Must equal `Config::settlement_authority`
-    /// (the operator's key, pinned at deploy). Signs the finalize and
-    /// pays the flat SOL protocol fee.
+    /// Per-contract settlement authority. Must equal
+    /// `Contract::settlement_authority` (recorded at `pay_for_compute`
+    /// time). Signs the finalize and pays the flat SOL protocol fee.
     #[account(mut)]
     pub settlement_authority: Signer<'info>,
 
+    /// Protocol fee config (fee wallet + amount). `Config` no longer
+    /// gates authorization — it is read only for the fee.
     #[account(
         seeds = [CONFIG_SEED],
         bump = config.bump,
-        constraint = config.settlement_authority == settlement_authority.key()
-            @ EscrowError::NotSettlementAuthority,
     )]
     pub config: Account<'info, Config>,
 
@@ -432,6 +457,8 @@ pub struct FinalizePro<'info> {
         mut,
         seeds = [CONTRACT_SEED, contract.job_id.as_ref()],
         bump = contract.bump,
+        constraint = contract.settlement_authority == settlement_authority.key()
+            @ EscrowError::NotSettlementAuthority,
     )]
     pub contract: Account<'info, Contract>,
 
@@ -530,7 +557,7 @@ pub struct JobFinalized {
 
 #[error_code]
 pub enum EscrowError {
-    #[msg("signer is not the configured settlement authority")]
+    #[msg("signer is not this contract's recorded settlement authority")]
     NotSettlementAuthority,
     #[msg("contract price must be > 0")]
     ZeroPrice,
@@ -575,6 +602,11 @@ mod tests {
         // 8-discriminator is added by Anchor at account init; the bare
         // struct is exactly the sum of its fields.
         assert_eq!(Config::LEN, 32 + 32 + 8 + 1);
+    }
+
+    #[test]
+    fn contract_len_matches_field_sizes() {
+        assert_eq!(Contract::LEN, 32 + 32 + 32 + 32 + 8 + 32 + 1 + 1 + 1);
     }
 
     #[test]

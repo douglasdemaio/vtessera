@@ -55,7 +55,8 @@ Runs in parallel with Module 1; resolves before Module 4.
   (never per micro-payment — see Module 4e), and on every agent↔node
   transaction even when a contract never completes — it funds protocol
   infrastructure. It is charged on `pay_for_compute` (buyer),
-  `finalize_pro_rata` (settlement authority), and `cancel_before_start`
+  `finalize_pro_rata` (the contract's recorded settlement authority),
+  and `cancel_before_start`
   (buyer), and is skipped when `fee_lamports == 0`. Refunds do not add a
   second fee.
 - **No swap, no oracle.** The escrow pays the seller directly in the
@@ -64,7 +65,9 @@ Runs in parallel with Module 1; resolves before Module 4.
 
 The canonical fee is a flat **0.0001 SOL** (100,000 lamports) sent to
 wallet address **`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`**,
-stored in `Config` at `init_config` and immutable after deploy.
+stored in `Config` at `init_config` and rotatable on-chain via
+`update_config` (no redeploy needed). `Config` carries only the fee
+config — finalize is gated per contract, never by this account.
 
 The **forkit** escrow contract at
 <https://github.com/douglasdemaio/forkit> is the recommended starting
@@ -413,7 +416,8 @@ A single `pay_for_compute` instruction, atomically:
    asset to source.
 
 The fee wallet and amount are stored in `Config` at `init_config` (see
-§0) — immutable on-chain configuration, not hard-coded constants.
+§0) — rotatable on-chain via `update_config` by the config authority,
+not hard-coded constants.
 
 That's it at payment time — the principal is now in escrow, held by
 program logic alone.
@@ -478,9 +482,13 @@ The protocol settles in the **same stablecoin the buyer paid**
 Autonomous code no one controls sits on the neutral side; a live
 upgrade key or an operator exercising discretion makes that operator
 the reachable actor. Make the settlement program **immutable** before
-mainnet, and keep the settlement authority — the operator's key, pinned
-in `Config` at deploy — the only signer that can trigger
-`finalize_pro_rata`.
+mainnet, and keep the **per-contract settlement authority** — recorded
+in the `Contract` by `pay_for_compute`, not pinned in the shared
+`Config` — the only signer that can trigger `finalize_pro_rata` for
+that job. The buyer names the authority at payment (in the standard
+flow, the node's offer advertises who settles), so devnet deployments
+whose `Config` was seized by a throwaway CI key still settle: finalize
+never depends on who won the `init_config` race.
 
 Honesty about limits: censorship resistance is never absolute.
 Network-level (validator/relayer) and front-end/RPC vectors remain, and
@@ -498,7 +506,8 @@ fee model:
 - Flat ⇒ scales with transaction **count** (egalitarian across job
   sizes, reads like network gas).
 - Charged on `pay_for_compute` (buyer), `finalize_pro_rata`
-  (settlement authority), and `cancel_before_start` (buyer) — every
+  (the contract's recorded settlement authority), and
+  `cancel_before_start` (buyer) — every
   agent↔node transaction funds protocol infrastructure, even when a
   contract never completes. Refunds don't add a second fee.
 - `fee_lamports == 0` disables the fee (no-op transfer skipped).
@@ -560,14 +569,15 @@ product carries an explicit consent contract. The full spec lives in
   metering gate (§2.1), the off-by-default "Accept workloads from others"
   switch with honest no-sandbox copy (§2.2), and the three-state status
   surface (Off / Metering only / Accepting jobs) with a recent-jobs list and
-  the settlement-authority row (§2.3).
+  the settlement-authority row (§2.3, now the per-contract finalize
+  authority recorded at pay time).
 - **Behavioural invariants (§1):** no autostart, two consent gates,
   one-action stop, no silent resume, legible activity, complete uninstall,
   honest process naming, declared + tested network surface (v0 metering
   opens no sockets — `tests/no_socket.rs`).
 - **Precision in claims (§3):** the do-not-say / say-instead table governs
-  the README and UI copy; settlement-authority centralisation and the flat
-  fee are disclosed, not hidden.
+  the README and UI copy; per-contract finalize-authority control and the
+  flat fee are disclosed, not hidden.
 - **Anti-misclassification (§4):** reproducible builds, signed releases with
   digests, VirusTotal pre-submission, minimal Flatpak permissions with
   rationale, hardening visible in SECURITY.md, third-party review before
@@ -625,11 +635,12 @@ following must hold:
   program pays the seller in the same stablecoin mint the buyer
   deposited — no swap, no oracle, no burn. The production path is
   exercised in unit and adversarial tests.
-- [x] **Settlement authority pinned at deploy.** The operator's key, set
-  in `Config` by `init_config`, signs `finalize_pro_rata` so no
-  arbitrary caller can finalize an escrow with a fabricated `f`.
-  `Config` is immutable after `init_config` — no governance
-  instructions.
+- [x] **Per-contract settlement authority.** Each `Contract` records its
+  settlement authority at `pay_for_compute` time; that key signs
+  `finalize_pro_rata`, so no arbitrary caller can finalize an escrow
+  with a fabricated `f`. The authority is never coupled to the shared
+  `Config` account (a buyer settles even when a config was seized by a
+  throwaway key). The buyer names it at payment, per the node's offer.
 - [x] **Fee config confirmed.** `fee_wallet` =
   `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh` and `fee_lamports` =
   100,000, set at `init_config` and reviewed publicly.

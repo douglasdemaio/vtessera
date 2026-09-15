@@ -13,24 +13,28 @@ completion fraction `f` produced by the settlement crate (Module 3):
 
 ## Fee and Config
 
-The fee and settlement config live in a single on-chain `Config` account
+The protocol fee configuration lives in a single on-chain `Config` account
 (seed `CONFIG_SEED`), created once by
-`init_config(settlement_authority, fee_wallet, fee_lamports)` right
-after deploy. `Config` is **immutable** after `init_config` — there are
-no update or governance instructions.
+`init_config(config_authority, fee_wallet, fee_lamports)` right after
+deploy. `Config` carries only fee governance: the **config authority**
+can rotate the fee wallet/amount via `update_config` (a mistaken
+`init_config` is recoverable on-chain). It **never gates finalize** —
+every `Contract` records its own **settlement authority** at
+`pay_for_compute` time, so a buyer settles an escrow without depending
+on who initialized the shared config PDA.
 
 | Field | Value |
 | ----- | ----- |
-| `settlement_authority` | The operator's key, pinned at deploy; signs `finalize_pro_rata` (a functional gate so no arbitrary caller can finalize with a fabricated `f`) |
+| `settlement_authority` | Config authority — the key allowed to rotate the fee config via `update_config`; does **not** gate finalize |
 | `fee_wallet` | `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh` |
 | `fee_lamports` | `100_000` (0.0001 SOL) |
 | `bump` | PDA bump for the `Config` account |
 
 The flat fee is charged on **every agent↔node transaction** — on
-`pay_for_compute` (buyer), `finalize_pro_rata` (settlement authority),
-and `cancel_before_start` (buyer) — even when a contract never
-completes. It is skipped when `fee_lamports == 0`; `init_config` is not
-charged (bootstrap).
+`pay_for_compute` (buyer), `finalize_pro_rata` (the contract's recorded
+settlement authority), and `cancel_before_start` (buyer) — even when a
+contract never completes. It is skipped when `fee_lamports == 0`;
+`init_config` is not charged (bootstrap).
 
 ## Why this crate is outside the host workspace
 
@@ -144,10 +148,10 @@ The program compiles under Anchor 0.30 and is **live on Solana devnet**
 at `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`. The production
 path is `finalize_pro_rata`: the seller is paid in the contract's
 stablecoin mint, the buyer is refunded in the same mint, and the SOL
-fee is charged from the settlement authority. The old devnet stub is
-deleted — there is no swap and no burn. `Config` is immutable after
-`init_config`, and the settlement authority is the operator's key pinned
-at deploy — see `ROADMAP.md` §4d. Full end-to-end pay→run→settle→split
+fee is charged from the contract's recorded settlement authority. The
+old devnet stub is deleted — there is no swap and no burn. `Config`
+holds only the fee configuration; each `Contract` records its own
+settlement authority at `pay_for_compute` — see `ROADMAP.md` §4d. Full end-to-end pay→run→settle→split
 flow exercised via `crates/devnet-demo` soak runner (20+ successful
 finalizations, 0% failure rate). See `tests/adversarial/` for the fuzz +
 adversarial test suite.

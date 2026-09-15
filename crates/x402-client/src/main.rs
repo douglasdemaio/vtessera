@@ -12,9 +12,10 @@
 //!    verifies the SPL transfer on-chain, accepts the job, executes it and
 //!    returns a signed receipt (200).
 //! 5. `finalize_pro_rata` (f = 1.0) drains the escrow to the seller's
-//!    stablecoin ATA in the contract's mint. On devnet the settlement
-//!    authority is the config's pinned key — `--check` verifies it matches
-//!    this payer before any money moves.
+//!    stablecoin ATA in the contract's mint. The finalize signer must be
+//!    the **per-contract settlement authority recorded at pay time** —
+//!    the client records this payer, so finalize always succeeds once the
+//!    money moved (no dependency on who initialized the shared `Config`).
 //!
 //! By default the client mints its own test stablecoin so the whole loop
 //! runs with no faucet dependency (devnet-demo's approach). Pass
@@ -25,7 +26,7 @@
 //! The node's `VerifyAndRun` branch verifies the payment proof on-chain and
 //! executes the paid job (no 501 on current nodes). This crate's `--check`
 //! mode runs the same diagnostics the session previously had to do by hand
-//! (offer payout, challenge escrow, config settlement authority, funds).
+//! (offer payout, challenge escrow, config PDA fee setup, funds).
 //!
 //! Standalone crate (excluded from the host workspace): pins the solana 3.x
 //! line (see Cargo.toml).
@@ -70,18 +71,28 @@ const DEVNET_USDC_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const DEVNET_RPC: &str = "https://api.devnet.solana.com";
 const DEFAULT_NODE: &str = "http://127.0.0.1:8402";
 const DEFAULT_SECONDS: u64 = 60;
-/// `Config` account size: 8-byte Anchor discriminator + settlement_authority
+/// `Config` account size: 8-byte Anchor discriminator + config authority
 /// (32) + fee_wallet (32) + fee_lamports (8) + bump (1).
 const CONFIG_LEN: usize = 8 + 32 + 32 + 8 + 1;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// `pay_for_compute` IX args, borsh-encoded after the 8-byte Anchor
-/// discriminator (= first 8 bytes of `sha256("global:pay_for_compute")`).
-#[derive(BorshSerialize)]
-struct PayForComputeArgs {
+/// `pay_for_compute` instruction data after the 8-byte Anchor discriminator
+/// (= first 8 bytes of `sha256("global:pay_for_compute")`): `job_id`, then
+/// `price_micros`, then `settlement_authority` — the per-contract key
+/// allowed to finalize (the client records this payer, so finalize is
+/// always authorized). Encoded by hand because borsh's `Pubkey` impl lives
+/// on the 0.10 line while this crate derives borsh 1.8 (payload layout is
+/// still the raw 32 bytes either way).
+fn encode_pay_args(
+    out: &mut Vec<u8>,
     job_id: [u8; 32],
     price_micros: u64,
+    settlement_authority: Pubkey,
+) {
+    out.extend_from_slice(&job_id);
+    out.extend_from_slice(&price_micros.to_le_bytes());
+    out.extend_from_slice(&settlement_authority.to_bytes());
 }
 
 #[derive(BorshSerialize)]
@@ -115,8 +126,8 @@ fn usage_and_exit() -> ! {
     eprintln!("  --seconds agreed device-seconds for the job (default {DEFAULT_SECONDS})");
     eprintln!("  --seller  where the seller's earned slice lands (default: fresh keypair)");
     eprintln!(
-        "  --program escrow program ID to pay (default {PROGRAM_ID_STR}); use to target a \
-         fresh deployment whose config is already initialized for this payer"
+        "  --program escrow program ID to pay (default {PROGRAM_ID_STR}); finalize is per-contract, \
+         so any deployment works once paid"
     );
     eprintln!(
         "  --check   pre-flight diagnostics (offer payout, x402 challenge, config PDA, payer \
@@ -406,13 +417,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "create escrow ATA",
     )?;
 
-    // --- 3b. init_config: settlement authority + fee config (devnet) ----
-    // Finalize IXs require the signer to match the config's settlement
-    // authority; the fee wallet + amount are pinned here too. On mainnet
-    // this is the Squads vault PDA (§3.5); the devnet flow pins it to the
-    // payer. Idempotent across runs (the PDA may already be initialized).
-    // A config left over from the pre-stablecoin program (41-byte layout)
-    // must be cleared before redeploy, or this account deserialize fails.
+    // --- 3b. init_config: config authority + fee config (devnet) ----
+    // The config authority only rotates the protocol fee config; finalize
+    // no longer depends on it (each contract records its own settlement
+    // authority at pay time). On mainnet this is the Squads vault PDA
+    // (§3.5); the devnet flow pins it to the payer. Idempotent across
+    // runs (the PDA may already be initialized). A config left over from
+    // the pre-stablecoin program (41-byte layout) must be cleared before
+    // redeploy, or this account deserialize fails.
     let (config_pda, _config_bump) =
         Pubkey::find_program_address(&[b"vtessera_config_v2"], &program_id);
     let cfg_disc = anchor_disc("init_config");
@@ -435,7 +447,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("config PDA {config_pda} already initialized; skipping init_config");
             if args.verbose {
                 if let Ok(cfg) = parse_config_info(config_pda, &acct.data) {
-                    println!("  settlement_authority: {}", cfg.settlement_authority);
+                    println!("  config_authority: {}", cfg.config_authority);
                     println!("  fee_wallet: {}", cfg.fee_wallet);
                     println!("  fee_lamports: {}", cfg.fee_lamports);
                 }
@@ -471,12 +483,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let seller_before = token_balance(&rpc, &seller_ata)?;
     let pay_disc = anchor_disc("pay_for_compute");
-    let pay_args = PayForComputeArgs {
-        job_id,
-        price_micros,
-    };
     let mut pay_data = pay_disc.to_vec();
-    pay_data.extend_from_slice(&pay_args.try_to_vec()?);
+    encode_pay_args(&mut pay_data, job_id, price_micros, payer.pubkey());
 
     // Anchor account order in PayForCompute (programs/vtessera-escrow):
     //   buyer (signer, mut), seller_payout, stablecoin_mint,
@@ -592,9 +600,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 5. finalize_pro_rata (f = 1.0) ---------------------------------
     // The production finalize: seller is paid the earned slice in the
-    // contract's stablecoin mint, buyer gets the refund. Devnet has no
-    // HNT/Pyth feeds — none are needed now. The agent ran the job to
-    // completion → f = 1.0, seller gets the whole escrow.
+    // contract's stablecoin mint, buyer gets the refund. The payer signs
+    // as the per-contract settlement authority recorded at pay_for_compute
+    // time. The agent ran the job to completion → f = 1.0, seller gets
+    // the whole escrow.
     println!("\n--- 5. finalize_pro_rata (f = 1.0) ---");
     let fin_disc = anchor_disc("finalize_pro_rata");
     let fin_args = FinalizeProRataArgs {
@@ -851,42 +860,34 @@ fn preflight(
             report(
                 PreflightStatus::Pass,
                 &format!(
-                    "{} settlement_authority {} fee_wallet {} fee {} lamports",
-                    cfg.account, cfg.settlement_authority, cfg.fee_wallet, cfg.fee_lamports
+                    "{} config_authority {} fee_wallet {} fee {} lamports",
+                    cfg.account, cfg.config_authority, cfg.fee_wallet, cfg.fee_lamports
                 ),
             );
-            if cfg.settlement_authority == payer.pubkey() {
-                report(
-                    PreflightStatus::Pass,
-                    "config settles to this payer — finalize will succeed",
-                );
-            } else {
-                report(
-                    PreflightStatus::Fail,
-                    &format!(
-                        "config settlement_authority {} is NOT this payer {} — finalize will \
-                         fail with NotSettlementAuthority unless that wallet update_configs to you",
-                        cfg.settlement_authority,
-                        payer.pubkey()
-                    ),
-                );
-                critical += 1;
-            }
+            report(
+                PreflightStatus::Pass,
+                &format!(
+                    "finalize authority is recorded per contract at pay time as this payer {} — \
+                     finalize succeeds even when the config PDA is owned by another wallet",
+                    payer.pubkey()
+                ),
+            );
         }
         Some(Err(e)) => {
-            report(PreflightStatus::Fail, &e);
+            report(
+                PreflightStatus::Fail,
+                &format!("{e} — the config PDA must be a valid {CONFIG_LEN}-byte Config account"),
+            );
             critical += 1;
         }
         None => {
             report(
-                PreflightStatus::Fail,
+                PreflightStatus::Pass,
                 &format!(
-                    "no config PDA for {program_id} — a paid flow cannot finalize; run the flow \
-                     once (the payer runs init_config) or point --program at an initialized \
-                     deployment"
+                    "no config PDA for {program_id} — not a blocker: the first paid run calls \
+                     init_config (this payer becomes the config authority)"
                 ),
             );
-            critical += 1;
         }
     }
 
@@ -1185,10 +1186,13 @@ fn extract_object(s: &str, key: &str) -> Option<String> {
 
 // --- On-chain helpers --------------------------------------------------
 
-/// Decoded `Config` account (`vtessera_config_v2` PDA) for the escrow program.
+/// Decoded `Config` account (`vtessera_config_v2` PDA) for the escrow
+/// program. `config_authority` is the fee-config governance key (it gates
+/// `update_config` unless rotated there); finalize authorization is
+/// per-contract, never derived from this account.
 struct ConfigInfo {
     account: Pubkey,
-    settlement_authority: Pubkey,
+    config_authority: Pubkey,
     fee_wallet: Pubkey,
     fee_lamports: u64,
 }
@@ -1212,7 +1216,7 @@ fn parse_config_info(account: Pubkey, data: &[u8]) -> Result<ConfigInfo, String>
     lamports.copy_from_slice(&data[72..80]);
     Ok(ConfigInfo {
         account,
-        settlement_authority: Pubkey::new_from_array(auth),
+        config_authority: Pubkey::new_from_array(auth),
         fee_wallet: Pubkey::new_from_array(fee_wallet),
         fee_lamports: u64::from_le_bytes(lamports),
     })
@@ -1288,9 +1292,10 @@ fn anchor_error_hint_str(hay: &str) -> &'static str {
             "custom program error: 6000",
         ],
     ) {
-        "config settlement_authority belongs to another wallet (shared config PDA singleton). \
-         Point --program at a fresh deployment whose config already settles to this payer, or \
-         have the config's current authority update_config()."
+        "the finalize signer is not this contract's recorded settlement authority. The client \
+         records the payer at pay_for_compute time, so finalize with the same payer key; to \
+         settle under another key, that key must have been passed as pay_for_compute's \
+         settlement_authority."
     } else if contains_any(
         hay,
         &["WrongFeeWallet", "0x1777", "custom program error: 6007"],

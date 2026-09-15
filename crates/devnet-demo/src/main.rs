@@ -90,14 +90,6 @@ const FEE_WALLET_STR: &str = "J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh";
 const FEE_LAMPORTS: u64 = 100_000;
 const DEVNET_RPC: &str = "https://api.devnet.solana.com";
 
-/// `pay_for_compute` IX args, encoded with borsh after the 8-byte
-/// Anchor discriminator (= first 8 bytes of `sha256("global:pay_for_compute")`).
-#[derive(BorshSerialize)]
-struct PayForComputeArgs {
-    job_id: [u8; 32],
-    price_micros: u64,
-}
-
 #[derive(BorshSerialize)]
 struct FinalizeProRataArgs {
     f_micros: u32,
@@ -337,12 +329,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 5. pay_for_compute -------------------------------------------
     let price: u64 = 2_000_000; // 2.000000 stablecoin
     let pay_disc = anchor_disc("pay_for_compute");
-    let pay_args = PayForComputeArgs {
-        job_id,
-        price_micros: price,
-    };
     let mut pay_data = pay_disc.to_vec();
-    pay_data.extend_from_slice(&pay_args.try_to_vec()?);
+    // Instruction data after the discriminator: job_id → price_micros →
+    // settlement_authority (borsh wire layout = raw 32-byte pubkey). The
+    // demo records the payer itself, so the finalize step signs as the
+    // same key and is always authorized.
+    pay_data.extend_from_slice(&job_id);
+    pay_data.extend_from_slice(&price.to_le_bytes());
+    pay_data.extend_from_slice(&payer.pubkey().to_bytes());
 
     // Anchor account order in PayForCompute (lib.rs):
     //   buyer (signer, mut)

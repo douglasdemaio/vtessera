@@ -17,12 +17,17 @@ One Anchor program (`programs/vtessera-escrow`). It escrows a buyer's
 stablecoin (EURC or USDC, whichever mint the buyer's offer specifies)
 in a program-owned PDA and distributes it by on-chain rules:
 
-- `init_config` — creates the single immutable `Config` account
-  (settlement authority, fee wallet, fee lamports).
-- `pay_for_compute(job_id, price_micros)` — deposits price into the
-  escrow PDA; charges the flat SOL fee (default 100,000 lamports).
+- `init_config(config_authority, fee_wallet, fee_lamports)` — creates the
+  single `Config` account (config authority, fee wallet, fee lamports).
+- `update_config(…)` — the config authority can rotate the fee config
+  without redeploying. `Config` does **not** gate finalize.
+- `pay_for_compute(job_id, price_micros, settlement_authority)` — deposits
+  price into the escrow PDA and records the **per-contract settlement
+  authority** (the key allowed to finalize this job); charges the flat
+  SOL fee (default 100,000 lamports).
 - `finalize_pro_rata(f_micros)` — pays seller `f × price` and refunds
   buyer `(1 − f) × price`, both in the contract's mint; charges fee.
+  Signed by the **contract's recorded** settlement authority.
 - `cancel_before_start` — buyer reclaims full escrow at `f = 0` before
   finalize; charges fee (per-transaction fee even on never-completed
   contracts).
@@ -34,13 +39,21 @@ only between the buyer's ATA, the escrow PDA, and the seller's ATA.
 ## Trust model
 
 **Assumed honest:**
-- **Settlement authority** — the single key pinned in `Config`. It
-  signs `finalize_pro_rata` and is the only party that can pick `f`.
-  `Config` is written once and has no update instructions. A dishonest
-  settlement authority can finalize any escrow at any `f` (e.g. refund
-  the buyer and pay the seller nothing) or simply never finalize.
-  This is a deliberate single-operator design; mainnet plan pins a
-  Squads vault as the authority (MAINNET-CHECKLIST §3).
+- **Per-contract settlement authority** — recorded in the `Contract` by
+  `pay_for_compute`. It signs `finalize_pro_rata` and is the only party
+  that can pick `f` for that job. A dishonest authority can finalize its
+  contract at any `f` (e.g. refund the buyer and pay the seller nothing)
+  or simply never finalize. This is a deliberate design: the buyer names
+  the authority at payment (in the standard flow, the node's offer
+  advertises who settles), so a seller should verify the recorded
+  authority before running a paid job. Because the authority is
+  per-contract, it is never coupled to who initialized the shared
+  `Config` account — devnet deployments whose config was seized by a
+  throwaway CI key still settle normally. Mainnet plan pins a Squads
+  vault as the recorded authority (MAINNET-CHECKLIST §3).
+- **Config authority** (`Config.settlement_authority`) — only gates
+  `update_config` (fee configuration). It has no power over escrowed
+  funds.
 - **Upgrade authority** — until the program is made immutable (mainnet
   decision: Option A, `set-upgrade-authority --final`), whoever holds
   this keypair can replace the on-chain bytecode with anything. On
@@ -50,10 +63,10 @@ only between the buyer's ATA, the escrow PDA, and the seller's ATA.
 
 **Not defended against (accepted risk):**
 - **Node off-chain metering** — `f` is produced off-chain by the
-  settlement crate and signed by the settlement authority. A compromised
-  node cannot finalize anything by itself; it can only propose a value
-  that the authority signs. Metering fraud is out of the program's
-  trust boundary.
+  settlement crate and signed by the contract's settlement authority. A
+  compromised node cannot finalize anything by itself; it can only
+  propose a value that the authority signs. Metering fraud is out of the
+  program's trust boundary.
 - **Stablecoin issuer freeze/blacklist** — Circle's USDC or the EURC
   issuer may freeze or seize a specific address per their own rules;
   the program cannot prevent this and does not try.
@@ -75,36 +88,47 @@ Coverage in `tests/adversarial/tests/adversarial.rs`:
 - buyer ATA of the wrong mint → `WrongMint`
 - seller ATA owned by someone other than `contract.seller_payout` →
   `WrongOwner`
-- `finalize_pro_rata` signed by a non-authority → `NotSettlementAuthority`
+- `finalize_pro_rata` signed by a key that is not the contract's
+  recorded authority → `NotSettlementAuthority`
+- `pay_for_compute` records an arbitrary per-contract authority; only
+  that key can finalize the contract
+- config rotation to a throwaway key does **not** revoke an in-flight
+  contract's recorded authority (the recorded authority still settles)
 - `cancel_before_start` by a non-buyer → signer check
 - `cancel_before_start` after finalize → `AlreadyFinal`
 - fee charged on pay / finalize / cancel, `fee_lamports = 0` disables it
 - math: `price = u64::MAX, f = 999_999` (no silent overflow) and
   `price = 1, f = 1` (consistent rounding) — u128 checked arithmetic
-- config immutability: no update instruction exists
+- `update_config` signed by a non-config-authority → `NotSettlementAuthority`
 
 ## Known limitations
 
 - **No on-chain timeout.** If a seller starts a job but never finishes
-  and the settlement authority never finalizes, the buyer can still
-  reclaim the escrow at any time with `cancel_before_start` (full
+  and the contract's settlement authority never finalizes, the buyer can
+  still reclaim the escrow at any time with `cancel_before_start` (full
   refund, fee paid). There is no automatic trigger.
-- **Single-operator finalize.** A lost settlement authority means
-  escrows can no longer finalize (buyers can still cancel).
-- **Immutable config.** Changing the fee or the settlement authority
-  requires a redeploy to a new program ID.
+- **Lost per-contract authority.** If the key recorded as a contract's
+  settlement authority is lost, that specific job can no longer finalize
+  (the buyer can still cancel). Other contracts are unaffected because
+  the authority is per-contract, not global.
+- **Config rotation scope.** `update_config` can change the fee wallet
+  and amount without a redeploy; changing the program's behavior (the
+  `pay_for_compute` ABI, constraint logic, etc.) still requires a
+  redeploy to a new program ID.
 - **SPL token program only.** Token-2022 mints (or any mint that needs
   the Token-2022 program) are unsupported.
 - **`init_config` front-running.** The config PDA is derivable from the
   program ID, so on a fresh program ID a griefer could call
-  `init_config` first. Mitigation: initialize in the same block as
-  deploy. Worst case on mainnet is a DoS of finalize, not fund theft.
+  `init_config` first, locking the fee config to their values. Mitigation:
+  initialize in the same block as the deploy. Under the per-contract
+  authority model this no longer gates finalize, so the impact is limited
+  to a fee-config DoS, not fund theft.
 
 ## Deploy procedure
 
 Follow MAINNET-CHECKLIST §3.3 (immutable runbook): deploy the
-reproducible `.so` (§5), `init_config` with the settlement authority,
-run one small end-to-end flow, then
+reproducible `.so` (§5), `init_config` with the config authority + fee
+config, run one small end-to-end flow, then
 `solana program set-upgrade-authority <PROGRAM_ID> --final` and verify
 `Authority: None`. `--final` is irreversible.
 
