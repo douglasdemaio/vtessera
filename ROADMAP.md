@@ -57,17 +57,21 @@ Runs in parallel with Module 1; resolves before Module 4.
   infrastructure. It is charged on `pay_for_compute` (buyer),
   `finalize_pro_rata` (the contract's recorded settlement authority),
   and `cancel_before_start`
-  (buyer), and is skipped when `fee_lamports == 0`. Refunds do not add a
-  second fee.
+  (buyer), and is skipped when the contract's recorded
+  `fee_lamports == 0`. Refunds do not add a second fee.
 - **No swap, no oracle.** The escrow pays the seller directly in the
   same stablecoin the buyer deposited; the fee is the only thing this
   module adds on top of the escrow program.
 
 The canonical fee is a flat **0.0001 SOL** (100,000 lamports) sent to
 wallet address **`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`**,
-stored in `Config` at `init_config` and rotatable on-chain via
-`update_config` (no redeploy needed). `Config` carries only the fee
-config — finalize is gated per contract, never by this account.
+pinned by the `DEFAULT_FEE_*` program constants and **committed per
+contract** at `pay_for_compute` time: each `Contract` records its own
+`fee_wallet` + `fee_lamports`, and `finalize_pro_rata` /
+`cancel_before_start` charge what that contract recorded. `Config` is
+kept as a default/off-chain reference only — finalize is gated per
+contract, never by `Config`, and rotating it does not change any
+in-flight contract's fee.
 
 The **forkit** escrow contract at
 <https://github.com/douglasdemaio/forkit> is the recommended starting
@@ -411,13 +415,16 @@ A single `pay_for_compute` instruction, atomically:
 
 1. Buyer deposits the contract price in **EURC (default) or USDC** into
    the **escrow PDA**.
-2. **Flat fee:** transfer `config.fee_lamports` to `config.fee_wallet`
-   via `SystemProgram`. The payer already holds SOL for gas, so no new
-   asset to source.
+2. **Flat fee:** transfer the per-contract fee (pinned to
+   `DEFAULT_FEE_LAMPORTS` = 100,000 lamports) to `DEFAULT_FEE_WALLET`
+   (`J59EPy…`) via `SystemProgram`. The payer already holds SOL for gas,
+   so no new asset to source.
 
-The fee wallet and amount are stored in `Config` at `init_config` (see
-§0) — rotatable on-chain via `update_config` by the config authority,
-not hard-coded constants.
+The fee is validated against the `DEFAULT_FEE_*` program constants and
+**committed onto the `Contract` account** at `pay_for_compute` (see §0).
+`Config` holds the same values as a default/off-chain reference only —
+finalize and cancel charge the fee recorded on the contract, never a
+shared singleton.
 
 That's it at payment time — the principal is now in escrow, held by
 program logic alone.
@@ -498,10 +505,12 @@ assets** — not that the system is unfreezable end to end.
 
 ### 4e. The fee
 
-A **flat per-transaction** protocol fee, set once in `Config` at
-`init_config` (see §0): **100,000 lamports (0.0001 SOL)** to wallet
-**`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`**. Properties of the
-fee model:
+A **flat per-transaction** protocol fee, pinned by the `DEFAULT_FEE_*`
+program constants (see §0): **100,000 lamports (0.0001 SOL)** to wallet
+**`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`**, **committed per
+contract** at `pay_for_compute` and charged from the contract's record at
+finalize/cancel. `Config` mirrors the values as a default/off-chain
+reference only. Properties of the fee model:
 
 - Flat ⇒ scales with transaction **count** (egalitarian across job
   sizes, reads like network gas).
@@ -510,7 +519,10 @@ fee model:
   `cancel_before_start` (buyer) — every
   agent↔node transaction funds protocol infrastructure, even when a
   contract never completes. Refunds don't add a second fee.
-- `fee_lamports == 0` disables the fee (no-op transfer skipped).
+- A contract whose recorded `fee_lamports == 0` skips the fee (no-op
+  transfer skipped).
+- Committed per escrow ⇒ rotating `Config` (or anyone seizing the config
+  PDA) cannot change what an in-flight contract pays.
 - **Micropayment caveat:** a flat SOL fee is fine per job, but for
   **x402 pay-as-you-go** where each increment may be sub-cent, a flat
   per-payment fee can exceed the payment itself. For that path, keep

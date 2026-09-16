@@ -22,6 +22,13 @@ Report privately through GitHub's
 [private vulnerability reporting](https://github.com/douglasdemaio/vtessera/security/advisories/new)
 (Security tab → Report a vulnerability). If you can't use that, email douglasdemaio@gmail.com.
 
+The on-chain escrow program advertises the same contact points via its
+program-metadata `security` account (seed `security`, JSON format per the
+SPL Program Metadata convention), sourced from `security.json` (devnet
+program `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`). If you find a
+vulnerability in the program, you may report it through either channel;
+both reach the maintainer.
+
 Please include:
 
 - Affected commit SHA or RPM version, and target (e.g. `x86_64-unknown-linux-musl`)

@@ -310,7 +310,6 @@ struct Env {
     payer: Keypair,
     mint: Pubkey,
     program_id: Pubkey,
-    config_pda: Pubkey,
     fee_wallet: Pubkey,
 }
 
@@ -394,7 +393,6 @@ fn setup(rpc: &RpcClient, payer: Keypair) -> Result<Env, Box<dyn std::error::Err
         payer,
         mint: mint_pk,
         program_id,
-        config_pda,
         fee_wallet,
     })
 }
@@ -630,7 +628,6 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
             AccountMeta::new(escrow_ata, false),
             AccountMeta::new(contract_pda, false),
             AccountMeta::new(env.fee_wallet, false),
-            AccountMeta::new_readonly(env.config_pda, false),
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
         ],
@@ -667,7 +664,6 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
                 AccountMeta::new(escrow_ata, false),
                 AccountMeta::new(buyer_ata, false),
                 AccountMeta::new(env.fee_wallet, false),
-                AccountMeta::new_readonly(env.config_pda, false),
                 AccountMeta::new_readonly(spl_token::id(), false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
@@ -743,7 +739,6 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
             program_id: env.program_id,
             accounts: vec![
                 AccountMeta::new(env.payer.pubkey(), true), // settlement authority
-                AccountMeta::new_readonly(env.config_pda, false),
                 AccountMeta::new(contract_pda, false),
                 AccountMeta::new(escrow_ata, false),
                 AccountMeta::new(buyer_ata, false),
