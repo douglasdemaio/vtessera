@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789532044,
+  "updated_at": 1789532084,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -69,22 +69,22 @@
             "http://192.168.178.22:8402"
           ],
           "endpoint_id": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-          "expires_unix": 1792124026,
-          "issued_unix": 1789532026,
+          "expires_unix": 1792124066,
+          "issued_unix": 1789532066,
           "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
           "price": {
             "currency": "usdc",
             "mode": "paid",
             "payout_id": "34Wxj37y8yCynoxsqkvZ5o2Wj3xH36XFkQ1AVUpawCZB",
-            "per_device_second_micros": 2792
+            "per_device_second_micros": 3069
           },
           "schema_ver": 2
         },
         "pubkey_hex": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-        "sig_hex": "90a743ed7840153b2c0019ee604b26a6862b0ed045d4618b2ecd6c60b4a39dda87eda46ee4a272a856e61614dd1713f0e1b7890b60d3426361a5eada7a85e60b"
+        "sig_hex": "6f1f0fe0b0cc033bf000c5a3983eb82dadf8969197d5a32b0d94e3dca0fbcb65a2d4a3eb193bce5ca9e73b765cb1ac9ae16252aadc9d9a1b11df049da371ae03"
       },
-      "sig_hex": "90a743ed7840153b2c0019ee604b26a6862b0ed045d4618b2ecd6c60b4a39dda87eda46ee4a272a856e61614dd1713f0e1b7890b60d3426361a5eada7a85e60b",
-      "updated_at": 1789532044,
+      "sig_hex": "6f1f0fe0b0cc033bf000c5a3983eb82dadf8969197d5a32b0d94e3dca0fbcb65a2d4a3eb193bce5ca9e73b765cb1ac9ae16252aadc9d9a1b11df049da371ae03",
+      "updated_at": 1789532084,
       "endpoint": [
         "http://192.168.178.22:8402"
       ],
@@ -97,13 +97,13 @@
           "transport": "iroh_quic"
         },
         {
-          "addr": "80.245.78.193:56005",
+          "addr": "80.245.78.193:42526",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
         },
         {
-          "addr": "192.168.178.22:56005",
+          "addr": "192.168.178.22:42526",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
