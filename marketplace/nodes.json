@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789556007,
+  "updated_at": 1789556532,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -81,8 +81,8 @@
             "http://80.245.78.193:8402"
           ],
           "endpoint_id": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-          "expires_unix": 1792135369,
-          "issued_unix": 1789543369,
+          "expires_unix": 1792148525,
+          "issued_unix": 1789556525,
           "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
           "price": {
             "currency": "usdc",
@@ -93,10 +93,10 @@
           "schema_ver": 2
         },
         "pubkey_hex": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-        "sig_hex": "5e99033ec6b3b527fc12651be8784e3c5fb72d28933e4f392207c305066a701eba7afb88de324c40777ca23cb95719e2e93b0e08deffaf7d084b29cd49b56d08"
+        "sig_hex": "7a3a186593201b77ab54de77b1bef558d5cf0f6b1e1e34dcd8464fcf0f8e0c0a16ffd8b5a3002956a645159cd19da03c2615b7217335bceeb40bf49ee9c9b309"
       },
-      "sig_hex": "5e99033ec6b3b527fc12651be8784e3c5fb72d28933e4f392207c305066a701eba7afb88de324c40777ca23cb95719e2e93b0e08deffaf7d084b29cd49b56d08",
-      "updated_at": 1789554178,
+      "sig_hex": "7a3a186593201b77ab54de77b1bef558d5cf0f6b1e1e34dcd8464fcf0f8e0c0a16ffd8b5a3002956a645159cd19da03c2615b7217335bceeb40bf49ee9c9b309",
+      "updated_at": 1789556532,
       "endpoint": [
         "http://80.245.78.193:8402"
       ],
