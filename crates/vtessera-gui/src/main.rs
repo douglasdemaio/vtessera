@@ -1649,10 +1649,22 @@ fn start_node(ui: &Ui, state: &NodeState) {
 }
 
 fn stop_node(ui: &Ui, state: &NodeState) {
-    if let Some(mut d) = state.daemons.borrow_mut().take() {
+    let daemons = state.daemons.borrow_mut().take();
+    if let Some(mut d) = daemons {
         daemon::stop(&mut d, &|line| ui.log_line(&line));
-        refresh_status(ui, state);
     }
+    refresh_status(ui, state);
+}
+
+/// Wrap a notebook page in a scroller so the page never forces the window
+/// taller/wider than the screen; without it the tallest page pins the window
+/// minimum and the window cannot be resized to fit a smaller screen.
+fn make_page_scroller(page: &impl IsA<gtk4::Widget>) -> gtk4::ScrolledWindow {
+    let scroller = gtk4::ScrolledWindow::new();
+    scroller.set_child(Some(page));
+    scroller.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
+    scroller.set_vexpand(true);
+    scroller
 }
 
 fn build_ui(app: &gtk4::Application) {
@@ -2233,11 +2245,20 @@ fn build_ui(app: &gtk4::Application) {
     // ---- Notebook + window ----------------------------------------------
     let marketplace_page = build_marketplace_page(&ui);
     let notebook = gtk4::Notebook::new();
-    notebook.append_page(&settings_page, Some(&gtk4::Label::new(Some("Settings"))));
-    notebook.append_page(&dashboard_page, Some(&gtk4::Label::new(Some("Dashboard"))));
-    notebook.append_page(&jobs_page, Some(&gtk4::Label::new(Some("Jobs"))));
     notebook.append_page(
-        &marketplace_page,
+        &make_page_scroller(&settings_page),
+        Some(&gtk4::Label::new(Some("Settings"))),
+    );
+    notebook.append_page(
+        &make_page_scroller(&dashboard_page),
+        Some(&gtk4::Label::new(Some("Dashboard"))),
+    );
+    notebook.append_page(
+        &make_page_scroller(&jobs_page),
+        Some(&gtk4::Label::new(Some("Jobs"))),
+    );
+    notebook.append_page(
+        &make_page_scroller(&marketplace_page),
         Some(&gtk4::Label::new(Some("Marketplace"))),
     );
 
@@ -2462,7 +2483,8 @@ fn build_ui(app: &gtk4::Application) {
         let ui = ui.clone();
         let state = state.clone();
         move |_| {
-            if let Some(mut d) = state.daemons.borrow_mut().take() {
+            let daemons = state.daemons.borrow_mut().take();
+            if let Some(mut d) = daemons {
                 daemon::stop(&mut d, &|line| {
                     eprintln!("vtessera-gui: {line}");
                 });
