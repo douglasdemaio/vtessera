@@ -1,5 +1,60 @@
 {
   "version": 1,
-  "updated_at": 1789529354,
-  "nodes": []
+  "updated_at": 1789530503,
+  "nodes": [
+    {
+      "node_id": "793754d2844bfc814b0494560dd1c750",
+      "offer": {
+        "body": {
+          "device": {
+            "kind": "cpu",
+            "mem_mb": 5651,
+            "vcpus": 8
+          },
+          "endpoint": [
+            "http://192.168.178.82:8402"
+          ],
+          "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
+          "expires_unix": 1792043489,
+          "issued_unix": 1789451489,
+          "node_id": "793754d2844bfc814b0494560dd1c750",
+          "price": {
+            "currency": "usdc",
+            "mode": "paid",
+            "payout_id": "5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs",
+            "per_device_second_micros": 3903
+          },
+          "schema_ver": 2
+        },
+        "pubkey_hex": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
+        "sig_hex": "7035751f92917c1bfcbcbe56ceb66af7385da42c2f6113883a0b26ddd7ede838a422b3d4333d2e3cda0ec2647bff78c6443c4cbf491bcdb6ad2c0e1139d0340f"
+      },
+      "sig_hex": "7035751f92917c1bfcbcbe56ceb66af7385da42c2f6113883a0b26ddd7ede838a422b3d4333d2e3cda0ec2647bff78c6443c4cbf491bcdb6ad2c0e1139d0340f",
+      "updated_at": 1789530503,
+      "endpoint": [
+        "http://192.168.178.82:8402"
+      ],
+      "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
+      "candidates": [
+        {
+          "addr": "192.168.178.82:36047",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        },
+        {
+          "addr": "[2a00:a520:21cd:9900:9668:6c05:a87f:8478]:48225",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        },
+        {
+          "addr": "[2a00:a520:21cd:9900:a780:b821:e4d5:1251]:48225",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        }
+      ]
+    }
+  ]
 }
