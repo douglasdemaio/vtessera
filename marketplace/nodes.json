@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789531217,
+  "updated_at": 1789532044,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -69,8 +69,8 @@
             "http://192.168.178.22:8402"
           ],
           "endpoint_id": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-          "expires_unix": 1792123199,
-          "issued_unix": 1789531199,
+          "expires_unix": 1792124026,
+          "issued_unix": 1789532026,
           "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
           "price": {
             "currency": "usdc",
@@ -81,10 +81,10 @@
           "schema_ver": 2
         },
         "pubkey_hex": "b6c6d81a4b4dd4c0cbc6f9b915d3f954d460439788854293284984f2d3e4ea43",
-        "sig_hex": "d19cc8c4ff897bb62fd788b5f67ec4bf8745b396f6429addbc937d3674eb0e7038fadd28e015f01a50157a84089514555dac26269d9111ffd388d3258d39da02"
+        "sig_hex": "90a743ed7840153b2c0019ee604b26a6862b0ed045d4618b2ecd6c60b4a39dda87eda46ee4a272a856e61614dd1713f0e1b7890b60d3426361a5eada7a85e60b"
       },
-      "sig_hex": "d19cc8c4ff897bb62fd788b5f67ec4bf8745b396f6429addbc937d3674eb0e7038fadd28e015f01a50157a84089514555dac26269d9111ffd388d3258d39da02",
-      "updated_at": 1789531217,
+      "sig_hex": "90a743ed7840153b2c0019ee604b26a6862b0ed045d4618b2ecd6c60b4a39dda87eda46ee4a272a856e61614dd1713f0e1b7890b60d3426361a5eada7a85e60b",
+      "updated_at": 1789532044,
       "endpoint": [
         "http://192.168.178.22:8402"
       ],
@@ -97,13 +97,13 @@
           "transport": "iroh_quic"
         },
         {
-          "addr": "80.245.78.193:41419",
+          "addr": "80.245.78.193:56005",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
         },
         {
-          "addr": "192.168.178.22:41419",
+          "addr": "192.168.178.22:56005",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
