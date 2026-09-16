@@ -171,6 +171,21 @@ to the seller ATA. The remaining gap is only the **network hop**: driving the
 same client against the node at `192.168.178.82:8402` after flipping that node
 to paid mode (offer payout `5fML…`).
 
+**DONE — network hop exercised (2026-09-16):** after the other laptop pulled
+upstream and restarted its node in paid mode, this laptop ran the real paid
+flow against `http://192.168.178.82:8402`:
+- `GET /offer` → **paid** mode, program `D4iX…`, payout `5fML…`, price
+  3903 micros/device-second → agreed 60 device-seconds = 234 kmicros.
+- `POST /jobs` → x402 challenge (escrow `D4iX…` matches default program).
+- On-chain payment via client-minted test stablecoin, escrow filled, proof
+  back to `POST /jobs` → `200 accepted`, job executed on the far laptop
+  (`local-cpu`, `cpu_seconds=1`, `exit_status=completed`).
+- `finalize_pro_rata (f=1.0)` → escrow drained to seller ATA; seller balance
+  change observed; `agent SOL` returned to ~4.97 (only micros moved).
+- **Far-side proof:** `GET http://192.168.178.82:8402/jobs/<id>/status` →
+  `status=completed` with full signed metering (`cea74ba7aa6b8…`). The paid
+  job lands in the *other* laptop's job log. Item 7 fully closed.
+
 **Fixes to explore:**
 - Flip the remote node to paid mode (offer payout `5fML…`) and drive
   `x402-client` against `http://192.168.178.82:8402` with
