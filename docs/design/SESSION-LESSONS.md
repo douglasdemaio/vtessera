@@ -228,3 +228,31 @@ flow against `http://192.168.178.82:8402`:
    `6jK6…` deployment; not a genuine RPC inconsistency (item 2). Archive, but
    still add the `--explorer` nicety.
 7. `vtessera-node` should detect port collisions at startup (item 5).
+## Next up (post-#122, all-merged state)
+
+Everything on the 7-item demo + doc list is now merged and green
+(#120 GUI resize fix, #121 paid-flow deep-dive docs, #122 item-7 network-hop
+verification), plus the full check matrix passes from a fresh
+`cargo update` (fmt, clippy -D warnings, test --locked, audit, deny).
+
+Two genuinely-forward items remain, both lower-priority than the queue work:
+
+1. **Seller payout-id mismatch on a PAID hop is the one footgun not yet
+   surfaced by the client.** The offer carries
+   `payout_id = 5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs` but a fresh
+   `--seller` runs with a keypair the seller doesn't own, so the escrow
+   finalizes to *that* ATA and the seller never sees the funds. Every paid
+   demo used `--seller` from the offer; the CLI should warn loudly (or
+   require `--seller`) whenever `offer.payout_id != ATA(owner(seller))`.
+   Design option: `--check` already surfaces it; promote to a hard error.
+
+2. **GUI resize on Flatpak was fixed by wrapping pages in scrollers
+   (#120), but the notebook tab bar itself is still a fixed-layout strip.**
+   Shrinking below the tab-bar minimum still clips the labels. A follow-up
+   could let tabs wrap/ellipsize, but that's cosmetic and lower value than
+   the escrow-authority work.
+
+Neither blocks the marketplace; both are safe follow-ups for a future
+session. Standing next task per the queue is the escrow
+settlement-authority rotation work (programs/vtessera-escrow), which wraps
+the paid demo into a real multi-buyer loop.
