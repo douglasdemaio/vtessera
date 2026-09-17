@@ -44,6 +44,15 @@ contract never completes. It is skipped when the contract's recorded
 `Config` via `update_config` affects only the reference — in-flight
 contracts keep charging the fee recorded on themselves.
 
+`rotate_settlement_authority` is administrative and **not** charged the
+fee: the contract's recorded settlement authority re-points finalize
+rights to a successor key *before* `finalize_pro_rata` (e.g. a buyer
+that paid from a throwaway key, or a marketplace/settlement service
+finalizing on the buyer's behalf). It is rejected once the contract is
+finalized and when the successor equals the current authority
+(`AuthorityUnchanged`). Exercised end-to-end by the soak runner with
+`--rotate-p`.
+
 ## Why this crate is outside the host workspace
 
 Anchor programs build under the **Solana BPF toolchain**
@@ -162,6 +171,7 @@ devnet stub is deleted — there is no swap and no burn. `Config` holds
 only fee governance, kept as an off-chain reference; each `Contract`
 commits its own settlement authority **and its own fee** at
 `pay_for_compute`. Full end-to-end pay→run→settle→split flow exercised
-via `crates/devnet-demo` soak runner (20+ successful finalizations, 0%
-failure rate). See `tests/adversarial/` for the fuzz + adversarial test
-suite.
+via `crates/devnet-demo` soak runner (multi-buyer: each iteration's
+buyer is its own contract settlement authority; `--rotate-p` exercises
+settlement-authority rotation before finalize). See
+`tests/adversarial/` for the fuzz + adversarial test suite.

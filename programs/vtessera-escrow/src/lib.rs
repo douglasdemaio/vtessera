@@ -20,6 +20,13 @@
 //!   mints or holds any token of its own. The finalize call itself also
 //!   carries the flat SOL protocol fee (payer = settlement authority),
 //!   charged against the fee recorded on the contract at payment.
+//! - `rotate_settlement_authority` lets the contract's current recorded
+//!   settlement authority hand finalize rights to another key before the
+//!   escrow is settled — purely administrative, no money moves and no
+//!   fee is charged. Useful operationally (a buyer that paid from a
+//!   throwaway key, or a settlement service that finalizes on the
+//!   buyer's behalf) and in multi-buyer loops where each contract's
+//!   authority is rotated around the group.
 //! - `cancel_before_start` lets a buyer reclaim the escrow with `f = 0`
 //!   if the seller never started the job. It pays the flat SOL protocol
 //!   fee too (payer = buyer) — the fee is per transaction, even when a
@@ -176,6 +183,29 @@ pub mod vtessera_escrow {
         contract.finalized = false;
         contract.bump = ctx.bumps.contract;
 
+        Ok(())
+    }
+
+    /// Re-point a paid contract's settlement authority **before**
+    /// finalize. The currently-recorded authority signs this to hand
+    /// finalize rights to `new_settlement_authority` — e.g. a buyer that
+    /// paid from a throwaway key or that wants a marketplace/settlement
+    /// service to finalize on its behalf. Purely administrative: no
+    /// stablecoin moves and no protocol fee is charged (unlike
+    /// `finalize`/`cancel`). Useful for operationally rotating which key
+    /// can settle an escrow after the agent already paid.
+    ///
+    /// Rejected when the contract is already finalized, or when the new
+    /// key equals the current one (`AuthorityUnchanged`).
+    pub fn rotate_settlement_authority(
+        ctx: Context<RotateSettlementAuthority>,
+        new_settlement_authority: Pubkey,
+    ) -> Result<()> {
+        require!(
+            new_settlement_authority != ctx.accounts.contract.settlement_authority,
+            EscrowError::AuthorityUnchanged
+        );
+        ctx.accounts.contract.settlement_authority = new_settlement_authority;
         Ok(())
     }
 
@@ -457,6 +487,28 @@ pub struct PayForCompute<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Rotate a contract's settlement authority before finalize. The
+/// currently-recorded authority signs and names the successor; it owns
+/// no funds and the escrow is untouched. Administrative only — no fee.
+#[derive(Accounts)]
+pub struct RotateSettlementAuthority<'info> {
+    /// The contract's current `settlement_authority` (recorded at
+    /// `pay_for_compute` time). Must sign; it is the only key allowed to
+    /// re-point finalize rights for this escrow.
+    #[account(mut)]
+    pub settlement_authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [CONTRACT_SEED, contract.job_id.as_ref()],
+        bump = contract.bump,
+        constraint = contract.settlement_authority == settlement_authority.key()
+            @ EscrowError::NotSettlementAuthority,
+        constraint = !contract.finalized @ EscrowError::AlreadyFinal,
+    )]
+    pub contract: Account<'info, Contract>,
+}
+
 /// Finalize accounts. The seller's earned slice is paid in the contract's
 /// stablecoin mint, so only the stablecoin side is needed.
 #[derive(Accounts)]
@@ -581,6 +633,8 @@ pub enum EscrowError {
     MathOverflow,
     #[msg("fee wallet does not match the configured protocol fee wallet")]
     WrongFeeWallet,
+    #[msg("settlement authority rotation must name a different key")]
+    AuthorityUnchanged,
 }
 
 #[cfg(test)]
@@ -603,6 +657,7 @@ mod tests {
         assert_eq!(u32::from(EscrowError::WrongOwner), 6005);
         assert_eq!(u32::from(EscrowError::MathOverflow), 6006);
         assert_eq!(u32::from(EscrowError::WrongFeeWallet), 6007);
+        assert_eq!(u32::from(EscrowError::AuthorityUnchanged), 6008);
     }
 
     #[test]

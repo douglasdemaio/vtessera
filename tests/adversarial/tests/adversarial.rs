@@ -43,6 +43,8 @@
 //! | 2.2k finalize by non-authority | `finalize_rejects_non_settlement_authority` |
 //! | 2.2m pay records per-contract authority | `pay_records_contract_settlement_authority` |
 //! | 2.2n config rotation doesn't revoke contract authority | `update_config_rotation_does_not_revoke_contract_authority` |
+//! | 2.2o settle via rotated contract authority | `rotate_settlement_authority_hands_finalize_off`, `rotate_settlement_authority_chain` |
+//! | 2.2p rotate rejects non-authority / same-key / after-finalize | `rotate_settlement_authority_rejects_non_authority`, `rotate_settlement_authority_rejects_same_key`, `rotate_settlement_authority_rejects_after_finalize` |
 //! | §2.4 happy path (seller paid) | `finalize_happy_path` |
 //! | §2.4 fraction = 0 (refund only) | `finalize_fraction_zero_refunds_buyer` |
 //! | fee on pay | `pay_for_compute_charges_sol_fee` |
@@ -86,6 +88,7 @@ enum EscrowError {
     #[allow(dead_code)]
     MathOverflow,
     WrongFeeWallet,
+    AuthorityUnchanged,
 }
 
 const ERROR_CODE_OFFSET: u32 = 6000;
@@ -295,6 +298,22 @@ fn update_config_ix(
         accounts: vec![
             AccountMeta::new(*sa, true),
             AccountMeta::new(*config, false),
+        ],
+        data,
+    }
+}
+
+/// `rotate_settlement_authority`: the contract's current recorded
+/// settlement authority signs to hand finalize rights to `new_sa`.
+/// Account order mirrors `RotateSettlementAuthority` in lib.rs.
+fn rotate_authority_ix(sa: &Pubkey, contract: &Pubkey, new_sa: &Pubkey) -> Instruction {
+    let mut data = disc("rotate_settlement_authority").to_vec();
+    data.extend_from_slice(&new_sa.to_bytes());
+    Instruction {
+        program_id: prog(),
+        accounts: vec![
+            AccountMeta::new(*sa, true),
+            AccountMeta::new(*contract, false),
         ],
         data,
     }
@@ -1119,6 +1138,186 @@ fn finalize_rejects_non_settlement_authority() {
     h.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
     let res = h.svm.send_transaction(h.finalize_tx(&attacker, 1_000_000));
     expect_custom(res, EscrowError::NotSettlementAuthority);
+}
+
+// ---------- Settlement-authority rotation ----------------------------------
+
+#[test]
+fn rotate_settlement_authority_hands_finalize_off() {
+    // §2.2o: an operator key recorded at pay time hands finalize rights
+    // to a successor; after rotation the old key can no longer finalize
+    // and the new one can.
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    h.price = PAY_PRICE;
+    let operator = Keypair::new();
+    let successor = Keypair::new();
+    for k in [&operator, &successor] {
+        h.svm.airdrop(&k.pubkey(), 1_000_000_000).unwrap();
+    }
+    h.pay_with_authority(PAY_PRICE, &operator.pubkey());
+
+    let ix = rotate_authority_ix(&operator.pubkey(), &h.contract, &successor.pubkey());
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&operator.pubkey()),
+        &[&operator],
+        h.svm.latest_blockhash(),
+    );
+    h.svm.send_transaction(tx).unwrap();
+
+    // Old authority is revoked.
+    expect_custom(
+        h.svm.send_transaction(h.finalize_tx(&operator, 1_000_000)),
+        EscrowError::NotSettlementAuthority,
+    );
+    // New authority settles the escrow.
+    h.svm
+        .send_transaction(h.finalize_tx(&successor, 1_000_000))
+        .unwrap();
+    assert_eq!(h.token_balance(&h.escrow_stable), 0);
+    assert_eq!(h.token_balance(&h.seller_stable), PAY_PRICE);
+}
+
+#[test]
+fn rotate_settlement_authority_chain() {
+    // §2.2o: A → B → C rotation; finalize rights follow the chain. After
+    // the last hop only C settles; A and B both fail.
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    h.price = PAY_PRICE;
+    let a = Keypair::new();
+    let b = Keypair::new();
+    let c = Keypair::new();
+    for k in [&a, &b, &c] {
+        h.svm.airdrop(&k.pubkey(), 1_000_000_000).unwrap();
+    }
+    h.pay_with_authority(PAY_PRICE, &a.pubkey());
+
+    // A → B
+    let ix = rotate_authority_ix(&a.pubkey(), &h.contract, &b.pubkey());
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&a.pubkey()),
+        &[&a],
+        h.svm.latest_blockhash(),
+    );
+    h.svm.send_transaction(tx).unwrap();
+    // B → C
+    let ix = rotate_authority_ix(&b.pubkey(), &h.contract, &c.pubkey());
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&b.pubkey()),
+        &[&b],
+        h.svm.latest_blockhash(),
+    );
+    h.svm.send_transaction(tx).unwrap();
+
+    // A and B are both revoked now; only C is this contract's authority.
+    expect_custom(
+        h.svm.send_transaction(h.finalize_tx(&a, 1_000_000)),
+        EscrowError::NotSettlementAuthority,
+    );
+    expect_custom(
+        h.svm.send_transaction(h.finalize_tx(&b, 1_000_000)),
+        EscrowError::NotSettlementAuthority,
+    );
+    h.svm
+        .send_transaction(h.finalize_tx(&c, 1_000_000))
+        .unwrap();
+    assert_eq!(h.token_balance(&h.escrow_stable), 0);
+    assert_eq!(h.token_balance(&h.seller_stable), PAY_PRICE);
+}
+
+#[test]
+fn rotate_settlement_authority_rejects_non_authority() {
+    // §2.2p: only the contract's recorded authority can rotate it.
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    h.price = PAY_PRICE;
+    let operator = Keypair::new();
+    h.svm.airdrop(&operator.pubkey(), 1_000_000_000).unwrap();
+    h.pay_with_authority(PAY_PRICE, &operator.pubkey());
+
+    let attacker = Keypair::new();
+    h.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+    let successor = Keypair::new().pubkey();
+    let ix = rotate_authority_ix(&attacker.pubkey(), &h.contract, &successor);
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&attacker.pubkey()),
+        &[&attacker],
+        h.svm.latest_blockhash(),
+    );
+    expect_custom(
+        h.svm.send_transaction(tx),
+        EscrowError::NotSettlementAuthority,
+    );
+}
+
+#[test]
+fn rotate_settlement_authority_rejects_same_key() {
+    // §2.2p: rotating to the current authority itself is a no-op rejected
+    // by AuthorityUnchanged.
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    h.price = PAY_PRICE;
+    let operator = Keypair::new();
+    h.svm.airdrop(&operator.pubkey(), 1_000_000_000).unwrap();
+    h.pay_with_authority(PAY_PRICE, &operator.pubkey());
+
+    let ix = rotate_authority_ix(&operator.pubkey(), &h.contract, &operator.pubkey());
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&operator.pubkey()),
+        &[&operator],
+        h.svm.latest_blockhash(),
+    );
+    expect_custom(h.svm.send_transaction(tx), EscrowError::AuthorityUnchanged);
+}
+
+#[test]
+fn rotate_settlement_authority_rejects_after_finalize() {
+    // §2.2p: a finalized contract can't have its authority re-pointed.
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    h.price = PAY_PRICE;
+    let operator = Keypair::new();
+    h.svm.airdrop(&operator.pubkey(), 1_000_000_000).unwrap();
+    h.pay_with_authority(PAY_PRICE, &operator.pubkey());
+    h.svm
+        .send_transaction(h.finalize_tx(&operator, 1_000_000))
+        .unwrap();
+
+    let successor = Keypair::new().pubkey();
+    let ix = rotate_authority_ix(&operator.pubkey(), &h.contract, &successor);
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&operator.pubkey()),
+        &[&operator],
+        h.svm.latest_blockhash(),
+    );
+    expect_custom(h.svm.send_transaction(tx), EscrowError::AlreadyFinal);
+}
+
+#[test]
+fn rotate_settlement_authority_leaves_buyer_cancel_alone() {
+    // Rotation changes only who may finalize — the buyer can still cancel
+    // (cancel is gated on `contract.buyer`, not the authority).
+    let mut h = Harness::setup_only(BUYER_MINT_AMOUNT);
+    h.price = PAY_PRICE;
+    let operator = Keypair::new();
+    h.svm.airdrop(&operator.pubkey(), 1_000_000_000).unwrap();
+    h.pay_with_authority(PAY_PRICE, &operator.pubkey());
+
+    let successor = Keypair::new().pubkey();
+    let ix = rotate_authority_ix(&operator.pubkey(), &h.contract, &successor);
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&operator.pubkey()),
+        &[&operator],
+        h.svm.latest_blockhash(),
+    );
+    h.svm.send_transaction(tx).unwrap();
+
+    h.svm.send_transaction(h.cancel_tx()).unwrap();
+    assert_eq!(h.token_balance(&h.buyer_stable), BUYER_MINT_AMOUNT);
+    assert_eq!(h.token_balance(&h.escrow_stable), 0);
 }
 
 #[test]
