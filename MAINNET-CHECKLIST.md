@@ -322,15 +322,14 @@ fast enough to fix it, or (b) accept the loss.
       > upgrade authority will be dropped `--final` at mainnet deploy, so
       > findings found *now* can still be patched.
       > - Repo: https://github.com/douglasdemaio/vtessera
-      > - Audit commit: tag `escrow-audit-v2` (TBD — re-tagged at the
-      >   program-ID rotation; v1 (`06cbe70`) preceded it)
+      > - Audit commit: tag `escrow-audit-v2` (`1c80ee6`) — re-tagged at
+      >   the program-ID rotation; v1 (`06cbe70`) preceded it
       > - Threat model + deploy procedure:
       >   `programs/vtessera-escrow/SECURITY.md`
       > - Adversarial suite (LiteSVM) pinning each error code:
       >   `tests/adversarial/`
-      > - Reproducible `.so` SHA-256:
-      >   TBD (recomputed on rotation; pinned in
-      >   `programs/vtessera-escrow/DEPLOYED_SHA256.txt`)
+      > - Reproducible `.so` SHA-256: `5d7f6dfd40389cb7a7beab2499516fe92607cf74f2e7b3764dd1e2e865a68a56`
+      >   (pinned in `programs/vtessera-escrow/DEPLOYED_SHA256.txt`)
       > - Devnet program ID: `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`
       >   (stays upgradeable until the audit closes)
       >
