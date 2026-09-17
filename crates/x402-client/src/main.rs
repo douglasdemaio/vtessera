@@ -124,7 +124,11 @@ fn usage_and_exit() -> ! {
     eprintln!("  --node    vtessera-node base URL (default {DEFAULT_NODE})");
     eprintln!("  --mint    pay a real devnet stablecoin mint instead of minting a test one");
     eprintln!("  --seconds agreed device-seconds for the job (default {DEFAULT_SECONDS})");
-    eprintln!("  --seller  where the seller's earned slice lands (default: fresh keypair)");
+    eprintln!(
+        "  --seller  where the seller's earned slice lands — on PAID hops must equal the offer's \n\
+         \x20          payout_id or the run refuses to pay (a fresh keypair would never be seen by \n\
+         \x20          the seller's operator)"
+    );
     eprintln!(
         "  --program escrow program ID to pay (default {PROGRAM_ID_STR}); finalize is per-contract, \
          so any deployment works once paid"
@@ -249,15 +253,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "seller node {node_id} advertises {:.0} vCPU @ {:.0} MiB, price {} micros/device-sec (currency {:?})",
         offer.vcpus, offer.mem_mb, offer.per_device_second_micros.unwrap_or(0), offer.currency
     );
-    if let Some(payout) = &offer.payout_id {
-        println!("offer payout_id: {payout}");
-        if let Some(s) = args.seller {
-            if s.to_string() != *payout {
-                println!(
-                    "  NOTE: --seller {s} differs from the offer's payout_id {payout} — \
-                     earnings will go to the payout_id on the offer"
-                );
+    // Seller payout must land where the offer advertises (the offer's
+    // payout_id). If it would land anywhere else — a wrong --seller or, worse,
+    // no --seller at all (a fresh keypair) — the seller's operator never sees
+    // the funds, so refuse to pay. Hard error, not a note: this is a PAID hop.
+    match &offer.payout_id {
+        Some(payout) => {
+            let ok = match args.seller {
+                Some(s) => s.to_string() == *payout,
+                None => false,
+            };
+            if !ok {
+                let given = args
+                    .seller
+                    .map(|s| format!("--seller {s}"))
+                    .unwrap_or_else(|| "--seller <unset, fresh keypair>".to_string());
+                return Err(format!(
+                    "offer pays out to {payout} but {given} would receive the escrow instead — \
+                     the node operator would never see the funds. Re-run with --seller {payout}."
+                )
+                .into());
             }
+            println!(
+                "offer payout_id: {payout} (matches --seller {})",
+                args.seller.unwrap()
+            );
+        }
+        None => {
+            return Err(
+                "paid offer carries no payout_id — cannot verify where the seller's earnings \
+                 land; refusing to pay."
+                    .into(),
+            )
         }
     }
     println!(
@@ -767,25 +794,46 @@ fn preflight(
     };
 
     // payout vs --seller: verify the live offer pays out where we expect.
-    if let (Some(offer), Some(seller)) = (&offer, args.seller) {
-        match &offer.payout_id {
-            Some(payout) if *payout == seller.to_string() => {
+    // On a PAID hop the escrow pays the --seller pubkey (or a fresh keypair
+    // when unset), never the offer's payout_id — so anything other than an
+    // exact match means the seller's operator never receives the funds.
+    if let Some(offer) = &offer {
+        let is_paid = offer.per_device_second_micros.is_some();
+        match (&offer.payout_id, args.seller, is_paid) {
+            (Some(payout), Some(seller), _) if *payout == seller.to_string() => {
                 report(
                     PreflightStatus::Pass,
                     &format!("offer payout_id {payout} matches --seller {seller}"),
                 );
             }
-            Some(payout) => {
+            (Some(payout), Some(seller), true) => {
                 report(
                     PreflightStatus::Fail,
                     &format!(
                         "--seller {seller} != offer payout_id {payout} — earnings would go to \
-                         the offer's payout key, not --seller"
+                         --seller {seller}, not the offer's payout key {payout}"
                     ),
                 );
                 critical += 1;
             }
-            None => {}
+            (Some(payout), None, true) => {
+                report(
+                    PreflightStatus::Fail,
+                    &format!(
+                        "paid offer pays {payout} but no --seller set — escrow would finalize to \
+                         a fresh keypair the seller doesn't own; pass --seller {payout}"
+                    ),
+                );
+                critical += 1;
+            }
+            (None, _, true) => {
+                report(
+                    PreflightStatus::Fail,
+                    "paid offer carries no payout_id — cannot verify where earnings land",
+                );
+                critical += 1;
+            }
+            _ => {}
         }
     }
 
