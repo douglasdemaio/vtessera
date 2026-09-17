@@ -196,7 +196,7 @@ the stack.
 
 ## Review / verification
 
-- Build: `anchor build` (or the CI-equivalent pinned toolchain).
+- Build: `anchor build --no-idl` (or the CI-equivalent pinned toolchain).
 - Tests: program unit tests + drift guard; `tests/adversarial/`
   standalone LiteSVM suite (`cargo test --locked`).
 - Soak: hourly devnet soak (`.github/workflows/soak-devnet.yml`).

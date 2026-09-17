@@ -1,0 +1,18 @@
+# cargo-audit configuration for the Anchor program workspace.
+#
+# The two ignored advisories are hard-pinned by solana-sdk 1.18.26, which
+# the program builds against (see vtessera-escrow/Cargo.toml). No patched
+# version satisfies solana-program's constraints — a fix requires bumping
+# the whole Solana SDK, which is out of scope and would change the
+# reproducible .so. Both are dev-time-only: the escrow program never calls
+# the affected dalek sign/verify paths.
+#
+# Revisit when the Solana SDK is upgraded (tracked in MAINNET-CHECKLIST).
+
+[advisories]
+ignore = [
+  # curve25519-dalek 3.2.1 — timing variability in Scalar29::sub/Scalar52::sub
+  "RUSTSEC-2024-0344",
+  # ed25519-dalek 1.0.1 — double public key signing function oracle
+  "RUSTSEC-2022-0093",
+]
