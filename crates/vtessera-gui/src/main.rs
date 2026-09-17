@@ -879,7 +879,7 @@ fn refresh_jobs_table(ui: &Ui) {
     ui.earnings_val.set_text("\u{2014}");
 
     // Last job indicator — the most recent receipt/queue row.
-    if let Some(last) = rows.last() {
+    if let Some(last) = rows.first() {
         let stamp = if last.age == u64::MAX {
             "unknown".to_string()
         } else if last.age < 60 {
@@ -900,7 +900,7 @@ fn refresh_jobs_table(ui: &Ui) {
     }
 
     // Add rows (newest first).
-    for row in rows.into_iter().rev().take(50) {
+    for row in rows.into_iter().take(50) {
         let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         row_box.add_css_class("job-table-row");
 
@@ -2810,6 +2810,43 @@ mod tests {
         format!(
             r#"{{"seq":{seq},"job_id":"{id}","priority":{priority},"body":[],"created_unix":1}}"#
         )
+    }
+
+    #[test]
+    fn jobs_table_orders_newest_first() {
+        let root = std::env::temp_dir().join(format!(
+            "vtessera_gui_jobs_order_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let receipts = root.join("job-receipts");
+        let write_at = |name: &str, age_secs: u64| {
+            write(
+                &receipts,
+                &format!("{name}.json"),
+                &signed_receipt(name, 1.0, 1, 65536),
+            );
+            let path = receipts.join(format!("{name}.json"));
+            let modified = std::time::SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(age_secs))
+                .unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        };
+        // "old" finished 2h ago, "mid" 1h ago, "new" moments ago.
+        write_at("old", 7200);
+        write_at("mid", 3600);
+        write_at("new", 5);
+
+        let rows = scan_jobs_from(&root);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["new", "mid", "old"]);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
