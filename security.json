@@ -10,7 +10,7 @@
   "policy": "https://github.com/douglasdemaio/vtessera/security",
   "preferred_languages": ["en"],
   "source_code": "https://github.com/douglasdemaio/vtessera",
-  "source_revision": "e553d87",
+  "source_revision": "1c80ee6dd3f69456d318dfc76a59e6964f49c0c4",
   "auditors": [],
   "version": "0.1.0"
 }
