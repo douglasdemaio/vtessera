@@ -8,10 +8,12 @@
 # - Scheduled workflows only run on the default branch (`main`), so this
 #   takes effect once merged. Use `workflow_dispatch` to run it manually.
 # - The payer keypair is a dedicated throwaway devnet key (in the
-#   `DEVNET_PAYER_KEYPAIR` secret). The devnet `init_config` pins that
-#   key as settlement authority (config PDA seed `vtessera_config_v2`),
-#   so the soak's finalize is fully self-signed. No operator key is used
-#   here.
+#   `DEVNET_PAYER_KEYPAIR` secret). The devnet `init_config` pins a
+#   settlement authority (config PDA seed `vtessera_config_v2`; currently
+#   the operator key `34Wxj…` from the 2026-09-17 rotation). The soak
+#   doesn't depend on who that is — every finalize is signed by the
+#   per-contract authority recorded at `pay_for_compute`, and `init_config`
+#   is idempotent (skips if the config PDA already exists).
 # - The payer is topped up with a devnet airdrop when its balance drops
 #   below 2 SOL (airdrops are rate-limited; the run proceeds regardless).
 
