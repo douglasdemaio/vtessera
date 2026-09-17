@@ -49,12 +49,14 @@ pub mod capacity;
 pub mod index;
 pub mod mcp;
 pub mod queue;
+pub mod rate_limit;
 #[cfg(feature = "serve")]
 pub mod solana_derivation;
 
 #[cfg(feature = "serve")]
 use queue::EnqueueOutcome;
 use queue::{JobQueue, QueueLookupError};
+use rate_limit::RateLimiter;
 
 /// One inbound HTTP request, framework-agnostic.
 #[derive(Debug, Clone)]
@@ -257,6 +259,11 @@ pub struct NodeState {
     /// durable on-disk wait queue; `None` preserves today's synchronous
     /// behavior byte-for-byte. The binary spawns the drainer thread.
     pub queue: Option<Arc<JobQueue>>,
+    /// Optional per-key token-bucket rate limiter (ROADMAP.md §5 abuse
+    /// handling). `Some` bounds requests per `X-Agent-Id` (plus one shared
+    /// bucket for anonymous traffic) and returns 429 when exceeded; `None`
+    /// preserves today's unthrottled behavior.
+    pub rate_limit: Option<Arc<RateLimiter>>,
 }
 
 /// Outcome of handling a `/jobs` request when the offer is paid.
@@ -294,6 +301,28 @@ pub struct PaymentChallenge {
 /// Dispatch a single request to the right handler. This is the function
 /// every HTTP framework integration calls.
 pub fn dispatch(state: &NodeState, req: HttpRequest) -> HttpResponse {
+    // Rate limiting runs first so every transport (TCP HTTP, iroh QUIC,
+    // coordinator pull, agent CLI) shares one choke point. `/healthz` is
+    // exempt: an overloaded node must still answer liveness probes, or a
+    // load-balancer/keepalive would flap it into being restarted.
+    let is_healthz = req.method == HttpMethod::Get && req.path == "/healthz";
+    if !is_healthz {
+        if let Some(limiter) = &state.rate_limit {
+            let key = rate_limit::request_key(&req.headers);
+            if let Err(retry_after) = limiter.check(&key) {
+                let body = b"rate limit exceeded".to_vec();
+                return HttpResponse {
+                    status: 429,
+                    headers: vec![
+                        ("content-type".into(), "text/plain; charset=utf-8".into()),
+                        ("content-length".into(), body.len().to_string()),
+                        ("retry-after".into(), retry_after.as_secs().to_string()),
+                    ],
+                    body,
+                };
+            }
+        }
+    }
     // Job-status routes are pattern-matched off the "fast" prefixes first so
     // the `/jobs` POST dispatch stays untouched.
     if req.method == HttpMethod::Get {
@@ -1003,6 +1032,7 @@ mod tests {
             #[cfg(feature = "serve")]
             index: None,
             queue: None,
+            rate_limit: None,
         }
     }
 
@@ -1106,6 +1136,74 @@ mod tests {
         let s = state(PriceQuote::Free);
         let r = dispatch(&s, req(HttpMethod::Get, "/healthz", vec![]));
         assert_eq!(r.status, 200);
+    }
+
+    #[test]
+    fn rate_limit_admits_up_to_burst_then_429() {
+        let mut s = state(PriceQuote::Free);
+        s.rate_limit = Some(Arc::new(RateLimiter::new(2, 0.5)));
+        // Burst of 2 passes.
+        assert_eq!(
+            dispatch(&s, req(HttpMethod::Get, "/offer", vec![])).status,
+            200
+        );
+        assert_eq!(
+            dispatch(&s, req(HttpMethod::Get, "/offer", vec![])).status,
+            200
+        );
+        // The third within the same instantiation is refused with Retry-After.
+        let r = dispatch(&s, req(HttpMethod::Get, "/offer", vec![]));
+        assert_eq!(r.status, 429);
+        let retry = r
+            .headers
+            .iter()
+            .find(|(k, _)| k == "retry-after")
+            .expect("429 carries retry-after");
+        assert!(retry.1.parse::<u64>().is_ok());
+    }
+
+    #[test]
+    fn rate_limit_isolates_agent_ids() {
+        let mut s = state(PriceQuote::Free);
+        s.rate_limit = Some(Arc::new(RateLimiter::new(1, 0.5)));
+        let burst_a = req(HttpMethod::Get, "/offer", vec![("x-agent-id", "agent-a")]);
+        let again_a = req(HttpMethod::Get, "/offer", vec![("x-agent-id", "agent-a")]);
+        let burst_b = req(HttpMethod::Get, "/offer", vec![("x-agent-id", "agent-b")]);
+        assert_eq!(dispatch(&s, burst_a).status, 200);
+        assert_eq!(dispatch(&s, again_a).status, 429);
+        // A different agent has its own fresh bucket.
+        assert_eq!(dispatch(&s, burst_b).status, 200);
+    }
+
+    #[test]
+    fn rate_limit_exempts_healthz() {
+        let mut s = state(PriceQuote::Free);
+        s.rate_limit = Some(Arc::new(RateLimiter::new(1, 0.5)));
+        // Drain the anonymous bucket...
+        assert_eq!(
+            dispatch(&s, req(HttpMethod::Get, "/offer", vec![])).status,
+            200
+        );
+        assert_eq!(
+            dispatch(&s, req(HttpMethod::Get, "/offer", vec![])).status,
+            429
+        );
+        // ...but liveness probes are never throttled.
+        assert_eq!(
+            dispatch(&s, req(HttpMethod::Get, "/healthz", vec![])).status,
+            200
+        );
+    }
+
+    #[test]
+    fn rate_limit_off_by_default() {
+        let s = state(PriceQuote::Free);
+        for _ in 0..100 {
+            assert_eq!(
+                dispatch(&s, req(HttpMethod::Get, "/offer", vec![])).status,
+                200
+            );
+        }
     }
 
     #[test]
