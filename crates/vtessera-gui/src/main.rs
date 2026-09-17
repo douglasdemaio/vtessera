@@ -65,18 +65,18 @@ struct Ui {
     escrow_entry: gtk4::Entry,
     network_dd: gtk4::DropDown,
     network_custom_entry: gtk4::Entry,
-    local_network_switch: gtk4::Switch,
+    local_network_toggle: OnOff,
     marketplace_url_entry: gtk4::Entry,
     detect_marketplace_btn: gtk4::Button,
-    marketplace_switch: gtk4::Switch,
-    upnp_switch: gtk4::Switch,
+    marketplace_toggle: OnOff,
+    upnp_toggle: OnOff,
     cidr_entry: gtk4::Entry,
     interval_spin: gtk4::SpinButton,
     max_jobs_spin: gtk4::SpinButton,
     backend_dd: gtk4::DropDown,
     /// "Accept workloads from others" — the second consent gate (§2.2 of
     /// `docs/CONSENT.md`). OFF by default; off until explicitly enabled.
-    accept_switch: gtk4::Switch,
+    accept_toggle: OnOff,
     error_label: gtk4::Label,
     settlement_label: gtk4::Label,
     log_view: gtk4::TextView,
@@ -135,6 +135,55 @@ struct NodeState {
     log_pending: Arc<Mutex<Vec<String>>>,
 }
 
+/// A two-state On/Off control styled like the Mode segmented buttons
+/// (Donate/Sell). Reads and writes like a `gtk4::Switch` but renders as a
+/// segmented button pair so every toggle in the UI shares one look.
+#[derive(Clone)]
+struct OnOff {
+    on: gtk4::ToggleButton,
+    off: gtk4::ToggleButton,
+    widget: gtk4::Box,
+}
+
+impl OnOff {
+    fn new(active: bool) -> Self {
+        let on = gtk4::ToggleButton::with_label("On");
+        let off = gtk4::ToggleButton::with_label("Off");
+        on.set_group(None::<&gtk4::ToggleButton>);
+        off.set_group(Some(&on));
+        let widget = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        widget.add_css_class("mode-segmented");
+        widget.append(&on);
+        widget.append(&off);
+        on.set_active(active);
+        off.set_active(!active);
+        Self { on, off, widget }
+    }
+
+    fn is_active(&self) -> bool {
+        self.on.is_active()
+    }
+
+    fn set_active(&self, active: bool) {
+        // Buttons are radio-like in a group; set both explicitly so the pair
+        // always has exactly one active state.
+        self.on.set_active(active);
+        self.off.set_active(!active);
+    }
+
+    fn widget(&self) -> &gtk4::Box {
+        &self.widget
+    }
+
+    /// Fires on every transition with the new state. Only the "On" button is
+    /// observed: clicking "Off" in the same group deactivates it, so its
+    /// `toggled` fires for both directions.
+    fn connect_active_notify(&self, callback: impl Fn(bool) + 'static) {
+        let on = self.on.clone();
+        self.on.connect_toggled(move |_| callback(on.is_active()));
+    }
+}
+
 impl Ui {
     fn is_free(&self) -> bool {
         self.free_btn.is_active()
@@ -151,7 +200,7 @@ impl Ui {
     fn sync_network_sensitivity(&self) {
         let custom = self.network_dd.selected() == 2;
         self.network_custom_entry.set_visible(custom);
-        let local = self.local_network_switch.is_active();
+        let local = self.local_network_toggle.is_active();
         self.marketplace_url_entry.set_visible(!local);
         self.cidr_entry.set_visible(local);
     }
@@ -165,7 +214,7 @@ impl Ui {
         self.endpoint_caption.set_visible(!outbound);
         self.endpoint_row.set_visible(!outbound);
         self.upnp_caption.set_visible(!outbound);
-        self.upnp_switch.set_visible(!outbound);
+        self.upnp_toggle.widget().set_visible(!outbound);
         self.upnp_hint.set_visible(!outbound);
         self.coordinator_caption.set_visible(outbound);
         self.coordinator_entry.set_visible(outbound);
@@ -220,12 +269,12 @@ impl Ui {
             sample_interval_secs: self.interval_spin.value() as u64,
             backend: backend.into(),
             metering_consent: self.settings.borrow().metering_consent,
-            accept_workloads: self.accept_switch.is_active(),
+            accept_workloads: self.accept_toggle.is_active(),
             consent_version: self.settings.borrow().consent_version,
             marketplace_url: self.marketplace_url_entry.text().trim().to_string(),
-            marketplace_enabled: self.marketplace_switch.is_active(),
-            upnp_enabled: self.upnp_switch.is_active(),
-            local_network: self.local_network_switch.is_active(),
+            marketplace_enabled: self.marketplace_toggle.is_active(),
+            upnp_enabled: self.upnp_toggle.is_active(),
+            local_network: self.local_network_toggle.is_active(),
             allowed_cidrs: cidr_list_from_entry(&self.cidr_entry),
             connectivity: if self.connectivity_dd.selected() == 1 {
                 settings::CONNECTIVITY_OUTBOUND.into()
@@ -258,10 +307,10 @@ impl Ui {
         self.network_custom_entry.set_text(&s.network);
         self.network_custom_entry
             .set_visible(s.network_preset == "custom");
-        self.local_network_switch.set_active(s.local_network);
+        self.local_network_toggle.set_active(s.local_network);
         self.marketplace_url_entry.set_text(&s.marketplace_url);
-        self.marketplace_switch.set_active(s.marketplace_enabled);
-        self.upnp_switch.set_active(s.upnp_enabled);
+        self.marketplace_toggle.set_active(s.marketplace_enabled);
+        self.upnp_toggle.set_active(s.upnp_enabled);
         self.cidr_entry.set_text(&s.allowed_cidrs.join(", "));
         self.connectivity_dd
             .set_selected(if s.is_outbound() { 1 } else { 0 });
@@ -272,7 +321,7 @@ impl Ui {
         self.max_jobs_spin.set_value(s.max_concurrent_jobs as f64);
         self.backend_dd
             .set_selected(if s.backend == "local-cpu" { 1 } else { 0 });
-        self.accept_switch.set_active(s.accept_workloads);
+        self.accept_toggle.set_active(s.accept_workloads);
         self.sync_mode_sensitivity();
     }
 }
@@ -1143,7 +1192,7 @@ fn build_listing_detail(ui: &Rc<Ui>, listing: &marketplace::Listing) -> gtk4::Bo
     cmd.set_wrap(true);
     detail.append(&cmd);
 
-    let copy = gtk4::Button::with_label("Copy agent command");
+    let copy = gtk4::Button::with_label("Copy Agent Command");
     let cmd_text = marketplace::agent_command(listing);
     copy.connect_clicked(move |_| {
         set_clipboard(&cmd_text);
@@ -1306,6 +1355,10 @@ fn save_quick_price(ui: &Rc<Ui>, state: &NodeState) {
     let paid = ui.ml_paid_btn.is_active();
     settings.mode = if paid { "paid".into() } else { "free".into() };
     settings.price_per_cpu_hour = ui.ml_price_spin.value();
+    // Mirror the saved price onto the Settings page entry so both inputs
+    // stay in lock-step after a quick-price Save.
+    ui.price_entry
+        .set_text(&format_price(settings.price_per_cpu_hour));
     if let Err(e) = settings.validate() {
         ui.ml_hint.set_text(&e);
         return;
@@ -1446,7 +1499,7 @@ fn build_marketplace_page(ui: &Rc<Ui>) -> gtk4::Box {
     ui.ml_save_btn.add_css_class("suggested-action");
     card.append(&ui.ml_save_btn);
 
-    let preview_title = gtk4::Label::new(Some("What buyers see"));
+    let preview_title = gtk4::Label::new(Some("What Buyers See"));
     preview_title.add_css_class("dashboard-card-title");
     preview_title.set_xalign(0.0);
     card.append(&preview_title);
@@ -1459,7 +1512,7 @@ fn build_marketplace_page(ui: &Rc<Ui>) -> gtk4::Box {
     ui.ml_cmd_label.set_wrap(true);
     card.append(&ui.ml_cmd_label);
 
-    let copy_btn = gtk4::Button::with_label("Copy command");
+    let copy_btn = gtk4::Button::with_label("Copy Command");
     let cmd_label = ui.ml_cmd_label.clone();
     copy_btn.connect_clicked(move |_| set_clipboard(cmd_label.text().as_ref()));
     copy_btn.set_halign(gtk4::Align::Start);
@@ -1487,6 +1540,12 @@ fn start_node(ui: &Ui, state: &NodeState) {
     };
     ui.clear_error();
     *ui.settings.borrow_mut() = settings.clone();
+
+    // The Settings entry is the source of truth when the node starts:
+    // mirror it onto the My Listing price spin (via the entry's changed
+    // signal) so the two price inputs never drift apart.
+    ui.price_entry
+        .set_text(&format_price(settings.price_per_cpu_hour));
 
     if let Err(e) = settings.save(&settings::settings_path()) {
         ui.set_error(&e);
@@ -1747,14 +1806,14 @@ fn build_ui(app: &gtk4::Application) {
     let jobs_list = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
 
     let ui_port_caption = gtk4::Label::new(Some("Port"));
-    let ui_endpoint_caption = gtk4::Label::new(Some("Advertised endpoint"));
+    let ui_endpoint_caption = gtk4::Label::new(Some("Advertised Endpoint"));
     let ui_endpoint_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-    let ui_upnp_caption = gtk4::Label::new(Some("UPnP port forward"));
+    let ui_upnp_caption = gtk4::Label::new(Some("UPnP Port Forward"));
     let ui_upnp_hint = gtk4::Label::new(Some(
         "Automatically forward port on your router via UPnP so agents\n\
          on the internet can reach this node. Recommended for paid mode.",
     ));
-    let ui_coordinator_caption = gtk4::Label::new(Some("Coordinator queue"));
+    let ui_coordinator_caption = gtk4::Label::new(Some("Coordinator Queue"));
     let ui_coordinator_hint = gtk4::Label::new(Some(
         "Outbound-only mode: this node opens NO inbound port. Work is pulled \
          from the coordinator queue you pin here. Put the path to the \
@@ -1772,8 +1831,8 @@ fn build_ui(app: &gtk4::Application) {
     let mp_refresh_btn = gtk4::Button::with_label("Refresh");
 
     // Marketplace: My Listing pane widgets.
-    let ml_free_btn = gtk4::ToggleButton::with_label("Donate (free)");
-    let ml_paid_btn = gtk4::ToggleButton::with_label("Sell (paid)");
+    let ml_free_btn = gtk4::ToggleButton::with_label("Donate (Free)");
+    let ml_paid_btn = gtk4::ToggleButton::with_label("Sell (Paid)");
     let ml_price_spin = gtk4::SpinButton::new(
         Some(&gtk4::Adjustment::new(0.05, 0.0, 1000.0, 0.01, 0.5, 0.0)),
         2.0,
@@ -1783,8 +1842,8 @@ fn build_ui(app: &gtk4::Application) {
 
     let ui = Rc::new(Ui {
         settings: Rc::new(RefCell::new(initial.clone())),
-        free_btn: gtk4::ToggleButton::with_label("Donate (free)"),
-        paid_btn: gtk4::ToggleButton::with_label("Sell (paid)"),
+        free_btn: gtk4::ToggleButton::with_label("Donate (Free)"),
+        paid_btn: gtk4::ToggleButton::with_label("Sell (Paid)"),
         payout_entry: gtk4::Entry::new(),
         price_entry: gtk4::Entry::new(),
         currency_dd: gtk4::DropDown::from_strings(&["EURC", "USDC"]),
@@ -1810,11 +1869,11 @@ fn build_ui(app: &gtk4::Application) {
         escrow_entry: gtk4::Entry::new(),
         network_dd: gtk4::DropDown::from_strings(&["Solana Devnet", "Solana Mainnet", "Custom"]),
         network_custom_entry: gtk4::Entry::new(),
-        local_network_switch: gtk4::Switch::new(),
+        local_network_toggle: OnOff::new(false),
         marketplace_url_entry: gtk4::Entry::new(),
         detect_marketplace_btn: gtk4::Button::with_label("Detect"),
-        marketplace_switch: gtk4::Switch::new(),
-        upnp_switch: gtk4::Switch::new(),
+        marketplace_toggle: OnOff::new(false),
+        upnp_toggle: OnOff::new(false),
         cidr_entry: gtk4::Entry::new(),
         interval_spin: gtk4::SpinButton::new(
             Some(&gtk4::Adjustment::new(60.0, 1.0, 3600.0, 1.0, 10.0, 0.0)),
@@ -1837,7 +1896,7 @@ fn build_ui(app: &gtk4::Application) {
             "noop-cpu (simulate)",
             "local-cpu (run on host)",
         ]),
-        accept_switch: gtk4::Switch::new(),
+        accept_toggle: OnOff::new(false),
         error_label: gtk4::Label::new(None),
         settlement_label: gtk4::Label::new(None),
         log_view: gtk4::TextView::new(),
@@ -1920,7 +1979,7 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&mode_box, 1, row, 1, 1);
     row += 1;
 
-    let payout_caption = gtk4::Label::new(Some("Solana payout address"));
+    let payout_caption = gtk4::Label::new(Some("Solana Payout Address"));
     payout_caption.set_xalign(0.0);
     grid.attach(&payout_caption, 0, row, 1, 1);
     ui.payout_entry
@@ -1929,7 +1988,7 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&ui.payout_entry, 1, row, 1, 1);
     row += 1;
 
-    let price_caption = gtk4::Label::new(Some("Price per CPU-hour"));
+    let price_caption = gtk4::Label::new(Some("Price Per CPU-Hour"));
     price_caption.set_xalign(0.0);
     grid.attach(&price_caption, 0, row, 1, 1);
     ui.price_entry.set_placeholder_text(Some("0.05"));
@@ -1994,9 +2053,9 @@ fn build_ui(app: &gtk4::Application) {
     let upnp_caption = &ui.upnp_caption;
     upnp_caption.set_xalign(0.0);
     grid.attach(upnp_caption, 0, row, 1, 1);
-    ui.upnp_switch.set_halign(gtk4::Align::Start);
-    ui.upnp_switch.set_valign(gtk4::Align::Center);
-    grid.attach(&ui.upnp_switch, 1, row, 1, 1);
+    ui.upnp_toggle.widget().set_halign(gtk4::Align::Start);
+    ui.upnp_toggle.widget().set_valign(gtk4::Align::Center);
+    grid.attach(ui.upnp_toggle.widget(), 1, row, 1, 1);
     row += 1;
 
     let upnp_hint = &ui.upnp_hint;
@@ -2006,7 +2065,7 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(upnp_hint, 0, row, 2, 1);
     row += 1;
 
-    let escrow_caption = gtk4::Label::new(Some("Escrow account"));
+    let escrow_caption = gtk4::Label::new(Some("Escrow Account"));
     escrow_caption.set_xalign(0.0);
     grid.attach(&escrow_caption, 0, row, 1, 1);
     ui.escrow_entry.set_hexpand(true);
@@ -2029,12 +2088,16 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&network_box, 1, row, 1, 1);
     row += 1;
 
-    let local_network_caption = gtk4::Label::new(Some("Local network only"));
+    let local_network_caption = gtk4::Label::new(Some("Local Network Only"));
     local_network_caption.set_xalign(0.0);
     grid.attach(&local_network_caption, 0, row, 1, 1);
-    ui.local_network_switch.set_halign(gtk4::Align::Start);
-    ui.local_network_switch.set_valign(gtk4::Align::Center);
-    grid.attach(&ui.local_network_switch, 1, row, 1, 1);
+    ui.local_network_toggle
+        .widget()
+        .set_halign(gtk4::Align::Start);
+    ui.local_network_toggle
+        .widget()
+        .set_valign(gtk4::Align::Center);
+    grid.attach(ui.local_network_toggle.widget(), 1, row, 1, 1);
     row += 1;
 
     let local_network_hint = gtk4::Label::new(Some(
@@ -2063,7 +2126,13 @@ fn build_ui(app: &gtk4::Application) {
     let marketplace_caption = gtk4::Label::new(Some("Public Marketplace"));
     marketplace_caption.set_xalign(0.0);
     grid.attach(&marketplace_caption, 0, row, 1, 1);
-    grid.attach(&ui.marketplace_switch, 1, row, 1, 1);
+    ui.marketplace_toggle
+        .widget()
+        .set_halign(gtk4::Align::Start);
+    ui.marketplace_toggle
+        .widget()
+        .set_valign(gtk4::Align::Center);
+    grid.attach(ui.marketplace_toggle.widget(), 1, row, 1, 1);
     row += 1;
 
     let marketplace_hint = gtk4::Label::new(Some(
@@ -2087,7 +2156,7 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&ui.cidr_entry, 1, row, 1, 1);
     row += 1;
 
-    let interval_caption = gtk4::Label::new(Some("Sample interval (s)"));
+    let interval_caption = gtk4::Label::new(Some("Sample Interval (s)"));
     interval_caption.set_xalign(0.0);
     grid.attach(&interval_caption, 0, row, 1, 1);
     ui.interval_spin.set_hexpand(true);
@@ -2095,7 +2164,7 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&ui.interval_spin, 1, row, 1, 1);
     row += 1;
 
-    let max_jobs_caption = gtk4::Label::new(Some("Max concurrent jobs"));
+    let max_jobs_caption = gtk4::Label::new(Some("Max Concurrent Jobs"));
     max_jobs_caption.set_xalign(0.0);
     grid.attach(&max_jobs_caption, 0, row, 1, 1);
     ui.max_jobs_spin.set_hexpand(true);
@@ -2103,7 +2172,7 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&ui.max_jobs_spin, 1, row, 1, 1);
     row += 1;
 
-    let backend_caption = gtk4::Label::new(Some("Job backend"));
+    let backend_caption = gtk4::Label::new(Some("Job Backend"));
     backend_caption.set_xalign(0.0);
     grid.attach(&backend_caption, 0, row, 1, 1);
     ui.backend_dd.set_hexpand(true);
@@ -2111,12 +2180,12 @@ fn build_ui(app: &gtk4::Application) {
     grid.attach(&ui.backend_dd, 1, row, 1, 1);
     row += 1;
 
-    let accept_caption = gtk4::Label::new(Some("Accept workloads from others"));
+    let accept_caption = gtk4::Label::new(Some("Accept Workloads From Others"));
     accept_caption.set_xalign(0.0);
     grid.attach(&accept_caption, 0, row, 1, 1);
-    ui.accept_switch.set_halign(gtk4::Align::Start);
-    ui.accept_switch.set_valign(gtk4::Align::Center);
-    grid.attach(&ui.accept_switch, 1, row, 1, 1);
+    ui.accept_toggle.widget().set_halign(gtk4::Align::Start);
+    ui.accept_toggle.widget().set_valign(gtk4::Align::Center);
+    grid.attach(ui.accept_toggle.widget(), 1, row, 1, 1);
     row += 1;
 
     // Honest isolation copy (§2.2): local-cpu runs job commands on this
@@ -2190,7 +2259,7 @@ fn build_ui(app: &gtk4::Application) {
     );
     dashboard_page.append(&ui.settlement_label);
 
-    let log_caption = gtk4::Label::new(Some("Live log"));
+    let log_caption = gtk4::Label::new(Some("Live Log"));
     log_caption.set_xalign(0.0);
     log_caption.add_css_class("dim-label");
     dashboard_page.append(&log_caption);
@@ -2335,6 +2404,17 @@ fn build_ui(app: &gtk4::Application) {
         let ui = ui.clone();
         move |_| update_my_listing_micros(&ui)
     });
+    // Settings "Price Per CPU-Hour" → My Listing price spin: any committed
+    // settings price (loaded, saved, or applied on Start) mirrors onto the
+    // My Listing editor, keeping the two price inputs in lock-step.
+    ui.price_entry.connect_changed({
+        let ui = ui.clone();
+        move |entry| {
+            if let Ok(price) = entry.text().trim().parse::<f64>() {
+                ui.ml_price_spin.set_value(price);
+            }
+        }
+    });
     ui.ml_save_btn.connect_clicked({
         let ui = ui.clone();
         let state = state.clone();
@@ -2365,10 +2445,10 @@ fn build_ui(app: &gtk4::Application) {
     });
 
     // Local network toggle: show/hide marketplace and CIDR fields.
-    ui.local_network_switch.connect_active_notify({
+    ui.local_network_toggle.connect_active_notify({
         let ui = ui.clone();
         let state = state.clone();
-        move |_switch| {
+        move |_on| {
             ui.sync_network_sensitivity();
             let running = state.daemons.borrow().is_some();
             if running {
@@ -2381,18 +2461,17 @@ fn build_ui(app: &gtk4::Application) {
 
     // The second consent gate (§2.2) is a persisted, explicit switch. OFF by
     // default; changes persist immediately and only take effect on Start.
-    ui.accept_switch.connect_active_notify({
+    ui.accept_toggle.connect_active_notify({
         let ui = ui.clone();
         let state = state.clone();
-        move |sw| {
-            let on = sw.is_active();
+        move |on| {
             let prev = ui.settings.borrow().accept_workloads;
             if on != prev {
                 let running = state.daemons.borrow().is_some();
                 ui.log_line(if on {
-                    "Accept workloads from others: ON — jobs run on this machine without a sandbox"
+                    "Accept Workloads From Others: ON — jobs run on this machine without a sandbox"
                 } else {
-                    "Accept workloads from others: OFF — no jobs accepted until re-enabled and Started"
+                    "Accept Workloads From Others: OFF — no jobs accepted until re-enabled and Started"
                 });
                 ui.settings.borrow_mut().accept_workloads = on;
                 let _ = ui.settings.borrow().save(&settings::settings_path());
@@ -2610,7 +2689,7 @@ fn show_mainnet_confirm(ui: &Ui, parent: &gtk4::Window) {
 
     let dd_weak = gtk4::prelude::ObjectExt::downgrade(&ui.network_dd);
     let sync_target = ui.network_custom_entry.clone();
-    let sync_target2 = ui.local_network_switch.clone();
+    let sync_target2 = ui.local_network_toggle.clone();
     let sync_target3 = ui.marketplace_url_entry.clone();
     let sync_target4 = ui.cidr_entry.clone();
     dialog.choose(
