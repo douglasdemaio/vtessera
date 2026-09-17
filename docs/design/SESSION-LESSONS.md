@@ -24,13 +24,18 @@ can never finalize, because someone else's wallet initialized the config first.
 churn, and wallet swapping all hit the same wall.
 
 **RESOLVED this session (2026-09-13):** the user had already deployed a fresh
-escrow at `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` whose `Config`
+escrow (then `D4iX…`, now superseded by the `8UJy6…` rotation) whose `Config`
 account (`3CHz4ruzxTJaK1Vkt4rRgxjabdqGRzFxe4gRE7MvmDQx`) is initialized with
 **settlement authority = `34Wxj37y8yCynoxsqkvZ5o2Wj3xH36XFkQ1AVUpawCZB`** (the
 buyer), fee wallet = `J59EPy…`, fee = 100,000 lamports. Running the paid flow
 against *that* deployment with `x402-client --program D4iX…` completes
 `finalize_pro_rata` end to end. Verified: `pay_for_compute` → job accepted →
 `finalize (f=1.0)` drained escrow to the seller ATA, 0 micros left.
+
+> **Lineage:** `D4iX…` (and its config PDA `3CHz4…`) was retired on
+> 2026-09-17 by the audited-build rotation to `8UJy6…` (fresh keypair: the
+> in-place upgrade couldn't grow `ProgramData`). The new program's config PDA
+> is `init_config`'d fresh at deploy.
 
 **Fix to explore (still valid for the general design):**
 - Make `finalize` not require the *global singleton config* for settlement

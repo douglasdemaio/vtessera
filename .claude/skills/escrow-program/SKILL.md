@@ -16,7 +16,7 @@ singleton (`Config` is a default/off-chain reference only). There is no
 Vtessera token.
 
 Program ID (devnet + localnet):
-`D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`.
+`8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`.
 
 ## Layout quirks — read before running anything
 

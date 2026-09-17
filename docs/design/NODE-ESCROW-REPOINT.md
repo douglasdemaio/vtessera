@@ -1,17 +1,22 @@
-# Repointing a paid vtessera-node at the D4iX escrow deployment
+# Repointing a paid vtessera-node at the escrow deployment
 
 Operational notes and commands for switching a paid `vtessera-node` so its
 x402 flow settles instead of failing `finalize` with `NotSettlementAuthority`.
 
-> **Superseded by the per-contract settlement-authority rework.**
-> Once a program built from the reworked source (`Contract` records its
-> own `settlement_authority` at `pay_for_compute`; `finalize_pro_rata` gates
-> on that, never on `Config`) is deployed, a buyer can settle through **any**
-> deployment that accepted their payment — the config PDA owner is
-> irrelevant. The repoint below only matters for the **currently deployed
-> bytes** (`6jK6…`, `D4iX…`), which still gate on the (seized) config
-> authority. After that redeploy, nodes can keep pointing at whatever
-> program they already verify payments against.
+> **Superseded twice.**
+> 1. By the per-contract settlement-authority rework: `Contract` records its
+>    own `settlement_authority` at `pay_for_compute`; `finalize_pro_rata` gates
+>    on that, never on `Config`, so a buyer can settle through **any**
+>    deployment that accepted their payment. Nodes can keep pointing at
+>    whatever program they already verify payments against.
+> 2. By the **program-ID rotation** (`D4iX…` → `8UJy6…`, Aug/Sep 2026,
+>    §"Rotate the program ID" below): the size-grew audited build cannot be
+>    upgraded in place (`BPFLoaderUpgradeable` cannot grow a `ProgramData`
+>    account), so the program moved to a freshly generated keypair. `D4iX…`
+>    still lives on devnet (it can run until its upgrade authority chooses to
+>    close it) but is **retired**: nothing should challenge with it or verify
+>    payments against it. The repoint procedure below is unchanged — just use
+>    the current program ID everywhere this doc mentions an escrow account.
 
 ## Why
 
@@ -22,31 +27,48 @@ config PDA whose settlement authority is `Dtb4KYwzrEUomtWTcBJ1DziTzHbfHDyp9RPmRb
 (programs/vtessera-escrow/src/lib.rs:426), so no run through `6jK6…` can ever
 settle from a laptop.
 
-The clean-deploy path is already done: escrow program
-`D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` was deployed to devnet and its
-config PDA `3CHz4ruzxTJaK1Vkt4rRgxjabdqGRzFxe4gRE7MvmDQx` was `init_config`'d
-with settlement authority **`34Wxj37y8yCynoxsqkvZ5o2Wj3xH36XFkQ1AVUpawCZB`**
-(our client payer). Finalize through it succeeds — verified on-chain
-(`Program D4iX… Instruction: FinalizeProRata`, escrow drained, seller credited).
+The clean-deploy path that fixed `6jK6…` was the `D4iX…` deployment
+(audited-then, now retired). Its config PDA was `init_config`'d with
+settlement authority **`34Wxj37y8yCynoxsqkvZ5o2Wj3xH36XFkQ1AVUpawCZB`** (our
+client payer) and finalize through it was verified on-chain (escrow drained,
+seller credited).
 
-The only thing still pointing at the old program is each **node's**
-`--escrow` argument: the node challenges buyers with that account and verifies
-the on-chain payment landed there (vtessera_node.rs:942 derives the expected
+The current deployment is `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47` —
+the **rotated** program (fresh keypair, §"Rotate the program ID"). Because the
+config PDA is a function of the program ID, the rotation also moved the config
+PDA: the new one is `init_config`'d at deploy time with the same `34Wxj…`
+authority (see `scripts/local-stack.sh` / `devnet-demo` `init_config`).
+
+The only thing that points at a program is each **node's** `--escrow`
+argument: the node challenges buyers with that account and verifies the
+on-chain payment landed there (vtessera_node.rs:942 derives the expected
 escrow ATA and checks the transfer; the 402 challenge echoes
-`escrow_account`). No key rotation and no redeploy are involved — the node is
+`escrow_account`). No key rotation beyond `--escrow` is involved — the node is
 stateless about escrow beyond this one flag.
 
 ## Key addresses (devnet)
 
 | Thing | Address |
 | --- | --- |
-| New escrow program | `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` |
-| New config PDA (authority `34Wxj…`) | `3CHz4ruzxTJaK1Vkt4rRgxjabdqGRzFxe4gRE7MvmDQx` |
-| Old escrow program (keep for rollback) | `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma` |
+| Current escrow program | `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47` (ProgramData `D2J1NTjx3r44HJdJL9upESKk3oaJ5ZEXMqhTsZGqfHjQ`) |
+| Current config PDA (authority `34Wxj…`) | `6UGiFSD76PSUo1SUJguGnUEv86AqtgoEdSqXDyp9hFhw` |
+| Old escrow programs (retired, keep for rollback) | `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`, `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` |
 | Client payer / buyer | `34Wxj37y8yCynoxsqkvZ5o2Wj3xH36XFkQ1AVUpawCZB` |
 | Seller payout (node offer `payout_id`) | `5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs` |
 | USDC mint (devnet) | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` |
 | Fee wallet | `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh` |
+
+## Rotate the program ID (why the program is `8UJy6…`)
+
+The audited build outgrew its `ProgramData` account (334,296 B vs 292,120 B)
+and `BPFLoaderUpgradeable` cannot resize program data, so the in-place upgrade
+fails with "ProgramData account not large enough". The program therefore
+moved to a freshly generated deploy keypair
+(`programs/target/deploy/vtessera_escrow-keypair.json`); the ID changes the
+`declare_id!` in `programs/vtessera-escrow/src/lib.rs`, `programs/Anchor.toml`,
+and every client constant (x402-client, agent-cli, GUI default, soak, swap
+scripts). This is the same fresh-keypair flow prescribed for first mainnet
+deploy, so the devnet rotation doubles as a mainnet-rehearsal of that step.
 
 ## Repoint the node
 
@@ -58,7 +80,7 @@ stateless about escrow beyond this one flag.
 2. Stop the node.
 
 3. Start it again with exactly the same arguments, but replace `--escrow
-   6jK6oEaLt…` with `--escrow D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`.
+   6jK6oEaLt…` with `--escrow 8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`.
 
    Example (paths are the other laptop's real ones):
 
@@ -66,7 +88,7 @@ stateless about escrow beyond this one flag.
    vtessera-node \
      --bind 0.0.0.0:8402 \
      --offer "$CFG/offer.json" \
-     --escrow D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn \
+     --escrow 8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47 \
      --network solana-devnet \
      --backend local-cpu \
      --key "$CFG/identity.key" \
@@ -92,7 +114,7 @@ curl -s -X POST http://192.168.178.82:8402/jobs \
   -H 'x-agent-id: ops-check' \
   -d '{"job_id":"repoint-verify","image":"busybox","command":["echo","hi"],"env":[],"devices":{"class":{"kind":"cpu"},"vcpus":1,"mem_kb":65536,"min_vram_mb":0},"max_duration_secs":1}' \
   | grep escrow_account
-#   → escrow_account: D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn
+#   → escrow_account: 8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47
 
 # 3. Pre-flight from the x402-client (PR #114 build) — all five checks PASS.
 cd crates/x402-client
@@ -100,7 +122,7 @@ VTESSERA_PAYER=$HOME/.config/solana/payer.json \
   target/debug/vtessera-x402-client \
   --node http://192.168.178.82:8402 \
   --check \
-  --program D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn \
+  --program 8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47 \
   --mint 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU \
   --seller 5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs
 #   → RESULT: READY — safe to submit the paid job.
@@ -109,7 +131,7 @@ VTESSERA_PAYER=$HOME/.config/solana/payer.json \
 VTESSERA_PAYER=$HOME/.config/solana/payer.json \
   target/debug/vtessera-x402-client \
   --node http://192.168.178.82:8402 \
-  --program D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn \
+  --program 8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47 \
   --mint 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU \
   --seller 5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs \
   --seconds 1 --verbose
@@ -126,7 +148,7 @@ The run is a success when it prints, in order: `escrow balance after deposit:
 
 ```
 [2] x402 challenge
-    FAIL  402 challenge escrow_account 6jK6… != program D4iX… (network solana-devnet)
+    FAIL  402 challenge escrow_account 6jK6… != program 8UJy6… (network solana-devnet)
 ```
 
 …and the full run dies at step 5 with the `NotSettlementAuthority` hint (the
@@ -134,7 +156,7 @@ same signature as a node still running the old value).
 
 ## Rollback
 
-Relaunch with `--escrow 6jK6…` again. Repointing touches nothing persistent —
+Relaunch with `--escrow D4iX…` or `6jK6…` again. Repointing touches nothing persistent —
 no state migration, job queue untouched, signed offer unchanged. Both programs
 stay deployed on devnet; you can flip the flag back and forth at will.
 

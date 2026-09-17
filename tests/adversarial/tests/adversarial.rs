@@ -101,7 +101,7 @@ impl From<EscrowError> for u32 {
 
 // ---------- Pinned addresses (mainnet-beta canonical) ---------------------
 
-const PROGRAM_ID_STR: &str = "D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn";
+const PROGRAM_ID_STR: &str = "8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47";
 const TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const ATA_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 /// Protocol fee wallet from the spec — drives the real lamport transfer.

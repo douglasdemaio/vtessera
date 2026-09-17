@@ -201,7 +201,7 @@ Response (402):
 {
   "scheme": "x402",
   "network": "solana-devnet",
-  "escrow_account": "D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn",
+  "escrow_account": "8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47",
   "offer": {
     "body": {
       "price": {

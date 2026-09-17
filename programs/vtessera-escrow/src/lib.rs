@@ -56,7 +56,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 // Program ID — devnet deployment, regenerated on first mainnet deploy.
-declare_id!("D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn");
+declare_id!("8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47");
 
 /// Seed prefix for the program's single `Config` account (settlement
 /// authority + protocol fee configuration).

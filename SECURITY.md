@@ -25,7 +25,7 @@ Report privately through GitHub's
 The on-chain escrow program advertises the same contact points via its
 program-metadata `security` account (seed `security`, JSON format per the
 SPL Program Metadata convention), sourced from `security.json` (devnet
-program `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`). If you find a
+program `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`). If you find a
 vulnerability in the program, you may report it through either channel;
 both reach the maintainer.
 

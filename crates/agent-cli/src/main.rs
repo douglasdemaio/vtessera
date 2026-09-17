@@ -1360,7 +1360,7 @@ mod tests {
         let ch = serde_json::json!({
             "scheme": "x402",
             "network": "solana-devnet",
-            "escrow_account": "D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn",
+            "escrow_account": "8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47",
             "offer": {"body": {
                 "price": {"mode": "paid", "currency": "eurc",
                           "per_device_second_micros": 2792,

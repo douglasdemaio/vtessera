@@ -13,7 +13,7 @@ pub const DEFAULT_PORT: u16 = 8402;
 /// How many jobs the node may run at once (`--max-concurrent-jobs`). The node
 /// clamps to >= 1; the GUI spin is bounded 1..=1024.
 pub const DEFAULT_MAX_CONCURRENT_JOBS: u32 = 1;
-pub const DEFAULT_ESCROW: &str = "D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn";
+pub const DEFAULT_ESCROW: &str = "8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47";
 pub const DEFAULT_NETWORK: &str = "solana-devnet";
 /// Connectivity mode: an inbound TCP listener + iroh dial-in (the transition
 /// default, P1.3) vs. outbound-only (no inbound listener; work is pulled from
@@ -439,7 +439,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let old = "mode = \"free\"\ncurrency = \"eurc\"\nprice_per_cpu_hour = 0.0\n\
                    payout_id = \"\"\nport = 8402\nendpoint = \"http://127.0.0.1:8402\"\n\
-                   escrow_account = \"D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn\"\n\
+                   escrow_account = \"8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47\"\n\
                    network = \"solana-devnet\"\nsample_interval_secs = 60\n";
         std::fs::write(&path, old).unwrap();
         let s = Settings::load_or_default(&path);
@@ -473,7 +473,7 @@ mod tests {
         let old =
             "mode = \"free\"\ncurrency = \"eurc\"\nprice_per_cpu_hour = 0.0\npayout_id = \"\"\n\
              port = 8402\nendpoint = \"http://127.0.0.1:8402\"\n\
-             escrow_account = \"D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn\"\n\
+             escrow_account = \"8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47\"\n\
              network = \"solana-devnet\"\nsample_interval_secs = 60\n";
         std::fs::write(&path, old).unwrap();
         let loaded = Settings::load_or_default(&path);

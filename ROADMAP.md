@@ -617,8 +617,14 @@ status reflects the whole project as modules come online.
 ### Devnet status
 
 The escrow program is **live on Solana devnet** at
-**`D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`** (program ID;
-ProgramData `Gvu3Vb4ZhxnHV33KCZHcgmWWFyVUXjQ7ocW1KjjiRuuh`).
+**`8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`** (program ID;
+ProgramData `D2J1NTjx3r44HJdJL9upESKk3oaJ5ZEXMqhTsZGqfHjQ`, config PDA
+`6UGiFSD76PSUo1SUJguGnUEv86AqtgoEdSqXDyp9hFhw`). The audited
+build outgrew the old deployment's `ProgramData` (`BPFLoaderUpgradeable`
+cannot resize program data), so on 2026-09-17 the program moved to a freshly
+generated keypair — the same fresh-keypair flow prescribed for first mainnet
+deploy (see `MAINNET-CHECKLIST.md` §4/§5). The reproducible SHA-256 of the
+deployed build is committed at `programs/vtessera-escrow/DEPLOYED_SHA256.txt`.
 
 The full pay → run → settle → split flow has been exercised end-to-end
 against devnet — see `crates/devnet-demo` for the runnable

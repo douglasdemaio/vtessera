@@ -11,10 +11,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-vtessera_escrow = "D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn"
+vtessera_escrow = "8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47"
 
 [programs.devnet]
-vtessera_escrow = "D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn"
+vtessera_escrow = "8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47"
 
 [registry]
 url = "https://api.apr.dev"

@@ -80,7 +80,7 @@ fn settle_f(device_seconds: f64, agreed_device_seconds: u64) -> f64 {
 }
 
 /// Devnet program ID — see ROADMAP.md §0, programs/Anchor.toml.
-const PROGRAM_ID_STR: &str = "D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn";
+const PROGRAM_ID_STR: &str = "8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47";
 /// Protocol fee wallet from the design spec. Drives a real lamport
 /// transfer on devnet so the IX exercises every account in the production
 /// graph. The program validates it against the wallet pinned in `Config`.

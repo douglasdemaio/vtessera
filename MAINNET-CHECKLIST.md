@@ -9,13 +9,29 @@
 > 3 decided — **immutable (Option A)**, execution at mainnet deploy via
 > the §3.3 runbook; the devnet program stays upgradeable while the soak
 > (§6) and audit (§4) are open. Devnet program at
-> `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` is the only deployment
-> and now runs the stablecoin build; program security.txt is published on
-> devnet (`security.json` on the `security` seed, JSON per the SPL Program
-> Metadata convention, metadata PDA `A2qRxW339iBPMiNFw7TT56z4SJPsLNEpkv6TXv72nfJs`).
+> `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47` is the only deployment
+> and now runs the stablecoin build; program security.txt was published
+> on devnet for the retired `D4iX…` deployment (metadata PDA
+> `A2qRxW339iBPMiNFw7TT56z4SJPsLNEpkv6TXv72nfJs`, owner
+> `ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S`); **re-publishing it for
+> `8UJy6…` after the rotation is a pending item** (mechanism is external
+> to the repo — see §4.5).
 > The devnet config PDA
-> uses the `vtessera_config_v2` seed with the throwaway CI soak key as
-> settlement authority, so no operator key is used in automation.
+> (`6UGiFSD76PSUo1SUJguGnUEv86AqtgoEdSqXDyp9hFhw`) uses the
+> `vtessera_config_v2` seed with the client payer
+> (`34Wxj37y8yCynoxsqkvZ5o2Wj3xH36XFkQ1AVUpawCZB`) as settlement authority,
+> so the soak's finalize is self-signed against the operator.
+>
+> **2026-09-17 rotation:** the audited build outgrew the old program's
+> `ProgramData` (334,296 B vs 292,120 B; `BPFLoaderUpgradeable` cannot
+> grow it), so the devnet program moved to a freshly generated keypair at
+> `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47` (ex-`D4iX…`). This
+> rehearses the §5 fresh-keypair mainnet flow. The new config PDA
+> `6UGiFSD76PSUo1SUJguGnUEv86AqtgoEdSqXDyp9hFhw` was re-`init_config`'d at
+> deploy with the same `34Wxj…` authority and verified end-to-end on-chain
+> (one-shot `vtessera-devnet-demo` run: depository + split matched). The
+> reproducible SHA-256 of the
+> deployed build is pinned in `programs/vtessera-escrow/DEPLOYED_SHA256.txt`.
 
 ## How to read this file
 
@@ -75,7 +91,7 @@ seller nothing).
       — the production path now pays stablecoin.
 - [x] **1.5** Redeploy to devnet with the new build and run
       `init_config`. **Done** (2026-08-15): in-place upgrade of
-      `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`; `init_config` ran
+      `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`; `init_config` ran
       against the `vtessera_config_v2` seed with the **throwaway CI soak
       key** (`Dtb4KYwzrEUomtWTcBJ1DziTzHbfHDyp9RPmRbjKuGVA`) as
       settlement authority — no operator key is used in automation.
@@ -207,7 +223,7 @@ after deploy.
 - [ ] **3.4** Verify on-chain **at mainnet deploy** — `solana program
       show <MAINNET_PROGRAM_ID>` reports `Authority: None` (immutable)
       after the freeze. **Command validated (2026-08-16):** devnet
-      `solana program show D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`
+      `solana program show 8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`
       reports `Authority: 5vWdYSmcNJnoj2PM8LfLRvnviujnQCT1Eu8Csw6Jzfhs`
       (still upgradeable — the correct pre-freeze state; the freeze
       runs only at mainnet deploy per §3.3).
@@ -283,6 +299,11 @@ fast enough to fix it, or (b) accept the loss.
       - Tag the audit-ready commit hash. **Done (2026-08-16):** tag
         `escrow-audit-v1` at `06cbe70`, carrying the reproducible
         baseline SHA (`f0168411…cddf`, §5.2).
+      - Re-publish the on-chain security.txt for the `8UJy6…` program.
+        **Pending:** the published metadata PDA `A2qRxW…` points at the
+        retired `D4iX…` program; the `security`-seed metadata account for
+        `8UJy6…` must be (re)published from `security.json` with the
+        audit-revision hash (mechanism is external to the repo).
 - [ ] **4.3** Post to channels (copy-paste draft below):
       - Solana Discord `#auditing`
       - r/solana
@@ -301,14 +322,16 @@ fast enough to fix it, or (b) accept the loss.
       > upgrade authority will be dropped `--final` at mainnet deploy, so
       > findings found *now* can still be patched.
       > - Repo: https://github.com/douglasdemaio/vtessera
-      > - Audit commit: tag `escrow-audit-v1` (`06cbe70`)
+      > - Audit commit: tag `escrow-audit-v2` (TBD — re-tagged at the
+      >   program-ID rotation; v1 (`06cbe70`) preceded it)
       > - Threat model + deploy procedure:
       >   `programs/vtessera-escrow/SECURITY.md`
       > - Adversarial suite (LiteSVM) pinning each error code:
       >   `tests/adversarial/`
       > - Reproducible `.so` SHA-256:
-      >   `f016841145af38ecbbc7b489fa28aaa4b4bcc7412262829e5d6240662581cddf`
-      > - Devnet program ID: `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn`
+      >   TBD (recomputed on rotation; pinned in
+      >   `programs/vtessera-escrow/DEPLOYED_SHA256.txt`)
+      > - Devnet program ID: `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`
       >   (stays upgradeable until the audit closes)
       >
       > Findings → GitHub issue, or `douglasdemaio@gmail.com` (48h ack per
