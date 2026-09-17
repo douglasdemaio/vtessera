@@ -9,7 +9,7 @@ Four scripted flows, all against **Solana devnet** (mainnet is explicitly
 deferred — see MAINNET-CHECKLIST.md; never point anything at mainnet).
 
 The escrow program is deployed at
-`D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` (devnet).
+`8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47` (devnet).
 
 ## The demos (repo root)
 

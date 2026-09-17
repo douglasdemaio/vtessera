@@ -280,7 +280,7 @@ cmd_start() {
     fi
 
     if ! is_running node; then
-        local escrow="D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn"
+        local escrow="8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47"
         local network="solana-devnet"
         if [ "$OUTBOUND" = "1" ]; then
             info "Starting vtessera-node (outbound-only, coordinator pull on $coord_marker)"

@@ -420,7 +420,7 @@ cargo build -p vtessera-offer-index --locked --bin vtessera-offer-index --featur
 
 # node side: advertise, and re-register every interval (default 60s)
 ./target/debug/vtessera-node --bind 127.0.0.1:8402 --offer offer.json --key key.bin \
-    --escrow D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn --network solana-devnet \
+    --escrow 8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47 --network solana-devnet \
     --state-dir /var/lib/vtessera --publish http://127.0.0.1:8403
 ```
 
@@ -710,7 +710,7 @@ rm -rf ~/.var/app/io.github.douglasdemaio.Vtessera
 ```bash
 flatpak run --command=vtessera-node io.github.douglasdemaio.Vtessera \
   --bind 127.0.0.1:8402 --offer offer.json --key key.bin \
-  --escrow D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn --network solana-devnet \
+  --escrow 8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47 --network solana-devnet \
   --state-dir ~/.local/share/vtessera --backend cloud-hypervisor
 ```
 

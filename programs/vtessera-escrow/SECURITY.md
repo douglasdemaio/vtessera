@@ -1,6 +1,6 @@
 # Vtessera Escrow — Security Policy
 
-Program: `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` (devnet)
+Program: `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47` (devnet)
 On-chain security.txt: Program Metadata seed `security` (metadata PDA
 `A2qRxW339iBPMiNFw7TT56z4SJPsLNEpkv6TXv72nfJs`; content sourced from
 `security.json`).
