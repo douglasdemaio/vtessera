@@ -483,8 +483,12 @@ ATA-creation collisions; RPC failures mid-transaction.
       operation after #1-#3 are all merged and re-deployed. **Status:** the
       workflow on `main` is green and self-funding (100 iters, 0 failures on
       2026-08-16); manual soak with 20 iterations, 0 failures on 2026-08-21
-      (fresh escrow program deployed, full pay→settle→split exercised);
-      the one-week wall-clock window is pending.
+      (fresh escrow program deployed, full pay→settle→split exercised).
+      **Restarted 2026-09-17** after the `8UJy6…` program-ID rotation:
+      workflow re-enabled (was `disabled_manually`), kickoff run 35244494488
+      dispatched → 100/100 iterations, 0 failures (78 finalize, 22 cancel,
+      config PDA `6UGiF…` inited by the operator `34Wxj…`); the hourly
+      cron on `main` now runs the one-week wall-clock window.
 
 **Who.**
 - **Me:** write the soak runner, document the failure-investigation
