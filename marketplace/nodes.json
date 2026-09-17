@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789645674,
+  "updated_at": 1789649789,
   "nodes": [
     {
       "node_id": "54cfbadd78cdaeeb28bd4f104a47c95a",
@@ -49,8 +49,8 @@
             "http://192.168.178.82:8402"
           ],
           "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
-          "expires_unix": 1792219159,
-          "issued_unix": 1789627159,
+          "expires_unix": 1792241781,
+          "issued_unix": 1789649781,
           "node_id": "793754d2844bfc814b0494560dd1c750",
           "price": {
             "currency": "usdc",
@@ -61,41 +61,29 @@
           "schema_ver": 2
         },
         "pubkey_hex": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
-        "sig_hex": "9471e122a6a3e83f8b1b7e7628efc97088762eb6fd6d2cd74713838f5a77be31434e27c8faf048bf8805a4057fbf9a4a95f221e58cc16ff64ee617582a031105"
+        "sig_hex": "3174f2adab8d92c1ab88de32954b8f20e1f640182ed5d5f2b7fc3b926fa5ab656e49e3007513e0246fd4dad1ec8b3f833e12c68ff3fdf90e5df53ce4de008d0d"
       },
-      "sig_hex": "9471e122a6a3e83f8b1b7e7628efc97088762eb6fd6d2cd74713838f5a77be31434e27c8faf048bf8805a4057fbf9a4a95f221e58cc16ff64ee617582a031105",
-      "updated_at": 1789645171,
+      "sig_hex": "3174f2adab8d92c1ab88de32954b8f20e1f640182ed5d5f2b7fc3b926fa5ab656e49e3007513e0246fd4dad1ec8b3f833e12c68ff3fdf90e5df53ce4de008d0d",
+      "updated_at": 1789649789,
       "endpoint": [
         "http://192.168.178.82:8402"
       ],
       "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
       "candidates": [
         {
-          "addr": "https://euc1-1.relay.n0.iroh.link./",
-          "kind": "relayed",
-          "priority": 50,
-          "transport": "iroh_quic"
-        },
-        {
-          "addr": "80.245.78.193:36188",
+          "addr": "192.168.178.82:57851",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
         },
         {
-          "addr": "192.168.178.82:36188",
+          "addr": "[2a00:a520:21ea:ca00:91a5:9903:268a:6bcd]:56246",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
         },
         {
-          "addr": "[2a00:a520:21ea:ca00:91a5:9903:268a:6bcd]:34004",
-          "kind": "host",
-          "priority": 200,
-          "transport": "iroh_quic"
-        },
-        {
-          "addr": "[2a00:a520:21ea:ca00:e03f:23af:3b3a:bf29]:34004",
+          "addr": "[2a00:a520:21ea:ca00:e03f:23af:3b3a:bf29]:56246",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
