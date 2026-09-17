@@ -163,7 +163,9 @@ can slip through.
         buyer unilateral cancel.
 - [x] **2.3** Wire into CI — every push runs the harness.
       **Done:** `.github/workflows/ci.yml` installs Agave 3.1.14 + Anchor
-      0.30.1, runs `anchor build`, the program's unit tests (which pin
+      0.30.1, runs `anchor build --no-idl` (IDL generation is broken in
+      anchor-syn 0.30.1 against current proc-macro2 — see ci.yml note),
+      the program's unit tests (which pin
       the numeric `EscrowError` codes as a drift guard), and the
       adversarial suite with `--locked`.
 - [x] **2.4** Re-run the suite against the post-§1 program (the

@@ -211,6 +211,21 @@ jobs:
           cargo install cargo-audit --locked
           cargo audit
 
+      # The workspace excludes four trees that pin the Solana 1.18 SDK and
+      # carry their own Cargo.lock; a root `cargo audit` only scans the
+      # root lockfile, so a vuln in (e.g.) the x402-client's rustls could
+      # pass CI unnoticed (RUSTSEC-2026-0285 did exactly that). Audit each
+      # excluded tree against its own lockfile. `programs/` carries a
+      # committed .cargo/audit.toml documenting the two dalek advisories
+      # hard-pinned by solana-sdk 1.18.
+      - name: Audit excluded trees
+        run: |
+          for d in programs crates/devnet-demo crates/x402-client tests/adversarial; do
+            echo "::group::cargo audit ($d)"
+            ( cd "$d" && cargo audit )
+            echo "::endgroup::"
+          done
+
       - name: Deny
         run: |
           cargo install cargo-deny --locked

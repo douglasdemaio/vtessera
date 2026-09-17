@@ -34,10 +34,16 @@ Program ID (devnet + localnet):
 
 ```bash
 cd programs
-anchor build                    # or: cargo build-sbf
-anchor test                     # ts-mocha tests (needs yarn deps installed)
+anchor build --no-idl            # or: cargo build-sbf
+anchor test                      # ts-mocha tests (needs yarn deps installed)
 anchor deploy --provider.cluster devnet
 ```
+
+Always pass `--no-idl`: anchor-syn 0.30.1's IDL path calls
+`proc_macro2::Span::source_file` (removed in proc-macro2 >= 1.0.95), so
+plain `anchor build` fails against current crates.io and downgrading the
+transitive proc-macro2 cascades into quote/borsh MSRV pins (see
+ci.yml). The IDL is a deploy-time artifact; CI builds with `--no-idl`.
 
 Deploys cost devnet SOL from the provider wallet; `solana airdrop 2` if
 short. **Never deploy to mainnet** — mainnet is deferred behind
@@ -64,8 +70,7 @@ and the repo drift apart until the next deploy; say so in the PR.
 
 ## After changing the program interface
 
-The IDL consumed by clients changes too: rebuild (`anchor build`
-regenerates the IDL) and check `crates/devnet-demo`, `crates/x402-client`,
+The IDL consumed by clients changes too: rebuild (`anchor build --no-idl`; IDs in the IDL follow the source, see the Cargo.toml note on why IDL generation is disabled) and check `crates/devnet-demo`, `crates/x402-client`,
 and `crates/settlement` for instruction/account layout assumptions that
 must move in lockstep. Note the three settlement instructions
 (`pay_for_compute`, `finalize_pro_rata`, `cancel_before_start`) take **no

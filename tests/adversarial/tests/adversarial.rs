@@ -9,7 +9,7 @@
 //! ## Build prerequisites
 //!
 //! The suite loads `programs/target/deploy/vtessera_escrow.so`, which is
-//! produced by `anchor build` (run it first; CI does `anchor build` then
+//! produced by `anchor build --no-idl` (run it first; CI does that then
 //! `cargo test`). Override the path with `VTESSERA_ESCROW_SO`.
 //!
 //! ## Why this is a standalone crate

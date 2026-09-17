@@ -66,7 +66,8 @@ To build:
 
 ```
 # Install Anchor: https://www.anchor-lang.com/docs/installation
-anchor build
+anchor build --no-idl   # --no-idl: anchor-syn 0.30.1 IDL gen is broken
+                        # against current proc-macro2 (see Cargo.toml)
 ```
 
 ## Reproducible build + verification (MAINNET-CHECKLIST §5)
