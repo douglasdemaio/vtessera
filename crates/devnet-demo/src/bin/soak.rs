@@ -16,9 +16,16 @@
 //!   refund must be exactly 0
 //! - with probability `CANCEL_P`, fires `cancel_before_start` instead of
 //!   `pay` + `finalize_pro_rata` — the buyer-side full refund
-//! - uses a fresh buyer keypair (decoupled from the settlement
-//!   authority) and a random seller pubkey, so balance checks stay
-//!   sound when iterations run concurrently
+//! - uses a fresh buyer keypair and a random seller pubkey, so balance
+//!   checks stay sound when iterations run concurrently; **the buyer is
+//!   its own contract settlement authority** (recorded at `pay` time),
+//!   so every finalize is a genuine multi-buyer loop with per-contract
+//!   authorities — not one shared operator key
+//! - with probability `ROTATE_P` (CLI `--rotate-p`, default 0) hands the
+//!   contract's settlement authority to a fresh "settlement service"
+//!   keypair via `rotate_settlement_authority` *before* finalize; the
+//!   successor key then signs finalize, exercising the §2.2o rotation
+//!   path against devnet
 //! - logs the outcome; any unexpected failure bumps the error count
 //!
 //! ## Usage
@@ -32,6 +39,9 @@
 //!
 //! # §6.3: 3 jobs in flight at once (catches non-serializable races):
 //! cargo run --bin soak -- --iters 300 --parallel 3
+//!
+//! # exercise the settlement-authority rotation path on ~half the runs:
+//! cargo run --bin soak -- --iters 100 --rotate-p 0.5
 //!
 //! # different payer + RPC (e.g. a local validator for offline soaking):
 //! VTESSERA_PAYER=~/.config/solana/id.json \
@@ -116,6 +126,12 @@ const DEVNET_RPC: &str = "https://api.devnet.solana.com";
 /// Probability of firing `cancel_before_start` instead of
 /// `pay` + `finalize_pro_rata`, per iteration.
 const CANCEL_P: f64 = 0.2;
+
+/// Probability of rotating the per-contract settlement authority to a
+/// fresh "settlement service" keypair (via the §2.2o
+/// `rotate_settlement_authority` instruction) before finalize_pro_rata,
+/// per iteration. Off by default; enable with `--rotate-p`.
+const ROTATE_P: f64 = 0.0;
 
 /// §6.3 edge cadence: every EDGE_CADENCE iterations forces `price = 1`
 /// (rounding edge) and, half a cadence later, `f_micros = 1_000_000`
@@ -427,7 +443,14 @@ struct IterOutcome {
     elapsed_ms: u64,
 }
 
-fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u64) -> IterOutcome {
+fn run_iteration(
+    rpc: &RpcClient,
+    env: &Env,
+    iter: u64,
+    rng: &mut Rng,
+    nonce: u64,
+    rotate_p: f64,
+) -> IterOutcome {
     let iter_start = Instant::now();
 
     // Check timeout early.
@@ -453,6 +476,8 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
         rng.range(1, 10_000_000)
     };
     let do_cancel = rng.unit() < CANCEL_P;
+    // Settle through a rotated successor key with probability rotate_p.
+    let do_rotate = !do_cancel && rotate_p > 0.0 && rng.unit() < rotate_p;
 
     // Fresh buyer per iteration, decoupled from the settlement authority
     // (payer). Keeps the balance checks sound when iterations run
@@ -611,13 +636,14 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
     }
     let pay_disc = anchor_disc("pay_for_compute");
     // Instruction data after the discriminator: job_id → price_micros →
-    // settlement_authority (raw 32-byte pubkey). The soak decouples the
-    // per-iteration buyer from the settlement authority, so it records
-    // env.payer here — the only key that signs finalize_pro_rata below.
+    // settlement_authority (raw 32-byte pubkey). The buyer funds the
+    // escrow, so it is recorded as the contract's settlement authority —
+    // the real multi-buyer path (each iteration has its own authority,
+    // which may be rotated off to a successor before finalize below).
     let mut pay_data = pay_disc.to_vec();
     pay_data.extend_from_slice(&job_id);
     pay_data.extend_from_slice(&price.to_le_bytes());
-    pay_data.extend_from_slice(&env.payer.pubkey().to_bytes());
+    pay_data.extend_from_slice(&buyer_pk.to_bytes());
     let pay_ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
@@ -712,6 +738,46 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
         if let Some(o) = check_timeout() {
             return o;
         }
+        // Optionally rotate the contract's settlement authority (the
+        // buyer recorded at pay time) to a fresh "settlement service"
+        // keypair, then settle with that successor key.
+        let mut successor: Option<Keypair> = None;
+        let mut rotation_note = String::new();
+        if do_rotate {
+            let s = Keypair::new();
+            let rot_disc = anchor_disc("rotate_settlement_authority");
+            let mut rot_data = rot_disc.to_vec();
+            rot_data.extend_from_slice(&s.pubkey().to_bytes());
+            let rot_ix = Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(buyer_pk, true),
+                    AccountMeta::new(contract_pda, false),
+                ],
+                data: rot_data,
+            };
+            if let Err(e) = send_tx_with_retry(
+                rpc,
+                &[rot_ix],
+                &[&buyer, &env.payer],
+                &env.payer,
+                "rotate_settlement_authority",
+            ) {
+                return IterOutcome {
+                    iter,
+                    action: "rotate".into(),
+                    price,
+                    ok: false,
+                    detail: format!("rotate_settlement_authority failed: {e}"),
+                    elapsed_ms: iter_start.elapsed().as_millis() as u64,
+                };
+            }
+            rotation_note = format!(" → rotated to {}", s.pubkey());
+            successor = Some(s);
+        }
+        // The finalizer is the contract's settlement authority: the buyer
+        // after pay, or the rotated successor key.
+        let finalizer: &Keypair = successor.as_ref().unwrap_or(&buyer);
         // §6.3 edge: force `f_micros = 1_000_000` (buyer refund exactly 0).
         let f_edge = iter % EDGE_CADENCE == EDGE_CADENCE / 2;
         let f_micros = if f_edge {
@@ -738,7 +804,7 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
         let fin_ix = Instruction {
             program_id: env.program_id,
             accounts: vec![
-                AccountMeta::new(env.payer.pubkey(), true), // settlement authority
+                AccountMeta::new(finalizer.pubkey(), true), // settlement authority
                 AccountMeta::new(contract_pda, false),
                 AccountMeta::new(escrow_ata, false),
                 AccountMeta::new(buyer_ata, false),
@@ -752,7 +818,7 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
         if let Err(e) = send_tx_with_retry(
             rpc,
             &[fin_ix],
-            &[&env.payer],
+            &[finalizer, &env.payer],
             &env.payer,
             "finalize_pro_rata",
         ) {
@@ -779,8 +845,9 @@ fn run_iteration(rpc: &RpcClient, env: &Env, iter: u64, rng: &mut Rng, nonce: u6
         IterOutcome {
             iter,
             action: format!(
-                "finalize f_micros={f_micros}{}",
-                if f_edge { " [edge]" } else { "" }
+                "finalize f_micros={f_micros}{}{}",
+                if f_edge { " [edge]" } else { "" },
+                rotation_note
             ),
             price,
             ok,
@@ -800,9 +867,10 @@ fn parse_u64(s: &str) -> Result<u64, String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // CLI: --iters N [--cancel-p P] [--parallel N]
+    // CLI: --iters N [--cancel-p P] [--parallel N] [--rotate-p P]
     let mut iters: u64 = 100;
     let mut cancel_p: f64 = CANCEL_P;
+    let mut rotate_p: f64 = ROTATE_P;
     let mut parallel: usize = 1;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -821,6 +889,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .parse()
                     .map_err(|e| format!("--cancel-p: {e}"))?;
             }
+            "--rotate-p" => {
+                rotate_p = args
+                    .next()
+                    .ok_or("--rotate-p needs a value")?
+                    .parse()
+                    .map_err(|e| format!("--rotate-p: {e}"))?;
+            }
             "--parallel" => {
                 parallel = args
                     .next()
@@ -838,6 +913,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if !(0.0..=1.0).contains(&cancel_p) {
         return Err("--cancel-p must be in [0, 1]".into());
+    }
+    if !(0.0..=1.0).contains(&rotate_p) {
+        return Err("--rotate-p must be in [0, 1]".into());
     }
     if parallel == 0 {
         return Err("--parallel must be >= 1".into());
@@ -864,7 +942,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let payer_pk = payer.pubkey();
     let env = Arc::new(setup(&rpc, payer)?);
     println!("payer: {payer_pk}  mint: {}", env.mint);
-    println!("iters: {iters}  cancel_p: {cancel_p}  parallel: {parallel}");
+    println!("iters: {iters}  cancel_p: {cancel_p}  parallel: {parallel}  rotate_p: {rotate_p}");
 
     let seed = match env::var("SOAK_SEED") {
         Ok(s) => parse_u64(&s)?,
@@ -924,7 +1002,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("  [worker {w}] shutting down before iter {iter}");
                     break;
                 }
-                let o = run_iteration(&rpc, &env, iter, &mut rng, nonce);
+                let o = run_iteration(&rpc, &env, iter, &mut rng, nonce, rotate_p);
                 // Live progress every PROGRESS_INTERVAL iterations.
                 if o.iter.is_multiple_of(PROGRESS_INTERVAL) || !o.ok {
                     let mark = if o.ok { "OK" } else { "FAIL" };
@@ -986,8 +1064,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .filter(|o| o.action.starts_with("finalize"))
         .count();
+    let rotates = results
+        .iter()
+        .filter(|o| o.action.contains("rotated"))
+        .count();
     println!("  finalize:    {finalizes}");
     println!("  cancel:      {cancels}");
+    println!("  rotate:      {rotates}");
 
     if failures > 0 {
         std::process::exit(1);
