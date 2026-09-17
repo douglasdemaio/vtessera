@@ -1,0 +1,11 @@
+# Reproducible program binary: vtessera_escrow.so (solana-verify 0.5.1)
+# Two clean builds inside the pinned solana-verifiable-build Docker image
+# must match this hash (see .github/workflows/reproducible-build.yml).
+#
+# Devnet deployment 2026-09-17 (program-ID rotation — the audited build
+# outgrew the retired D4iX deployment's ProgramData):
+#   program_id: 8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47
+#   commit:     d1df9c5 (rotation branch; becomes escrow-audit-v2 on main)
+#   built:      solana-verify 0.5.1 (pinned Docker image)
+# Overwritten with mainnet values at mainnet deploy (§5.3).
+5d7f6dfd40389cb7a7beab2499516fe92607cf74f2e7b3764dd1e2e865a68a56  vtessera_escrow.so

@@ -50,8 +50,8 @@ stateless about escrow beyond this one flag.
 
 | Thing | Address |
 | --- | --- |
-| Current escrow program | `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47` |
-| Current config PDA (authority `34Wxj…`) | derived at deploy (was `3CHz4…` on `D4iX…`) |
+| Current escrow program | `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47` (ProgramData `D2J1NTjx3r44HJdJL9upESKk3oaJ5ZEXMqhTsZGqfHjQ`) |
+| Current config PDA (authority `34Wxj…`) | `6UGiFSD76PSUo1SUJguGnUEv86AqtgoEdSqXDyp9hFhw` |
 | Old escrow programs (retired, keep for rollback) | `6jK6oEaLtGm5tCKNB3aCpp3Wq5K7gbVBdEfqqLMQ7uma`, `D4iXSnHJfW8qh1Zh4AK7rh4mXC8G6RNcSmkvR6vrmcCn` |
 | Client payer / buyer | `34Wxj37y8yCynoxsqkvZ5o2Wj3xH36XFkQ1AVUpawCZB` |
 | Seller payout (node offer `payout_id`) | `5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs` |

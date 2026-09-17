@@ -1,9 +1,10 @@
 # Vtessera Escrow — Security Policy
 
 Program: `8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47` (devnet)
-On-chain security.txt: Program Metadata seed `security` (metadata PDA
-`A2qRxW339iBPMiNFw7TT56z4SJPsLNEpkv6TXv72nfJs`; content sourced from
-`security.json`).
+On-chain security.txt: Program Metadata seed `security` (JSON per the
+SPL Program Metadata convention, content sourced from `security.json`;
+metadata PDA moves with each program ID — needs re-publishing on the
+`8UJy6…` rotation from the retired `D4iX…` deployment).
 Source: <https://github.com/douglasdemaio/vtessera>
 
 ## Reporting a vulnerability

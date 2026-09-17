@@ -617,7 +617,9 @@ status reflects the whole project as modules come online.
 ### Devnet status
 
 The escrow program is **live on Solana devnet** at
-**`8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`** (program ID). The audited
+**`8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47`** (program ID;
+ProgramData `D2J1NTjx3r44HJdJL9upESKk3oaJ5ZEXMqhTsZGqfHjQ`, config PDA
+`6UGiFSD76PSUo1SUJguGnUEv86AqtgoEdSqXDyp9hFhw`). The audited
 build outgrew the old deployment's `ProgramData` (`BPFLoaderUpgradeable`
 cannot resize program data), so on 2026-09-17 the program moved to a freshly
 generated keypair — the same fresh-keypair flow prescribed for first mainnet
