@@ -186,6 +186,7 @@ fn main() {
         state_dir: None,
         index: None,
         queue: None,
+        rate_limit: None,
     });
 
     eprintln!(

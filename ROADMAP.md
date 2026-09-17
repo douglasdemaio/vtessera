@@ -567,6 +567,14 @@ mint, no governance, no registry.
   (executor, dispatch API).
 - Abuse handling: rate limits, job-admission policy, a coordinator kill
   switch.
+  **Shipped (2026-09-17):** request rate limiting via `--max-rps <n>` on
+  `vtessera-node`. A per-`X-Agent-Id` token bucket (one shared bucket for
+  anonymous traffic) lives in `crates/node-api/src/rate_limit.rs` and is
+  enforced at the single `dispatch()` choke point — TCP HTTP, iroh QUIC,
+  and coordinator pulls alike return 429 + `Retry-After` past the burst
+  (default off; `/healthz` exempt so liveness probes never flap). Job
+  admission is handled by the node-local queue (`--max-concurrent-jobs` /
+  `--max-queue-len`, §2 SL). The coordinator kill switch remains follow-up.
 - Keep `cargo deny` / `cargo audit` green across all crates.
 
 ---

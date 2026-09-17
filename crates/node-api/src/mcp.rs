@@ -854,6 +854,7 @@ mod tests {
             #[cfg(feature = "serve")]
             index: None,
             queue: None,
+            rate_limit: None,
         })
     }
 

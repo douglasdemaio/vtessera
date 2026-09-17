@@ -74,6 +74,7 @@ use vtessera_mini_http::{serve, Method as MiniMethod, Request as MiniRequest, Re
 use vtessera_node_api::capacity;
 use vtessera_node_api::index::{AdmitError, IndexClient, IndexQuery};
 use vtessera_node_api::queue::JobQueue;
+use vtessera_node_api::rate_limit::RateLimiter;
 use vtessera_node_api::{
     dispatch, parse_signed_offer, HttpMethod, HttpRequest, JobRunError, JobRunner, NodeState,
     PaymentVerifier, PaymentVerifyError,
@@ -118,6 +119,7 @@ fn usage_and_exit() -> ! {
         [--upnp] \
         [--coordinator-addr <endpoint-addr.json> ...] [--coordinator-poll <secs>] \
         [--max-concurrent-jobs <n>] [--max-queue-len <n>] \
+        [--max-rps <n>] \
         [--capacity <capacity.toml>]"
     );
     process::exit(2);
@@ -197,6 +199,9 @@ struct Args {
     /// Optional `capacity.toml` for live reconfiguration (issue #109):
     /// applied once at startup, then re-applied whenever the file changes.
     capacity: Option<PathBuf>,
+    /// Requests/second each agent bucket may sustain (`--max-rps`, 0 =
+    /// disabled). Burst equals the rate; anonymous traffic shares one bucket.
+    max_rps: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,6 +329,7 @@ where
     let mut max_concurrent_jobs: u32 = 1;
     let mut max_queue_len: usize = 16;
     let mut capacity: Option<PathBuf> = None;
+    let mut max_rps: u32 = 0;
     let mut it = argv.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -408,6 +414,11 @@ where
                 }
             }
             "--capacity" => capacity = it.next().map(PathBuf::from),
+            "--max-rps" => {
+                if let Some(s) = it.next() {
+                    max_rps = s.parse().unwrap_or_else(|_| usage_and_exit());
+                }
+            }
             "--help" | "-h" => usage_and_exit(),
             _ => {
                 eprintln!("unknown argument: {a}");
@@ -441,6 +452,7 @@ where
             max_concurrent_jobs,
             max_queue_len,
             capacity,
+            max_rps,
         },
         _ => usage_and_exit(),
     }
@@ -1342,6 +1354,18 @@ fn main() {
         Some(q)
     };
 
+    // Per-agent request rate limiting (--max-rps). Off by default; burst =
+    // the rate, and anonymous traffic shares one bucket with non-/healthz
+    // requests.
+    let rate_limit = if args.max_rps > 0 {
+        Some(Arc::new(RateLimiter::new(
+            args.max_rps,
+            args.max_rps as f64,
+        )))
+    } else {
+        None
+    };
+
     let state = NodeState {
         offer: live_offer.clone(),
         escrow_account: args.escrow_account,
@@ -1351,6 +1375,7 @@ fn main() {
         state_dir: Some(args.state_dir.clone().into()),
         index,
         queue,
+        rate_limit,
     };
 
     // Live capacity reconfiguration (issue #109): apply `capacity.toml`
@@ -2373,5 +2398,28 @@ mod tests {
             "inbound+dialable".into(),
         ]);
         assert_eq!(args.connectivity, ConnectivityMode::InboundDialable);
+    }
+
+    #[test]
+    fn max_rps_flag_parses_and_defaults_off() {
+        let base = vec![
+            "--bind".into(),
+            "0.0.0.0:8402".into(),
+            "--offer".into(),
+            "/tmp/o.json".into(),
+            "--escrow".into(),
+            "escrow".into(),
+            "--network".into(),
+            "devnet".into(),
+            "--key".into(),
+            "/tmp/identity.key".into(),
+            "--state-dir".into(),
+            "/tmp/state".into(),
+        ];
+        // Default: no rate limiting (0 = disabled).
+        assert_eq!(parse_args_from(base.clone()).max_rps, 0);
+        // Explicit flag wires through.
+        let args = parse_args_from([base.clone(), vec!["--max-rps".into(), "25".into()]].concat());
+        assert_eq!(args.max_rps, 25);
     }
 }
