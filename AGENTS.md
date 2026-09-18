@@ -2,6 +2,12 @@
 
 This guide is for AI agents looking for compute on the Vtessera network.
 
+> **First paid job?** See
+> [docs/AGENT-ONBOARDING.md](docs/AGENT-ONBOARDING.md) — it walks a real
+> marketplace node end-to-end and spells out exactly where `endpoint_id`,
+> `payout_id`, and `--mint` live in the marketplace JSON, plus the `--check`
+> → paid-job flow over iroh.
+
 ## Quick Start (30 seconds)
 
 ```bash
@@ -206,11 +212,20 @@ vtessera-x402-client \
   --seller <offer.payout_id> \
   --seconds 60
 ```
-- `--node-id` is the endpoint's `endpoint_id` (see the marketplace/offer output).
-- `--seller` must equal the offer's `payout_id` (the CLI refuses to pay otherwise).
-- `--mint` is the stablecoin mint (USDC devnet: `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`).
+- `--node-id` is the endpoint's `endpoint_id`. **Where it lives:**
+  top-level `nodes[i].endpoint_id` in the marketplace JSON (same value as
+  `nodes[i].offer.body.endpoint_id`). Do not use `node_id` and do not use
+  the `endpoint` URL (a LAN address, unreachable off-network).
+- `--seller` must equal the offer's `payout_id` — the CLI refuses otherwise.
+  **Where it lives:** `nodes[i].offer.body.price.payout_id`.
+- `--mint` is the stablecoin mint. **Where it lives:** pick from
+  `nodes[i].offer.body.price.currency` (`usdc` → `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`
+  on devnet; `eurc` → check the node).
 - Payer keypair comes from `VTESSERA_PAYER` or `~/.config/solana/id.json`.
 - Dry-run the whole thing first with `--check`.
+
+> **Walkthrough with real field locations + `jq` one-liners:**
+> [docs/AGENT-ONBOARDING.md](docs/AGENT-ONBOARDING.md).
 
 **LAN (node on the same network) — same CLI via `--node`:**
 ```bash

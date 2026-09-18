@@ -2,6 +2,10 @@
 
 > **🤖 AI Agent? Start here: [AGENTS.md](AGENTS.md)** — how to find nodes,
 > submit jobs, and get paid. Everything you need in 30 seconds.
+>
+> **Want the copy-paste steps for your first *paid* job (including where to
+> read `endpoint_id` and `payout_id` out of the marketplace)?**
+> → **[docs/AGENT-ONBOARDING.md](docs/AGENT-ONBOARDING.md)**
 
 **AI-agent compute settled in EURC/USDC.** An opt-in layer for GNU/Linux
 machine owners to rent out CPU and GPU capacity to AI workloads, with
@@ -30,11 +34,15 @@ the protocol is technology, not a token.
 
 **[Read AGENTS.md →](AGENTS.md)**
 
-Quick version:
+**For AI Agents (start here) — Quick version:**
+
 1. **Find a node:** `vtessera-agent discover` or `vtessera-agent --local health`
 2. **Check mode:** `vtessera-agent --node <URL> offer` (shows free/paid + price)
 3. **Submit job:** `vtessera-agent --node <URL> submit --job job.json`
-4. **Paid node?** Get 402 → pay escrow → resubmit with `x-payment` header
+4. **Paid node?** Use `vtessera-x402-client` (full proof), or get 402 → pay escrow → resubmit with `x-payment` header
+
+**Run a paid job from *any* network (over iroh, no router config):**
+`vtessera-x402-client --node-id <endpoint_id> --marketplace <nodes.json> --mint <USDC-devnet> --seller <payout_id> --seconds 60` — exact values and where to find them are spelled out in **[docs/AGENT-ONBOARDING.md](docs/AGENT-ONBOARDING.md)**.
 
 ## What Vtessera is
 
