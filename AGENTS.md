@@ -188,67 +188,45 @@ Response (success):
 
 ### Paid jobs (x402 flow)
 
-**Step 1:** Submit job (will get 402)
+The end-to-end paid flow (402 challenge → on-chain `pay_for_compute` →
+full-proof resubmit → `finalize_pro_rata`) is implemented in
+`vtessera-x402-client` (source: `crates/x402-client/`). It builds the **full**
+proof the node's verifier requires — `{scheme, job_id, tx, amount_micros,
+mint, network}` where `job_id` is the 32-byte per-job contract seed
+(`crates/node-api/src/bin/vtessera_node.rs`, `ProofPayload`) — and pays into
+the **per-job contract PDA's ATA**, not the escrow account directly.
+
+**Recommended: paid job over iroh (no router config, works from any network):**
 ```bash
-curl -X POST http://<ip>:8402/jobs \
-  -H 'Content-Type: application/json' \
-  -H 'x-agent-id: my-agent-id' \
-  -d @job.json
+# Resolve the node by its marketplace endpoint_id and dial it over iroh QUIC.
+vtessera-x402-client \
+  --node-id <endpoint_id> \
+  --marketplace https://douglasdemaio.github.io/vtessera/nodes.json \
+  --mint 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU \
+  --seller <offer.payout_id> \
+  --seconds 60
 ```
+- `--node-id` is the endpoint's `endpoint_id` (see the marketplace/offer output).
+- `--seller` must equal the offer's `payout_id` (the CLI refuses to pay otherwise).
+- `--mint` is the stablecoin mint (USDC devnet: `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`).
+- Payer keypair comes from `VTESSERA_PAYER` or `~/.config/solana/id.json`.
+- Dry-run the whole thing first with `--check`.
 
-Response (402):
-```json
-{
-  "scheme": "x402",
-  "network": "solana-devnet",
-  "escrow_account": "8UJy6B2ZX3swc6XLgGzWeEfcrP7ujZyBcFrKfp5YkA47",
-  "offer": {
-    "body": {
-      "price": {
-        "mode": "paid",
-        "currency": "eurc",
-        "per_device_second_micros": 2792,
-        "payout_id": "5fMLGtXrcTXyxXt7RGz7qLgnbxH2nnvkTcXmBRxAARfs"
-      }
-    }
-  }
-}
-```
-
-**Step 2:** Pay the escrow
+**LAN (node on the same network) — same CLI via `--node`:**
 ```bash
-# Transfer tokens to the escrow account
-spl-token transfer \
-  --url devnet \
-  --fund-recipient \
-  <TOKEN_MINT> \
-  <AMOUNT> \
-  <ESCROW_ACCOUNT> \
-  --allow-unfunded-recipient \
-  --allow-non-system-account-recipient \
-  --with-memo "<job_id>"
+vtessera-x402-client \
+  --node http://<ip>:8402 \
+  --mint 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU \
+  --seller <offer.payout_id> \
+  --seconds 60
 ```
 
-The token mint depends on the currency:
-- USDC: `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (devnet)
-- EURC: check the node's config (devnet)
-
-**Step 3:** Resubmit with payment proof
-```bash
-curl -X POST http://<ip>:8402/jobs \
-  -H 'Content-Type: application/json' \
-  -H 'x-agent-id: my-agent-id' \
-  -H 'x-payment: {"tx":"<signature>","amount_micros":<amount>}' \
-  -d @job.json
-```
-
-The `x-payment` header is JSON:
-```json
-{
-  "tx": "transaction_signature_from_step_2",
-  "amount_micros": 10000
-}
-```
+**Legacy/manual notes (only for nodes with pre-contract-PDA verifiers):**
+Old nodes accepted an `x-payment` header of `{"tx":"<signature>","amount_micros":<amount>}`
+where the tokens were swept from the escrow account itself:
+`curl -X POST http://<ip>:8402/jobs -H 'x-payment: {"tx":"<sig>","amount_micros":<amt>}'`.
+Modern verifiers (with per-job contract PDAs) reject that — `missing job_id` —
+so prefer `vtessera-x402-client`.
 
 ## Job JSON Format
 

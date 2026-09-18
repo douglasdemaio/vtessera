@@ -106,8 +106,41 @@ struct HttpResponse {
     body: Vec<u8>,
 }
 
+/// How to reach the node. `Tcp` is the LAN/custom base URL; `Iroh` dials by
+/// EndpointId over iroh QUIC (candidates resolved from the offer-index or
+/// marketplace), so a buyer on another network reaches the node with no
+/// router config — the full-proof x402 flow works plug-and-play over iroh.
+enum Dial {
+    Tcp(String),
+    Iroh {
+        node_id: String,
+        index: String,
+        marketplace: Option<String>,
+    },
+}
+
+impl Dial {
+    /// Human-readable reachability for diagnostics.
+    fn describe(&self) -> String {
+        match self {
+            Dial::Tcp(base) => base.clone(),
+            Dial::Iroh {
+                node_id,
+                index,
+                marketplace,
+            } => match marketplace {
+                Some(m) => format!("iroh:{node_id} (candidates via {index} / {m})"),
+                None => format!("iroh:{node_id} (candidates via {index})"),
+            },
+        }
+    }
+}
+
 struct Args {
     node: String,
+    node_id: Option<String>,
+    index: String,
+    marketplace: Option<String>,
     mint: Option<Pubkey>,
     seconds: u64,
     seller: Option<Pubkey>,
@@ -118,10 +151,17 @@ struct Args {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: vtessera-x402-client [--node <url>] [--mint <addr>] \
-         [--seconds <n>] [--seller <pubkey>] [--program <addr>] [--check] [--verbose]"
+        "usage: vtessera-x402-client [--node <url> | --node-id <id>] [--index <url>] \
+         [--marketplace <url>] [--mint <addr>] [--seconds <n>] [--seller <pubkey>] \
+         [--program <addr>] [--check] [--verbose]"
     );
-    eprintln!("  --node    vtessera-node base URL (default {DEFAULT_NODE})");
+    eprintln!("  --node    vtessera-node base URL over TCP (default {DEFAULT_NODE})");
+    eprintln!(
+        "  --node-id iroh EndpointId (hex) of a node — dial over iroh QUIC with no router \
+         config; candidates come from --index/--marketplace"
+    );
+    eprintln!("  --index   offer-index URL for --node-id candidate resolution (default http://127.0.0.1:8403)");
+    eprintln!("  --marketplace GitHub Pages marketplace URL for --node-id candidate resolution");
     eprintln!("  --mint    pay a real devnet stablecoin mint instead of minting a test one");
     eprintln!("  --seconds agreed device-seconds for the job (default {DEFAULT_SECONDS})");
     eprintln!(
@@ -141,8 +181,13 @@ fn usage_and_exit() -> ! {
     std::process::exit(2);
 }
 
+const DEFAULT_INDEX: &str = "http://127.0.0.1:8403";
+
 fn parse_args() -> Args {
     let mut node = DEFAULT_NODE.to_string();
+    let mut node_id: Option<String> = None;
+    let mut index = DEFAULT_INDEX.to_string();
+    let mut marketplace: Option<String> = None;
     let mut mint: Option<Pubkey> = None;
     let mut seconds = DEFAULT_SECONDS;
     let mut seller: Option<Pubkey> = None;
@@ -153,6 +198,9 @@ fn parse_args() -> Args {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--node" => node = it.next().unwrap_or_else(|| usage_and_exit()),
+            "--node-id" => node_id = Some(it.next().unwrap_or_else(|| usage_and_exit())),
+            "--index" => index = it.next().unwrap_or_else(|| usage_and_exit()),
+            "--marketplace" => marketplace = Some(it.next().unwrap_or_else(|| usage_and_exit())),
             "--mint" => {
                 let raw = it.next().unwrap_or_else(|| usage_and_exit());
                 mint = Some(Pubkey::from_str(&raw).unwrap_or_else(|e| {
@@ -195,6 +243,9 @@ fn parse_args() -> Args {
     }
     Args {
         node,
+        node_id,
+        index,
+        marketplace,
         mint,
         seconds,
         seller,
@@ -206,6 +257,15 @@ fn parse_args() -> Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
+
+    let dial = match &args.node_id {
+        Some(nid) => Dial::Iroh {
+            node_id: nid.clone(),
+            index: args.index.clone(),
+            marketplace: args.marketplace.clone(),
+        },
+        None => Dial::Tcp(args.node.clone()),
+    };
 
     let payer_path: PathBuf = env::var("VTESSERA_PAYER")
         .map(PathBuf::from)
@@ -225,7 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rpc = RpcClient::new_with_commitment(DEVNET_RPC.to_string(), CommitmentConfig::confirmed());
 
     if args.check {
-        let ready = preflight(&args, &payer, &program_id, &rpc)?;
+        let ready = preflight(&args, &dial, &payer, &program_id, &rpc)?;
         std::process::exit(if ready { 0 } else { 1 });
     }
 
@@ -233,8 +293,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("agent devnet SOL: {:.6}", pre_lamports as f64 / 1e9);
 
     // --- 1. GET /offer --------------------------------------------------
-    println!("\n--- 1. GET {}/offer ---", args.node);
-    let offer_resp = http_request(&args.node, "GET", "/offer", &[], b"")?;
+    println!("\n--- 1. GET {}/offer ---", dial.describe());
+    let offer_resp = http_request(&dial, "GET", "/offer", &[], b"")?;
     if offer_resp.status != 200 {
         return Err(format!("GET /offer returned {}", offer_resp.status).into());
     }
@@ -243,7 +303,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(per) => per.saturating_mul(args.seconds),
         None => {
             println!("offer is FREE — nothing to pay; POST /jobs directly");
-            let accept = http_request(&args.node, "POST", "/jobs", &[], b"")?;
+            let accept = http_request(&dial, "POST", "/jobs", &[], b"")?;
             println!("POST /jobs → {}", accept.status);
             return Ok(());
         }
@@ -293,11 +353,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // --- 2. POST /jobs → 402 x402 challenge -----------------------------
-    println!("\n--- 2. POST {}/jobs (no payment proof) ---", args.node);
+    println!(
+        "\n--- 2. POST {}/jobs (no payment proof) ---",
+        dial.describe()
+    );
     // Build a minimal job spec the node can parse (used for the 402 challenge
     // and the paid submission).
     let job_spec = build_job_spec(&args, &payer);
-    let chall_resp = http_request(&args.node, "POST", "/jobs", &[], job_spec.as_bytes())?;
+    let chall_resp = http_request(&dial, "POST", "/jobs", &[], job_spec.as_bytes())?;
     if chall_resp.status != 402 {
         return Err(format!("expected 402, got {}", chall_resp.status).into());
     }
@@ -584,7 +647,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --- 4. Retry POST /jobs with the x-payment proof -------------------
-    println!("\n--- 4. POST {}/jobs with x-payment proof ---", args.node);
+    println!(
+        "\n--- 4. POST {}/jobs with x-payment proof ---",
+        dial.describe()
+    );
     let proof = format!(
         "{{\"scheme\":\"x402\",\"job_id\":\"{}\",\"tx\":\"{}\",\
          \"amount_micros\":{price_micros},\"mint\":\"{}\",\"network\":\"{chall_network}\"}}",
@@ -593,7 +659,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mint_pk,
     );
     let accept_resp = http_request(
-        &args.node,
+        &dial,
         "POST",
         "/jobs",
         &[("x-payment", &proof)],
@@ -736,6 +802,7 @@ fn report(status: PreflightStatus, msg: &str) {
 
 fn preflight(
     args: &Args,
+    dial: &Dial,
     payer: &Keypair,
     program_id: &Pubkey,
     rpc: &RpcClient,
@@ -745,10 +812,11 @@ fn preflight(
     println!("\n=== vtessera-x402-client pre-flight ===");
     println!("payer:    {}", payer.pubkey());
     println!("program:  {}", program_id);
+    println!("dial:     {}", dial.describe());
 
     // --- 1. node offer + payout ---------------------------------------
     println!("\n[1] node offer");
-    let offer = match http_request(&args.node, "GET", "/offer", &[], b"") {
+    let offer = match http_request(dial, "GET", "/offer", &[], b"") {
         Ok(resp) if resp.status == 200 => match parse_offer(&String::from_utf8(resp.body)?) {
             Ok(o) => {
                 let price = match o.per_device_second_micros {
@@ -764,7 +832,9 @@ fn preflight(
                     PreflightStatus::Pass,
                     &format!(
                         "{} offers {} vCPU @ {} MiB — {price}{payout}",
-                        args.node, o.vcpus, o.mem_mb
+                        dial.describe(),
+                        o.vcpus,
+                        o.mem_mb
                     ),
                 );
                 Some(o)
@@ -844,7 +914,7 @@ fn preflight(
     if let Some(offer) = &offer {
         if offer.per_device_second_micros.is_some() {
             let job_spec = build_job_spec(args, payer);
-            match http_request(&args.node, "POST", "/jobs", &[], job_spec.as_bytes()) {
+            match http_request(dial, "POST", "/jobs", &[], job_spec.as_bytes()) {
                 Ok(resp) if resp.status == 402 => {
                     match parse_challenge(&String::from_utf8(resp.body)?) {
                         Ok((network, escrow)) => {
@@ -1029,7 +1099,37 @@ fn preflight(
 
 // --- HTTP client -------------------------------------------------------
 
+/// Transport-agnostic request to the node. `Tcp` sends HTTP/1.1 over a raw
+/// socket (LAN / explicitly provided base URL); `Iroh` resolves the node's
+/// EndpointId to dialable candidates via the offer-index/marketplace and
+/// speaks HTTP-over-QUIC through iroh — no router config required on the
+/// remote hop.
 fn http_request(
+    dial: &Dial,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<HttpResponse, String> {
+    match dial {
+        Dial::Tcp(base) => http_request_tcp(base, method, path, headers, body),
+        Dial::Iroh {
+            node_id,
+            index,
+            marketplace,
+        } => http_request_iroh(
+            node_id,
+            index,
+            marketplace.as_deref(),
+            method,
+            path,
+            headers,
+            body,
+        ),
+    }
+}
+
+fn http_request_tcp(
     base: &str,
     method: &str,
     path: &str,
@@ -1110,6 +1210,207 @@ fn http_request(
         headers: resp_headers,
         body: body_out,
     })
+}
+
+/// Resolve `node_id` to dialable candidates, trying the offer-index (freshest
+/// heartbeats) then the marketplace when provided. Returns `(endpoint_id,
+/// candidates, source)` for diagnostics; errors name both sources. Mirrors
+/// `agent-cli`'s resolver (T2.1).
+fn resolve_node_candidates(
+    index: &str,
+    marketplace: Option<&str>,
+    node_id: &str,
+) -> Result<(String, Vec<vtessera_transport::Candidate>, &'static str), String> {
+    if let Ok(Some(hit)) = index_entry_for_node(index, node_id) {
+        if !hit.1.is_empty() {
+            return Ok((hit.0, hit.1, "offer-index"));
+        }
+    }
+    if let Some(market) = marketplace {
+        if let Ok(Some(hit)) = marketplace_entry_for_node(market, node_id) {
+            if !hit.1.is_empty() {
+                return Ok((hit.0, hit.1, "marketplace"));
+            }
+        }
+    }
+    Err(match index_entry_for_node(index, node_id) {
+        Ok(Some(_)) => format!(
+            "{node_id} is registered at the offer-index but has no dialable iroh \
+             candidates yet (no heartbeat arrived; try again shortly)"
+        ),
+        _ => format!(
+            "no node with endpoint_id {node_id} (checked the offer-index at {index} and \
+             the marketplace)"
+        ),
+    })
+}
+
+/// Resolve `node_id` to a dialable `iroh::EndpointAddr`.
+fn resolve_addr(
+    index: &str,
+    marketplace: Option<&str>,
+    node_id: &str,
+) -> Result<iroh::EndpointAddr, String> {
+    let (id, candidates, _source) = resolve_node_candidates(index, marketplace, node_id)?;
+    vtessera_transport::iroh_sidecar::endpoint_addr_from_candidates(&id, &candidates)
+}
+
+fn http_request_iroh(
+    node_id: &str,
+    index: &str,
+    marketplace: Option<&str>,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<HttpResponse, String> {
+    let addr = resolve_addr(index, marketplace, node_id)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+    rt.block_on(async move {
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .bind()
+            .await
+            .map_err(|e| format!("bind iroh endpoint: {e}"))?;
+        let conn = tokio::time::timeout(
+            Duration::from_secs(20),
+            endpoint.connect(addr, vtessera_transport::iroh_sidecar::VTESSERA_ALPN),
+        )
+        .await
+        .map_err(|_| format!("dial {node_id}: timed out (no relay/DIRECT path)"))?
+        .map_err(|e| format!("dial {node_id}: {e}"))?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| format!("open_bi: {e}"))?;
+
+        let mut head = format!("{method} {path} HTTP/1.1\r\n");
+        for (k, v) in headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str(&format!("content-length: {}\r\n\r\n", body.len()));
+        send.write_all(head.as_bytes())
+            .await
+            .map_err(|e| format!("send request head: {e}"))?;
+        send.write_all(body)
+            .await
+            .map_err(|e| format!("send request body: {e}"))?;
+        send.finish().map_err(|e| format!("finish request: {e}"))?;
+        let response = tokio::time::timeout(Duration::from_secs(20), recv.read_to_end(1024 * 1024))
+            .await
+            .map_err(|_| "read response: timed out".to_string())?
+            .map_err(|e| format!("read response: {e}"))?;
+        conn.close(0u32.into(), b"done");
+        parse_quic_http_response(&response)
+    })
+}
+
+/// Parse an HTTP/1.1 response returned over a QUIC stream into an
+/// `HttpResponse` (status, headers, body) — the same framing node-api emits
+/// on both TCP and iroh transports.
+fn parse_quic_http_response(buf: &[u8]) -> Result<HttpResponse, String> {
+    let sep = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or("response had no header terminator")?;
+    let header =
+        std::str::from_utf8(&buf[..sep]).map_err(|e| format!("bad response header: {e}"))?;
+    let mut lines = header.lines();
+    let status_line = lines.next().ok_or("empty status line")?;
+    let mut parts = status_line.splitn(3, ' ');
+    let _proto = parts.next();
+    let status: u16 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or("unparseable status line")?;
+    let mut content_length: Option<usize> = None;
+    let mut resp_headers: Vec<(String, String)> = Vec::new();
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim().to_string();
+            let v = v.trim().to_string();
+            if k.eq_ignore_ascii_case("content-length") {
+                content_length = v.parse().ok();
+            } else {
+                resp_headers.push((k, v));
+            }
+        }
+    }
+    let body = &buf[sep + 4..];
+    let body = match content_length {
+        Some(n) => body.get(..n.min(body.len())).unwrap_or(body).to_vec(),
+        None => body.to_vec(),
+    };
+    Ok(HttpResponse {
+        status,
+        headers: resp_headers,
+        body,
+    })
+}
+
+/// Look up `(endpoint_id, candidates)` for `node_id` in the offer-index.
+fn index_entry_for_node(
+    index: &str,
+    node_id: &str,
+) -> Result<Option<(String, Vec<vtessera_transport::Candidate>)>, String> {
+    let resp: serde_json::Value = ureq::Agent::new_with_defaults()
+        .get(&format!("{index}/offers"))
+        .call()
+        .map_err(|e| format!("offer-index unreachable ({index}): {e}"))?
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("offer-index response unreadable: {e}"))?;
+    let entries = resp["offers"]
+        .as_array()
+        .ok_or("offer-index returned no list")?;
+    Ok(entries
+        .iter()
+        .find(|entry| {
+            entry["endpoint_id"].as_str() == Some(node_id)
+                || entry["offer"]["body"]["endpoint_id"].as_str() == Some(node_id)
+        })
+        .map(|entry| extract_endpoint_candidates(entry, node_id)))
+}
+
+/// Look up `(endpoint_id, candidates)` for `node_id` in the marketplace
+/// `nodes.json`.
+fn marketplace_entry_for_node(
+    marketplace: &str,
+    node_id: &str,
+) -> Result<Option<(String, Vec<vtessera_transport::Candidate>)>, String> {
+    let resp: serde_json::Value = ureq::Agent::new_with_defaults()
+        .get(marketplace)
+        .call()
+        .map_err(|e| format!("marketplace unreachable ({marketplace}): {e}"))?
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("marketplace nodes.json unreadable: {e}"))?;
+    let nodes = resp["nodes"]
+        .as_array()
+        .ok_or("marketplace nodes.json malformed (no nodes list)")?;
+    Ok(nodes
+        .iter()
+        .find(|entry| {
+            entry["endpoint_id"].as_str() == Some(node_id)
+                || entry["offer"]["body"]["endpoint_id"].as_str() == Some(node_id)
+        })
+        .map(|entry| extract_endpoint_candidates(entry, node_id)))
+}
+
+/// Pull `(endpoint_id, candidates)` out of an offer-index or marketplace
+/// entry. `endpoint_id` at entry level wins; the offer body is the fallback
+/// (pre-candidates/older payloads).
+fn extract_endpoint_candidates(
+    entry: &serde_json::Value,
+    fallback_id: &str,
+) -> (String, Vec<vtessera_transport::Candidate>) {
+    let id = entry["endpoint_id"]
+        .as_str()
+        .or_else(|| entry["offer"]["body"]["endpoint_id"].as_str())
+        .unwrap_or(fallback_id)
+        .to_string();
+    let candidates: Vec<vtessera_transport::Candidate> =
+        serde_json::from_value(entry["candidates"].clone()).unwrap_or_default();
+    (id, candidates)
 }
 
 // --- Offer / challenge parsing -----------------------------------------

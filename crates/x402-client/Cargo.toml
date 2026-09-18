@@ -36,3 +36,16 @@ spl-associated-token-account = { version = "8.0.0", features = ["no-entrypoint"]
 # Anchor uses borsh 0.10 for IX serialisation on the 0.30 line.
 borsh = "0.10"
 sha2 = "0.10"
+
+# Full-proof x402 paid flow over iroh QUIC (`--node-id`): the node is dialed
+# by its EndpointId through the same transport crate agent-cli uses, so a
+# buyer on a different network reaches the node without any router config.
+# Deps are declared in VTESSERA's root workspace but kept optional/feature'd
+# here so the standalone crate's solana-3.x tree stays as lean as possible.
+serde_json = "1"
+vtessera-transport = { path = "../transport", features = ["serve"] }
+# iroh is re-exported transitively by vtessera-transport; declared explicitly
+# so the `use iroh::...` paths resolve (same pattern as agent-cli).
+iroh = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }

@@ -261,3 +261,63 @@ Neither blocks the marketplace; both are safe follow-ups for a future
 session. Standing next task per the queue is the escrow
 settlement-authority rotation work (programs/vtessera-escrow), which wraps
 the paid demo into a real multi-buyer loop.
+
+---
+
+## 8. `x402-client` dials paid nodes over iroh (no router config) — 2026-09-18
+
+**Scenario:** agent CLI from a remote network (train, NAT/CPE) needed to run
+the full `x402` paid flow against a home-laptop node that is marketplace-listed
+but reachable only over iroh. `vtessera-agent --node <lan-url>` cannot work
+remotely; the pre-existing `agent --payment` path also can't build the full
+proof (only `{tx, amount_micros}` → node rejects 402 with `missing job_id`),
+and the AGENTS.md `spl-token transfer → escrow ATA` guide is **stale**: the
+node verifies the deposit landed in the *per-job contract PDA's* ATA
+(`crates/node-api/src/bin/vtessera_node.rs`, `ProofPayload` ~line 756,
+`escrow_ata` ~line 1019), so plain transfers to the escrow account never
+verify.
+
+**Done this session:** `crates/x402-client` (standalone crate, excluded from
+host workspace) gained an iroh dial mode that mirrors agent-cli's resolver + 
+QUIC round-trip:
+
+- New flags: `--node-id <endpoint_id>` (dial the endpoint over iroh),
+  `--index <offer-index>` (default `http://127.0.0.1:8403`),
+  `--marketplace <nodes.json url>` (candidate source when the index is stale
+  or unreachable). `--node http://...` remains for LAN.
+- `Dial::Tcp | Dial::Iroh` enum with `describe()`; `http_request` dispatches
+  on it. Iroh path resolves candidates via index→marketplace fallback
+  (`resolve_node_candidates`, mirroring `agent-cli::resolve_node_candidates`),
+  builds a tokio current-thread runtime, `Endpoint::bind` (presets::N0),
+  `connect(EndpointAddr, VTESSERA_ALPN)`, `open_bi`, writes HTTP/1.1
+  (method/path + extra headers + content-length), reads body, parses status +
+  headers + content-length into `HttpResponse`.
+- Deps added: `iroh = "1"`, `tokio` (rt/rt-multi-thread/macros/time),
+  `ureq` (rustls+json for index/marketplace fetch), `serde_json = "1"`,
+  `vtessera-transport = { path = "../transport", features = ["serve"] }`.
+  Co-exists with `solana 3.x` on ed25519-dalek 2.2 / curve25519-dalek 4.1.3.
+- Kept `--check` preflight; it now shows `dial: iroh:<id>` and validates offer
+  payout↔`--seller` matching, challenge escrow↔program, config PDA, payer
+  funds, seller ATA.
+
+**Verified live over devnet (2026-09-18):** preflight green and full paid
+round-trip from a train network: GET /offer → 402 challenge → on-chain
+`pay_for_compute` (234,180 micros USDC) → resubmit with full proof → 200
+accepted/executed → `finalize_pro_rata` → escrow ATA drained to 0, seller ATA
+credited. Two Rust-heavy concerns were safety-checked first: iroh 1.1.0 +
+solana 3.x share ed25519-dalek 2.2, and the `vtessera-transport` serve feature
+added no conflicting quinn. Run it with:
+
+```bash
+cargo run --manifest-path crates/x402-client/Cargo.toml -- \
+  --node-id <endpoint_id> \
+  --marketplace https://douglasdemaio.github.io/vtessera/nodes.json \
+  --mint 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU \
+  --seller <offer.payout_id> \
+  --seconds 60
+```
+
+**Follow-up:** update AGENTS.md paid-job section to say the modern CLI is
+`vtessera-x402-client --node-id ...` (full proof, iroh), and mark the raw
+`spl-token transfer` flow as legacy (works only if the node predates the
+per-job contract-PDA verifier).
