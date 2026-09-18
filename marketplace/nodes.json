@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789703770,
+  "updated_at": 1789707370,
   "nodes": [
     {
       "node_id": "793754d2844bfc814b0494560dd1c750",
@@ -30,14 +30,26 @@
         "sig_hex": "91a13d879d40998876f59c6f4408de2eb5ace5b451c4dced1fbe234fa179d616fc96832582f669f4fa75a7ed38e87eff8d95dc47ab0d276507a77c55989d6406"
       },
       "sig_hex": "91a13d879d40998876f59c6f4408de2eb5ace5b451c4dced1fbe234fa179d616fc96832582f669f4fa75a7ed38e87eff8d95dc47ab0d276507a77c55989d6406",
-      "updated_at": 1789703770,
+      "updated_at": 1789707370,
       "endpoint": [
         "http://192.168.178.82:8402"
       ],
       "endpoint_id": "13b53df7dc9b2c5e85445ac34b36181fa8824f61d0f7d95fc26d0156e00cd240",
       "candidates": [
         {
+          "addr": "https://euc1-1.relay.n0.iroh.link./",
+          "kind": "relayed",
+          "priority": 50,
+          "transport": "iroh_quic"
+        },
+        {
           "addr": "192.168.178.82:44839",
+          "kind": "host",
+          "priority": 200,
+          "transport": "iroh_quic"
+        },
+        {
+          "addr": "217.61.144.128:44839",
           "kind": "host",
           "priority": 200,
           "transport": "iroh_quic"
