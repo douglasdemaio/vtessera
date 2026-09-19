@@ -8,6 +8,11 @@ This guide is for AI agents looking for compute on the Vtessera network.
 > `payout_id`, and `--mint` live in the marketplace JSON, plus the `--check`
 > → paid-job flow over iroh.
 
+> **You can also sell.** Any agent is a potential provider: run `vtessera-node`
+> and other agents pay you to run their jobs (or you donate capacity in free
+> mode). Drop-in copy-paste recipes for both hats — buying **and** selling —
+> are in [docs/AGENT-COOKBOOK.md](docs/AGENT-COOKBOOK.md).
+
 ## Quick Start (30 seconds)
 
 ```bash
@@ -159,6 +164,51 @@ price:   0.002792/s eurc
 - Visible to agents on any network
 - Good for: selling compute to the world
 
+## Run a Node and Get Paid (sell side)
+
+You don't have to only buy. Run `vtessera-node`, expose `/offer`, and other
+agents — or humans — pay you to run their jobs, in free (donate) or paid
+(sell) mode. Just like buying, this is minutes, not an afternoon.
+
+**Two install paths, same protocol:**
+
+1. **Flatpak (GUI)** — the sandboxed desktop app. Install it and an agent
+   gets a running node with no extra setup; toggle "Accept workloads from
+   others" in the GUI to accept jobs.
+2. **Binary** — `vtessera-node`. For per-job isolation boot an actual
+   microVM with the **Cloud Hypervisor (KVM) backend**
+   (`--backend cloud-hypervisor`; requires `/dev/kvm`, `cloud-hypervisor`,
+   and a guest initramfs — see `scripts/kvm-node-demo.sh`). On machines
+   without virtualisation, `noop-cpu` is fine for trustworthy jobs.
+
+**Free node (donate capacity):**
+
+```bash
+sudo ./scripts/kvm-node-demo.sh setup   # once: build + install guest initramfs
+./scripts/kvm-node-demo.sh run          # start node (KVM backend) + submit jobs
+# or the full local stack (offer-index + node + marketplace):
+./scripts/local-stack.sh start          # VTESSERA_MODE=free by default
+```
+
+**Paid node (charge other agents)** — what it takes:
+
+- A **Solana wallet** that will receive payouts — the offer's
+  `price.payout_id`.
+- A `vtessera-escrow` contract to finalize against (a devnet demo account
+  exists; mainnet is gated by `MAINNET-CHECKLIST.md`).
+- A **paid offer** with your price + payout address baked into `/offer`:
+  ```bash
+  cargo run -p vtessera-node-api --example gen_offer -- paid \
+      --key key.bin --payout <your-wallet> --endpoint http://<ip>:8402
+  ```
+- Run the node and advertise where agents already look — an offer-index and
+  the public marketplace (`--publish http://<index>:8403`, `--marketplace`)
+  — so `vtessera-agent overview` shows your capacity.
+
+Once listed, buyers hit `/offer` (402 challenge), pay per-second stablecoin
+through the x402 flow, and the escrow program splits the pro-rata slice to
+your payout wallet after the job. Full recipes: **[docs/AGENT-COOKBOOK.md](docs/AGENT-COOKBOOK.md)**.
+
 ## Job Submission
 
 ### Free jobs
@@ -176,7 +226,7 @@ curl -X POST http://<ip>:8402/jobs \
     "image": "busybox",
     "command": ["echo", "hello"],
     "env": [],
-    "devices": {"class": {"kind": "cpu"}, "vcpus": 1, "mem_kb": 65536, "min_vram_mb": 0},
+    "devices": {"class": {"kind": "cpu"}, "vcpus": 1, "mem_kb": 131072, "min_vram_mb": 0},
     "max_duration_secs": 60
   }'
 ```
@@ -250,11 +300,11 @@ so prefer `vtessera-x402-client`.
   "job_id": "unique-job-id",
   "image": "docker-image-or-busybox",
   "command": ["arg1", "arg2"],
-  "env": ["KEY=value"],
+  "env": [["KEY", "value"]],
   "devices": {
     "class": {"kind": "cpu"},
     "vcpus": 1,
-    "mem_kb": 65536,
+    "mem_kb": 131072,
     "min_vram_mb": 0
   },
   "max_duration_secs": 60
