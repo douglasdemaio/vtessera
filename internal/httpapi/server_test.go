@@ -705,3 +705,82 @@ func TestUnknownRoutesAre404(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsNeedNoCredentials(t *testing.T) {
+	server, _ := setupServer(t)
+	anon := &agentClient{t: t, base: server.URL, http: server.Client()}
+	status, body := anon.raw(http.MethodGet, "/v1/metrics", nil, false)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/metrics = %d, want 200 without a session (%s)", status, body)
+	}
+	for _, key := range []string{`"generatedAt"`, `"totals"`, `"agents"`, `"delivered"`, `"asOf"`} {
+		if !strings.Contains(string(body), key) {
+			t.Errorf("metrics body is missing %s: %s", key, body)
+		}
+	}
+	if !strings.Contains(string(body), `"asOf":null`) {
+		t.Errorf("empty marketplace should report a null asOf, got: %s", body)
+	}
+
+	var m domain.UsageMetrics
+	decodeInto(t, body, &m)
+	if m.AsOf != nil {
+		t.Errorf("asOf = %v, want nil before any delivery", m.AsOf)
+	}
+	if m.Totals != (domain.UsageTotals{}) {
+		t.Errorf("totals = %+v, want all zero", m.Totals)
+	}
+	if m.Agents == nil {
+		t.Error("agents is nil, want [] so the site never has to nil-check")
+	}
+	if m.GeneratedAt.IsZero() {
+		t.Error("generatedAt is zero, want the service clock")
+	}
+}
+
+func TestMetricsCountARecordedTradeAsDelivered(t *testing.T) {
+	server, _ := setupServer(t)
+	seller := newAgent(t, server)
+	buyer := newAgent(t, server)
+	offer := seller.publishOffer("12.50", usdc, "summarize:document")
+
+	var trade domain.Trade
+	decodeInto(t, buyer.do(http.MethodPost, "/v1/trades", map[string]any{
+		"offerId":        offer.ID,
+		"settlementMode": "offchain",
+		"idempotencyKey": "trade-1",
+	}, true), &trade)
+	buyer.do(http.MethodPost, "/v1/trades/"+trade.ID+"/negotiate", map[string]any{}, true)
+	seller.do(http.MethodPost, "/v1/trades/"+trade.ID+"/accept", map[string]any{}, true)
+	buyer.do(http.MethodPost, "/v1/trades/"+trade.ID+"/accept", map[string]any{}, true)
+	buyer.do(http.MethodPost, "/v1/trades/"+trade.ID+"/record", map[string]any{}, true)
+
+	anon := &agentClient{t: t, base: server.URL, http: server.Client()}
+	var m domain.UsageMetrics
+	decodeInto(t, anon.do(http.MethodGet, "/v1/metrics", nil, false), &m)
+
+	if m.Totals.Delivered != 1 {
+		t.Errorf("delivered = %d, want 1", m.Totals.Delivered)
+	}
+	if m.Totals.Consumers != 1 {
+		t.Errorf("consumers = %d, want 1", m.Totals.Consumers)
+	}
+	if m.Totals.Services != 1 {
+		t.Errorf("services = %d, want 1", m.Totals.Services)
+	}
+	if m.Totals.Disputed != 0 || m.Totals.Cancelled != 0 {
+		t.Errorf("a recorded trade should not be disputed or cancelled, got %+v", m.Totals)
+	}
+	if m.AsOf == nil {
+		t.Fatal("asOf is nil, want the receipt time of the recorded trade")
+	}
+	if len(m.Agents) != 1 {
+		t.Fatalf("agents = %+v, want the selling agent only", m.Agents)
+	}
+	if m.Agents[0].AgentID != seller.id {
+		t.Errorf("agentId = %s, want the seller %s", m.Agents[0].AgentID, seller.id)
+	}
+	if m.Agents[0].Delivered != 1 {
+		t.Errorf("per-agent delivered = %d, want 1", m.Agents[0].Delivered)
+	}
+}

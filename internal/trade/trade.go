@@ -28,6 +28,7 @@ type Store interface {
 	SetTradeState(ctx context.Context, tradeID string, from, to domain.TradeState, at time.Time) (bool, error)
 	AppendTradeEvent(ctx context.Context, e domain.TradeEvent) (int64, error)
 	ListTradeEvents(ctx context.Context, tradeID string) ([]domain.TradeEvent, error)
+	UsageMetrics(ctx context.Context) (domain.UsageMetrics, error)
 }
 
 type OfferStore interface {
@@ -55,6 +56,15 @@ type Service struct {
 
 func New(store Store, offers OfferStore, agents AgentStore, led Ledger) *Service {
 	return &Service{store: store, offers: offers, agents: agents, ledger: led, now: func() time.Time { return time.Now().UTC() }}
+}
+
+func (s *Service) UsageMetrics(ctx context.Context) (domain.UsageMetrics, error) {
+	m, err := s.store.UsageMetrics(ctx)
+	if err != nil {
+		return domain.UsageMetrics{}, err
+	}
+	m.GeneratedAt = s.now()
+	return m, nil
 }
 
 var transitions = map[domain.TradeState]map[domain.TradeState]domain.TradeEventType{

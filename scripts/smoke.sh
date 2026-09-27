@@ -188,6 +188,17 @@ assert len(ledger["entries"]) == 1, ledger
 assert ledger["entries"][0]["prevHash"] == ledger["genesis"], ledger
 print("  ok ledger anchored to the genesis hash")
 
+metrics = call("/v1/metrics", None, method="GET")
+assert metrics["totals"]["delivered"] == 1, metrics
+assert metrics["totals"]["disputed"] == 0, metrics
+assert metrics["totals"]["cancelled"] == 0, metrics
+assert metrics["totals"]["consumers"] == 1, metrics
+assert metrics["totals"]["services"] == 1, metrics
+assert len(metrics["agents"]) == 1, metrics
+assert metrics["agents"][0]["delivered"] == 1, metrics
+assert metrics["asOf"], metrics
+print("  ok public metrics count the delivery without a session")
+
 if rpc_url:
     tokens = call("/v1/tokens", None, method="GET")
     listed = {token["address"]: token for token in tokens["tokens"]}

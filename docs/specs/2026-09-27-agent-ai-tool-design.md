@@ -233,5 +233,6 @@ unrelated to this project and is not expected to maintain this site.
 - Decide the initial curated entry set and who maintains it.
 - Confirm the full list of `vtessera` fields worth surfacing once deployed.
 - Usage metrics are specified in
-  `2026-09-27-agent-ai-tool-usage-metrics-design.md` and depend on the
-  `GET /v1/metrics` endpoint and the cache-lifecycle amendment above.
+  `2026-09-27-agent-ai-tool-usage-metrics-design.md`. Their dependency,
+  `GET /v1/metrics`, now exists and is public and unauthenticated; the site
+  work that consumes it has not started.
