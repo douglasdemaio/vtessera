@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -169,7 +170,7 @@ func decodeSecret(secret string) ([]byte, error) {
 		return nil, errors.New("session-secret is required")
 	}
 	if len(secret) >= 64 {
-		if decoded, err := hexDecode(secret); err == nil {
+		if decoded, err := hex.DecodeString(secret); err == nil {
 			return decoded, nil
 		}
 	}
@@ -177,21 +178,6 @@ func decodeSecret(secret string) ([]byte, error) {
 		return decoded, nil
 	}
 	return []byte(secret), nil
-}
-
-func hexDecode(s string) ([]byte, error) {
-	if len(s)%2 != 0 {
-		return nil, errors.New("hex string must have an even length")
-	}
-	out := make([]byte, len(s)/2)
-	for i := 0; i < len(out); i++ {
-		value, err := strconv.ParseUint(s[i*2:i*2+2], 16, 8)
-		if err != nil {
-			return nil, err
-		}
-		out[i] = byte(value)
-	}
-	return out, nil
 }
 
 // envDuration reads a duration setting, falling back when unset. A malformed
