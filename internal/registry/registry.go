@@ -26,6 +26,7 @@ type Store interface {
 	UpdateAgent(ctx context.Context, a domain.Agent) error
 	SetAgentStatus(ctx context.Context, id string, status domain.AgentStatus, at time.Time) error
 	ListAgents(ctx context.Context, status domain.AgentStatus) ([]domain.Agent, error)
+	ListAgentsByIDs(ctx context.Context, ids []string) (map[string]domain.Agent, error)
 	CreateOffer(ctx context.Context, o domain.Offer, idempotencyKey string) error
 	GetOffer(ctx context.Context, id string) (domain.Offer, error)
 	GetOfferByIdempotencyKey(ctx context.Context, key string) (domain.Offer, error)

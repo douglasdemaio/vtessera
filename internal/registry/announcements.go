@@ -13,18 +13,24 @@ func (a *AnnouncementSource) Announcements(ctx context.Context) ([]agp.Capabilit
 		return nil, err
 	}
 	now := a.now().UTC()
-	agents := map[string]domain.Agent{}
+
+	ids := make([]string, 0, len(offers))
+	seen := map[string]bool{}
+	for _, offer := range offers {
+		if !seen[offer.AgentID] {
+			seen[offer.AgentID] = true
+			ids = append(ids, offer.AgentID)
+		}
+	}
+	agents, err := a.store.ListAgentsByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
 	out := make([]agp.CapabilityAnnouncement, 0, len(offers))
 	for _, offer := range offers {
 		agent, ok := agents[offer.AgentID]
-		if !ok {
-			agent, err = a.store.GetAgent(ctx, offer.AgentID)
-			if err != nil {
-				continue
-			}
-			agents[offer.AgentID] = agent
-		}
-		if agent.Status != domain.AgentActive {
+		if !ok || agent.Status != domain.AgentActive {
 			continue
 		}
 		out = append(out, agp.AnnouncementsForOffer(offer, agent, a.mints.mintInfo(offer.PriceMint), now)...)

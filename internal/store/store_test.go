@@ -415,6 +415,39 @@ func TestUpdateAndListAgents(t *testing.T) {
 	}
 }
 
+func TestListAgentsByIDs(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if err := s.CreateAgent(ctx, testAgent("alice")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAgent(ctx, testAgent("bob")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListAgentsByIDs(ctx, []string{"alice", "missing", "bob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2: %v", len(got), got)
+	}
+	if got["alice"].ID != "alice" || got["bob"].ID != "bob" {
+		t.Errorf("got = %v, want alice and bob", got)
+	}
+	if _, ok := got["missing"]; ok {
+		t.Errorf("got unexpected entry for missing agent")
+	}
+
+	empty, err := s.ListAgentsByIDs(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("empty ids = %v, want empty map", empty)
+	}
+}
+
 func TestOfferLookupsAndStatus(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
