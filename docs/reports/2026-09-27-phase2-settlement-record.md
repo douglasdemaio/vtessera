@@ -111,6 +111,20 @@ SMOKE_RPC_URL=https://api.devnet.solana.com ./scripts/smoke.sh
 
 Last full run: unit suite green; `-race` green; all five E2E scenarios green in 504.6s against a local validator; smoke passed both with and without `SMOKE_RPC_URL`.
 
+**The rent experiment of 2026-09-27 is reproducible** and is the evidence for §7.2. It needs a validator, so apply the same transient-validator discipline as `make test-solana` — start, run, stop:
+
+```bash
+solana-test-validator --ledger "$HOME/.cache/solana-ledger-renttest" --reset --quiet &
+# for each of 0.000001, 0.00089079, 0.00089088 SOL, to a fresh unfunded address:
+solana --url http://127.0.0.1:8899 transfer --allow-unfunded-recipient --keypair <k> <dest> <amount>
+curl -s -X POST http://127.0.0.1:8899 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["<dest>"]}'
+make validator-off
+rm -rf "$HOME/.cache/solana-ledger-renttest"
+```
+
+Note `solana transfer` takes **SOL, not lamports** — passing `1000` means 1000 SOL, not 1000 lamports. And `--allow-unfunded-recipient` is required, because the CLI refuses an underfunded recipient client-side before it ever reaches the runtime check under test. Also verify via `getSignatureStatuses` rather than the CLI's own output: the CLI prints a `Signature:` line for a transaction it has only *submitted*, which is not the same as one that landed. One attempt here reported a signature for a transaction that had not yet reached a slot, and reading the account immediately returned `null`.
+
 ## 7. Defects and gaps
 
 This is the section that matters. Ordered by severity.
@@ -134,17 +148,31 @@ Consequences: any trade priced in the governed "EURC" can never settle, and ever
 
 ### 7.2 HIGH — the fee default is below the rent-exempt minimum
 
-`internal/fees/fees.go:18` sets `DefaultLamports = 500_000` (0.0005 SOL). Mainnet's `getMinimumBalanceForRentExemption(0)` returns **650,240** lamports — measured on 2026-09-27, and 500,000 is below it. (An earlier review of this document cited ~890,880 for that figure from memory. The measured value is the one that counts; rent parameters change, which is why the fix queries the node rather than hardcoding a constant.)
+`internal/fees/fees.go:18` sets `DefaultLamports = 500_000` (0.0005 SOL). `getMinimumBalanceForRentExemption(0)` returns **650,240** lamports on mainnet-beta and on devnet, both measured on 2026-09-27 — so 500,000 is below it on every real cluster.
 
-**Mechanism — corrected.** An earlier revision of this document claimed the fee would be "absorbed as rent and quietly destroyed". That is not what the runtime does, and the correction changes the failure mode rather than the severity:
+That figure is not a constant, and the evidence is not merely that rent parameters change. A local test validator returns **890,880** for the same query, 37% higher. Both numbers are correct for their own cluster. Any constant is therefore wrong somewhere: derive it from the local validator and it is wrong in production; derive it from mainnet and it is wrong under `make test-solana`. This is the concrete reason Phase 3 §3.4 queries the node instead of hardcoding a figure.
 
-- `programs/system`'s `transfer_verified` validates that the *sender* has sufficient lamports, subtracts, and credits the recipient. It performs **no rent check on the recipient**.
-- Accounts that do not exist are loaded with `rent_epoch = u64::MAX`, i.e. rent-exempt by default. Rent is therefore not charged against a freshly credited address.
-- The rent check (`RentExemptReserveTooLow`) belongs to `CreateAccount`, which this transaction does not use — it uses `Transfer`.
+**Mechanism — settled empirically, and two earlier revisions of this document got it wrong.** This paragraph has now been written three times. The first said the fee would be "absorbed as rent and quietly destroyed". The second, after reading `programs/system/src/system_processor.rs`, said the transfer therefore *succeeds* and strands the fee as unusable dust. **Both were wrong**, and the second was wrong in a way that reading only the System Program invites.
 
-Source: Solana's account-runtime documentation and `programs/system/src/system_processor.rs`. The `InvalidAccountForFee` error observed while testing this matches that documentation exactly ("if the payer is neither a system account nor a nonce account"), which is what gives confidence in the reading.
+The resolution: the System Program genuinely does not rent-check the recipient — `transfer_verified` only validates that the sender has sufficient lamports — and a non-existent account genuinely does load with `rent_epoch = u64::MAX`. Both of those are true and neither settles the question, because the check that matters is not in the instruction at all. After the instructions run, the **runtime** validates that every account left standing by the transaction is rent-exempt, and fails the whole transaction with `TransactionError::InsufficientFundsForRent` if one is not.
 
-So a 500,000-lamport fee to an unfunded fee wallet most likely **succeeds**, canonical comparison passes, the trade completes — and the fee is stranded as unusable dust in a 0-byte account that can never cover a transaction fee. That is worse in one respect and better in another than a loud failure: it is not recoverable, but it does not burn the buyer's network fees in a rebuild loop. **Not empirically confirmed** — the check requires a local validator simulation, which was not run. The remediation is identical either way: the fee wallet must be funded to at least the queried rent-exempt minimum before mainnet use, which is Phase 3 §3.4.
+Measured on a local test validator (Agave 3.1.14) on 2026-09-27, transferring to an address with no account:
+
+| Amount | Outcome |
+|---|---|
+| 1,000 lamports | rejected — RPC `-32002`, `Transaction results in an account (1) with insufficient funds for rent` |
+| 890,879 lamports | rejected — identical error, one lamport under the minimum |
+| 890,880 lamports | accepted — finalized, `err: null`, account created at `space: 0, rentEpoch: u64::MAX` |
+
+The most misleading detail is that the program log reads `Program 11111111111111111111111111111111 invoke [1]` followed by `success` even on the rejected attempts. The instruction succeeded; the transaction did not.
+
+**Impact.** The rejection is atomic: after the failed 1,000-lamport attempt the destination still returned `value: null` and the sender's balance was bit-for-bit unchanged. No transfer, and no transaction fee either. So a 500,000-lamport fee to an unfunded fee wallet means the settlement **cannot complete** — not that it completes and loses the fee, and not that it burns the buyer network fees in a rebuild loop. Nothing is stranded, because nothing lands.
+
+The operational hazard is therefore a stall rather than a loss, and it is worse for being quiet: the rejection surfaces to whoever submits the transaction, which is the buyer, not the operator. From the service's point of view settlements simply stop confirming and requests age out through the reconciler.
+
+**A correction is in the git history, and it is not being rewritten.** The commit message for `12e99eb` states the disproven version — that the transfer succeeds and strands the fee as dust. It was believed correct when written and was wrong. Rather than force-push over it, the correction is recorded here, and the commit that makes this correction says so in its own message. Reading the log without reading this section will mislead you; that is a known cost of amending by adding.
+
+Remediation is unchanged: the fee wallet must be funded to at least the queried rent-exempt minimum before mainnet use (Phase 3 §3.4, and the query must be per-cluster — see §7.2's note below).
 
 ### 7.3 HIGH — no cluster awareness
 
