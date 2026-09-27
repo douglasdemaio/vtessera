@@ -26,14 +26,15 @@ const (
 )
 
 type Server struct {
-	registry *registry.Service
-	trades   *trade.Service
-	auth     *auth.Service
-	agp      *agp.Routing
-	ledger   *ledger.Ledger
-	tokens   tokens.Registry
-	mux      *http.ServeMux
-	version  string
+	registry      *registry.Service
+	trades        *trade.Service
+	auth          *auth.Service
+	agp           *agp.Routing
+	ledger        *ledger.Ledger
+	tokens        tokens.Registry
+	mux           *http.ServeMux
+	version       string
+	agentCardBody map[string]any
 }
 
 type Options struct {
@@ -57,6 +58,7 @@ func New(opts Options) *Server {
 		version:  opts.Version,
 		mux:      http.NewServeMux(),
 	}
+	s.agentCardBody = s.buildAgentCard()
 	s.routes()
 	return s
 }
@@ -98,10 +100,10 @@ func (s *Server) routes() {
 }
 
 func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.agentCard())
+	writeJSON(w, http.StatusOK, s.agentCardBody)
 }
 
-func (s *Server) agentCard() map[string]any {
+func (s *Server) buildAgentCard() map[string]any {
 	return map[string]any{
 		"name":               "vtessera marketplace",
 		"description":        "A2A marketplace gateway: routes Intents to the cheapest policy-compliant agent and issues hash-chain anchored virtual tessera receipts.",
