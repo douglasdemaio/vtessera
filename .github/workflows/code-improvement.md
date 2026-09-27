@@ -31,9 +31,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
-  copilot-requests: write
-engine: copilot
-model: gpt-5.6
+engine: claude
 tools:
   bash: true
   github:
