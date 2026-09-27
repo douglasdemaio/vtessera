@@ -2,6 +2,7 @@ package agp
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -241,5 +242,5 @@ func actionSlug(description string) string {
 
 func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", sum)
+	return hex.EncodeToString(sum[:])
 }
