@@ -158,9 +158,10 @@ func scanOffer(row rowScanner) (domain.Offer, error) {
 	return o, nil
 }
 
+var likeEscaper = strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_")
+
 func escapeLike(s string) string {
-	r := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_")
-	return r.Replace(s)
+	return likeEscaper.Replace(s)
 }
 
 func nullString(s string) any {
