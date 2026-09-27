@@ -45,17 +45,15 @@ network:
     - go
 steps:
   - name: Set up Go toolchain
-    run: |
-      set -euo pipefail
-      GO_VERSION=1.27.1
-      curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
-      rm -rf /usr/local/go
-      tar -C /usr/local -xzf /tmp/go.tgz
-      echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+    id: go
+    uses: actions/setup-go@v7
+    with:
+      go-version: "1.27.1"
+      cache: true
   - name: Record hermetic baseline
     run: |
       set -uo pipefail
-      export PATH="/usr/local/go/bin:$PATH"
+      export PATH="$(go env GOROOT)/bin:$PATH"
       export TMPDIR="${TMPDIR:-/tmp}"
       mkdir -p /tmp/gh-aw/agent
       {
