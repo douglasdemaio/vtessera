@@ -108,13 +108,14 @@ If the operator's intent is to run their own mainnet-beta RPC node, that is **in
 
 The only thing the marketplace requires of a node is the list in §3.5. Everything else — whether the endpoint is a public provider, a dedicated node, or a node the operator runs — is a deployment-topology choice behind `VTESSERA_RPC_URL`.
 
-**The invariant is rent exemption, and it is enforced by the runtime, not by the instruction.** This is the single most easily mis-derived claim in this document, so it was settled empirically against a local test validator (Agave 3.1.14) on 2026-09-27. Transferring lamports to a non-existent account in three steps:
+**The invariant is rent exemption, and it is enforced by the runtime, not by the instruction.** This is the single most easily mis-derived claim in this document, so it was settled empirically against a local test validator (Agave 3.1.14) on 2026-09-27. Amounts below are in SOL because that is what `solana transfer` accepts, with the lamport equivalent in brackets:
 
 | Amount sent | Result |
 |---|---|
-| 1,000 lamports | **rejected**, RPC `-32002` `Transaction results in an account (1) with insufficient funds for rent` |
-| 890,879 lamports (one under the minimum) | **rejected**, identical error |
-| 890,880 lamports (exactly the minimum) | **accepted**, finalized with `err: null`; account created at `lamports: 890880, space: 0, rentEpoch: u64::MAX` |
+| 0.00001 SOL (10,000 lamports) | **rejected**, RPC `-32002` `Transaction results in an account (1) with insufficient funds for rent` |
+| 0.00089079 SOL (890,879 lamports) | **rejected**, identical error — one lamport under the minimum |
+| 0.00089088 SOL (890,880 lamports) | **accepted**, finalized with `err: null`; account created at `lamports: 890880, space: 0, rentEpoch: u64::MAX` |
+| 0.00100000 SOL (1,000,000 lamports) | **accepted** — a round control well clear of the boundary; it is *not* the minimum |
 
 Two details make this counter-intuitive, and each one alone leads to the wrong answer:
 
