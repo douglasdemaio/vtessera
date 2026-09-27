@@ -2,6 +2,7 @@ package agp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -285,5 +286,128 @@ func TestBuildTableRejectsBadAnnouncement(t *testing.T) {
 func TestExtensionDeclaration(t *testing.T) {
 	if ExtensionURI == "" || Version != "1.0" {
 		t.Fatalf("extension constants = %q %q", ExtensionURI, Version)
+	}
+}
+
+func TestToBool(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      any
+		want    bool
+		wantErr bool
+	}{
+		{name: "bool true", in: true, want: true},
+		{name: "bool false", in: false, want: false},
+		{name: "string true", in: "true", want: true},
+		{name: "string false", in: "false", want: false},
+		{name: "string not a bool", in: "maybe", wantErr: true},
+		{name: "unsupported type", in: 1, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := toBool(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("toBool(%v) = %v, nil, want an error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("toBool(%v) unexpected error: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("toBool(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToNumber(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      any
+		want    float64
+		wantErr bool
+	}{
+		{name: "float64", in: float64(3.5), want: 3.5},
+		{name: "float32", in: float32(2.5), want: 2.5},
+		{name: "int", in: 4, want: 4},
+		{name: "int64", in: int64(5), want: 5},
+		{name: "json.Number", in: json.Number("6.25"), want: 6.25},
+		{name: "json.Number malformed", in: json.Number("not-a-number"), wantErr: true},
+		{name: "string", in: "7.5", want: 7.5},
+		{name: "string not a number", in: "nope", wantErr: true},
+		{name: "unsupported type", in: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := toNumber(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("toNumber(%v) = %v, nil, want an error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("toNumber(%v) unexpected error: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("toNumber(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToStringList(t *testing.T) {
+	got, err := toStringList([]string{"a", "b"})
+	if err != nil || len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("toStringList([]string) = %v, %v, want [a b], nil", got, err)
+	}
+
+	got, err = toStringList([]any{"a", json.Number("2")})
+	if err != nil || len(got) != 2 || got[0] != "a" || got[1] != "2" {
+		t.Errorf("toStringList([]any) = %v, %v, want [a 2], nil", got, err)
+	}
+
+	got, err = toStringList("solo")
+	if err != nil || len(got) != 1 || got[0] != "solo" {
+		t.Errorf("toStringList(string) = %v, %v, want [solo], nil", got, err)
+	}
+
+	if _, err := toStringList(42); err == nil {
+		t.Error("toStringList(42) = nil error, want an error for an unsupported type")
+	}
+}
+
+func TestNormalizeValue(t *testing.T) {
+	if got := normalizeValue(json.Number("1.5")); got != 1.5 {
+		t.Errorf("normalizeValue(json.Number(1.5)) = %v, want 1.5", got)
+	}
+	if got := normalizeValue(json.Number("not-a-number")); got != "not-a-number" {
+		t.Errorf("normalizeValue(json.Number(not-a-number)) = %v, want the raw string", got)
+	}
+	if got := normalizeValue("plain"); got != "plain" {
+		t.Errorf("normalizeValue(plain) = %v, want it unchanged", got)
+	}
+}
+
+func TestMatchPolicyDefaultCaseComparesNormalizedValues(t *testing.T) {
+	if err := matchPolicy(PolicyDirection, "ask", "ask"); err != nil {
+		t.Errorf("matching direction values should not error: %v", err)
+	}
+	if err := matchPolicy(PolicyDirection, "ask", "bid"); err == nil {
+		t.Error("mismatched direction values should error")
+	}
+	if err := matchPolicy(PolicyDirection, json.Number("1"), float64(1)); err != nil {
+		t.Errorf("a json.Number and its float64 equivalent should match: %v", err)
+	}
+}
+
+func TestMatchAnyOfPropagatesConversionErrors(t *testing.T) {
+	if err := matchAnyOf(PolicyCurrencies, 42, []any{"usdc"}); err == nil {
+		t.Error("an unconvertible want value should error")
+	}
+	if err := matchAnyOf(PolicyCurrencies, []any{"usdc"}, 42); err == nil {
+		t.Error("an unconvertible have value should error")
 	}
 }
