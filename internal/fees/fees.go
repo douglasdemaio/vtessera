@@ -57,7 +57,7 @@ func (p Policy) Wallet() solana.PublicKey { return p.wallet }
 func (p Policy) WalletAddress() string { return p.wallet.String() }
 
 // Description is the human-readable form used in API responses and AGP
-// announcements, for example "0.0005 SOL".
+// announcements, for example "500000 lamports".
 func (p Policy) Description() string {
 	return fmt.Sprintf("%d lamports", p.lamports)
 }
