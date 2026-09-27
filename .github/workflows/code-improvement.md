@@ -72,6 +72,9 @@ safe-outputs:
     protected-files: fallback-to-issue
   push-to-pull-request-branch:
   merge-pull-request:
+  threat-detection:
+    continue-on-error: false
+    retries: 2
 concurrency:
   group: code-improvement-${{ github.ref }}
   cancel-in-progress: false
