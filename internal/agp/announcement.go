@@ -153,14 +153,13 @@ func AnnouncementsForOffer(o domain.Offer, a domain.Agent, mint domain.MintInfo,
 		PolicyDirection:       string(o.Direction),
 		"agent":               a.ID,
 	}
-	cost := CostFacts{Amount: o.PriceAmount.String(), Mint: o.PriceMint}
+	var decimals int
 	if mint.Known {
 		units, err := o.PriceAmount.BaseUnits(mint.Decimals)
 		if err == nil {
 			policy[PolicyMint] = mint
 			policy[PolicyCost] = CostFacts{Amount: o.PriceAmount.String(), Mint: o.PriceMint, Decimals: mint.Decimals, Units: units}
-			cost.Decimals = mint.Decimals
-			cost.Units = units
+			decimals = mint.Decimals
 		}
 	}
 	capabilities := CapabilitiesForOffer(o)
@@ -173,7 +172,7 @@ func AnnouncementsForOffer(o domain.Offer, a domain.Agent, mint domain.MintInfo,
 			Policy:         policy,
 			CostAmount:     o.PriceAmount.String(),
 			CostMint:       o.PriceMint,
-			CostDecimals:   cost.Decimals,
+			CostDecimals:   decimals,
 			SquadPath:      SquadPath(a.ID, o.ID),
 			OfferID:        o.ID,
 			AgentID:        a.ID,
