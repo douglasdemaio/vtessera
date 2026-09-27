@@ -32,6 +32,7 @@ permissions:
   issues: read
   pull-requests: read
 engine: claude
+model: claude-sonnet-5
 tools:
   bash: true
   github:
