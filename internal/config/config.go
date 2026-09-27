@@ -56,7 +56,7 @@ func Parse(args []string) (Config, error) {
 	fs.SetOutput(os.Stderr)
 	var (
 		addr      = fs.String("addr", env("VTESSERA_ADDR", ":8080"), "listen address")
-		dbURL     = fs.String("db", env("VTESSERA_DB", "file:vtessera.db"), "database DSN (sqlite path or postgres URL)")
+		dbURL     = fs.String("db", env("VTESSERA_DB", "file:vtessera.db"), "SQLite database DSN (Postgres is a planned target, not yet supported)")
 		signerKey = fs.String("signer-key", env("VTESSERA_SIGNER_KEY", "data/signer.key"), "path to the Ed25519 marketplace signing key")
 		secret    = fs.String("session-secret", os.Getenv("VTESSERA_SESSION_SECRET"), "session signing secret, at least 32 bytes (hex or base64)")
 		challenge = fs.Duration("challenge-ttl", 5*time.Minute, "auth challenge lifetime")
