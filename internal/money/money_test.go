@@ -128,3 +128,27 @@ func TestJSONRejectsNumber(t *testing.T) {
 		t.Errorf("unmarshal number err = %v, want %v", err, ErrNotAStringValue)
 	}
 }
+
+func TestJSONRejectsNonCanonicalString(t *testing.T) {
+	var a Amount
+	if err := json.Unmarshal([]byte(`"-1"`), &a); !errors.Is(err, ErrNegative) {
+		t.Errorf("unmarshal %q err = %v, want %v", "-1", err, ErrNegative)
+	}
+}
+
+func TestMustParsePanicsOnInvalidAmount(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("MustParse did not panic on invalid amount")
+		}
+	}()
+	MustParse("-1")
+}
+
+func TestBaseUnitsRejectsOutOfRangeDecimals(t *testing.T) {
+	for _, decimals := range []int{-1, MaxFractionDigits + 1} {
+		if _, err := MustParse("1").BaseUnits(decimals); !errors.Is(err, ErrNonCanonical) {
+			t.Errorf("BaseUnits(%d) err = %v, want %v", decimals, err, ErrNonCanonical)
+		}
+	}
+}
