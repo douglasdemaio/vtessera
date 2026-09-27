@@ -2,7 +2,6 @@ package ledger
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/mr-tron/base58"
 )
 
 const (
@@ -176,13 +174,10 @@ func (l *Ledger) Entries(ctx context.Context) ([]domain.LedgerEntry, error) {
 }
 
 func (l *Ledger) Verify(jws string) (*TesseraClaims, error) {
-	publicKey, err := base58.Decode(l.signer.PublicKeyBase58())
-	if err != nil {
-		return nil, fmt.Errorf("decode verification key: %w", err)
-	}
+	publicKey := l.signer.PublicKey()
 	claims := &TesseraClaims{}
 	if _, err := jwt.ParseWithClaims(jws, claims, func(token *jwt.Token) (any, error) {
-		return ed25519.PublicKey(publicKey), nil
+		return publicKey, nil
 	}, jwt.WithValidMethods([]string{jwt.SigningMethodEdDSA.Alg()})); err != nil {
 		return nil, fmt.Errorf("verify tessera: %w", err)
 	}
