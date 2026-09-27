@@ -115,15 +115,22 @@ Last full run: unit suite green; `-race` green; all five E2E scenarios green in 
 
 ```bash
 solana-test-validator --ledger "$HOME/.cache/solana-ledger-renttest" --reset --quiet &
-# for each of 0.000001, 0.00089079, 0.00089088 SOL, to a fresh unfunded address:
-solana --url http://127.0.0.1:8899 transfer --allow-unfunded-recipient --keypair <k> <dest> <amount>
+# each of these to a *fresh, unfunded* address; the last two are expected to pass
+solana --url http://127.0.0.1:8899 transfer --allow-unfunded-recipient --keypair <k> <dest> 0.00001
+solana --url http://127.0.0.1:8899 transfer --allow-unfunded-recipient --keypair <k> <dest> 0.00089079
+solana --url http://127.0.0.1:8899 transfer --allow-unfunded-recipient --keypair <k> <dest> 0.00089088
+solana --url http://127.0.0.1:8899 transfer --allow-unfunded-recipient --keypair <k> <dest> 0.00100000
 curl -s -X POST http://127.0.0.1:8899 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["<dest>"]}'
 make validator-off
 rm -rf "$HOME/.cache/solana-ledger-renttest"
 ```
 
-Note `solana transfer` takes **SOL, not lamports** — passing `1000` means 1000 SOL, not 1000 lamports. And `--allow-unfunded-recipient` is required, because the CLI refuses an underfunded recipient client-side before it ever reaches the runtime check under test. Also verify via `getSignatureStatuses` rather than the CLI's own output: the CLI prints a `Signature:` line for a transaction it has only *submitted*, which is not the same as one that landed. One attempt here reported a signature for a transaction that had not yet reached a slot, and reading the account immediately returned `null`.
+Three traps, all of which cost time here:
+
+- `solana transfer` takes **SOL, not lamports**, and writes the amount unadorned. Passing `1000` moves 1000 SOL, which fails on the sender's balance and looks like a rent problem. Every amount above is in SOL for that reason.
+- `--allow-unfunded-recipient` is mandatory. Without it the CLI refuses an underfunded recipient client-side and never reaches the runtime check under test.
+- Verify with `getSignatureStatuses`, not the CLI's own output. `solana transfer` prints a `Signature:` line for a transaction it has merely *submitted*. One attempt here reported a signature for a transaction that had not yet reached a slot, and reading the account immediately returned `null` — which reads as a failure and is not one. Wait for `getSlot` to pass the transaction's slot before drawing a conclusion.
 
 ## 7. Defects and gaps
 
@@ -156,13 +163,16 @@ That figure is not a constant, and the evidence is not merely that rent paramete
 
 The resolution: the System Program genuinely does not rent-check the recipient — `transfer_verified` only validates that the sender has sufficient lamports — and a non-existent account genuinely does load with `rent_epoch = u64::MAX`. Both of those are true and neither settles the question, because the check that matters is not in the instruction at all. After the instructions run, the **runtime** validates that every account left standing by the transaction is rent-exempt, and fails the whole transaction with `TransactionError::InsufficientFundsForRent` if one is not.
 
-Measured on a local test validator (Agave 3.1.14) on 2026-09-27, transferring to an address with no account:
+Measured on a local test validator (Agave 3.1.14) on 2026-09-27, transferring to an address with no account. Amounts are given in SOL because that is what `solana transfer` takes; the lamport equivalent is in brackets:
 
-| Amount | Outcome |
-|---|---|
-| 1,000 lamports | rejected — RPC `-32002`, `Transaction results in an account (1) with insufficient funds for rent` |
-| 890,879 lamports | rejected — identical error, one lamport under the minimum |
-| 890,880 lamports | accepted — finalized, `err: null`, account created at `space: 0, rentEpoch: u64::MAX` |
+| Amount | Lamports | Outcome |
+|---|---|---|
+| 0.00001 SOL | 10,000 | rejected — RPC `-32002`, `Transaction results in an account (1) with insufficient funds for rent` |
+| 0.00089079 SOL | 890,879 | rejected — identical error, one lamport under the minimum |
+| 0.00089088 SOL | 890,880 | accepted — finalized, `err: null`, account created at `space: 0, rentEpoch: u64::MAX` |
+| 0.00100000 SOL | 1,000,000 | accepted — control, `err: null`, account created at `lamports: 1000000` |
+
+The minimum on this cluster is **0.00089088 SOL**. The last row is *not* the minimum — it is a round control value comfortably above it, useful precisely because it is unambiguous to read. The two rows that bracket the threshold to a single lamport are the ones that carry the argument; the control only shows that the pass/fail split is not a fluke of one value.
 
 The most misleading detail is that the program log reads `Program 11111111111111111111111111111111 invoke [1]` followed by `success` even on the rejected attempts. The instruction succeeded; the transaction did not.
 
