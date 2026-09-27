@@ -108,11 +108,24 @@ If the operator's intent is to run their own mainnet-beta RPC node, that is **in
 
 The only thing the marketplace requires of a node is the list in §3.5. Everything else — whether the endpoint is a public provider, a dedicated node, or a node the operator runs — is a deployment-topology choice behind `VTESSERA_RPC_URL`.
 
-**The invariant is rent exemption, not a fee buffer.** A System transfer of 1000 lamports to a non-existent fee wallet creates a 0-byte account holding 1000 lamports, far below the 650,240-lamport rent-exempt minimum that `getMinimumBalanceForRentExemption(0)` returns on mainnet today. The runtime does **not** reject this: `transfer_verified` checks only that the sender has sufficient lamports, and accounts that do not yet exist are loaded with `rent_epoch = u64::MAX`, so no rent is charged. The transfer therefore **succeeds**, canonical comparison passes, the trade completes, and the fee is stranded as dust in an account too small to ever cover a transaction fee. The rent check (`RentExemptReserveTooLow`) belongs to `CreateAccount`, which this transaction does not use.
+**The invariant is rent exemption, and it is enforced by the runtime, not by the instruction.** This is the single most easily mis-derived claim in this document, so it was settled empirically against a local test validator (Agave 3.1.14) on 2026-09-27. Transferring lamports to a non-existent account in three steps:
 
-The figure must be queried from the node and never hardcoded: a review of this design cited ~890,880 for it from memory, which the node contradicts, and rent parameters change between releases. The fee destination only ever *receives* — it never pays transaction fees — so no forward-looking buffer is justified either.
+| Amount sent | Result |
+|---|---|
+| 1,000 lamports | **rejected**, RPC `-32002` `Transaction results in an account (1) with insufficient funds for rent` |
+| 890,879 lamports (one under the minimum) | **rejected**, identical error |
+| 890,880 lamports (exactly the minimum) | **accepted**, finalized with `err: null`; account created at `lamports: 890880, space: 0, rentEpoch: u64::MAX` |
 
-Consequence for mainnet: an unfunded fee wallet does not fail loudly, it silently swallows every fee. Hence the fatal severity in §6.3.
+Two details make this counter-intuitive, and each one alone leads to the wrong answer:
+
+- The System Program reports **success**. The log reads `Program 11111111111111111111111111111111 invoke [1]` / `success`, because `transfer_verified` only checks that the sender has enough lamports. Reading the program log, or reading `transfer_verified`, tells you the transfer succeeded. It did not.
+- The rejection comes from the runtime's **post-transaction** account sanitization, which validates that every account left standing by the transaction is rent-exempt. That check is `TransactionError::InsufficientFundsForRent`, a transaction-level error, not a program error. A non-existent account does load with `rent_epoch = u64::MAX`, but that only means it *would* be rent-exempt — the post-transaction check runs first and rejects the underfunded result, so the `u64::MAX` is never reached.
+
+The failure is **atomic**. After the rejected 1,000-lamport attempt the destination still returned `value: null`, and the sender's balance was bit-for-bit unchanged — no transfer, and no transaction fee either. So the fee wallet is drained by nothing and the buyer's lamports are not burned; the settlement simply cannot complete until the wallet is funded.
+
+The threshold must be queried from the node and never hardcoded, and the reason is now concrete rather than theoretical: `getMinimumBalanceForRentExemption(0)` returns **650,240** on both mainnet-beta and devnet, but **890,880** on a local test validator — a 37% difference. A constant derived locally would be wrong in production, and a constant derived from production would be wrong under `make test-solana`. The fee destination only ever *receives* — it never pays transaction fees — so no forward-looking buffer is justified either.
+
+Consequence for mainnet: an unfunded fee wallet blocks every on-chain settlement, and it blocks them *silently* from the service's point of view, because the failure surfaces to the buyer who submits the transaction, not to the operator. Hence the fatal severity in §6.3.
 
 ## 4. Decisions
 
@@ -358,7 +371,7 @@ Postgres portability; the token-registry governance admin surface and audit trai
 ## 12. Runbook
 
 ### 12.1 Fee wallet unfunded or drained
-Preflight is fatal on mainnet-beta, so this is caught at deploy. The in-flight symptom is **not** an error: per §3.4 the transfer succeeds, canonical comparison passes, the trade completes, and the fee is stranded as dust in a 0-byte account too small to cover a transaction fee. The detectable signal is therefore a discrepancy between the count of settled trades and the fee wallet's balance, not a failure in any log. Reconcile those two figures, and if they diverge, top the wallet up to at least the queried rent minimum before the next settlement. The fee destination only receives, so no other balance can affect it.
+Preflight is fatal on mainnet-beta, so this is caught at deploy. In flight the transaction is rejected by the runtime with `InsufficientFundsForRent` (§3.4), which is **atomic**: the destination is never created and the buyer's fee is not charged. The service's symptom is therefore an absence, not an error — settlements stop confirming, and requests age out through the reconciler as the buyer retries. If your provider surfaces the submit error to the buyer, the buyer sees a concrete RPC failure and the operator sees nothing at all. The check is to compare the count of settled trades against settled trade signatures with a fee transfer, and reconcile any gap before it grows. Then fund the wallet to at least the queried rent-exempt minimum — which is 650,240 lamports on mainnet-beta today and 890,880 on a local validator, so query it rather than transcribing either.
 
 ### 12.2 Issuer rotates a mint authority
 Startup treats this as fatal, which is intended: a deploy must not proceed on an unreviewed governance change. Re-derive the mint's `mintAuthority` and `freezeAuthority` from two independent providers, update the pin in `internal/tokens` and the `testdata` snapshot in the same commit, and note it in the changelog. At runtime the drift only warns, so settlement keeps working while an operator schedules the re-pin. If a *freeze* authority appears where there was none, treat it as an incident: counterparties cannot move funds in a frozen account, and the pin change should be reviewed as a security event.
