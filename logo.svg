@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2e3b4e"/>
+      <stop offset="1" stop-color="#171e28"/>
+    </linearGradient>
+    <linearGradient id="v" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8ff0b3"/>
+      <stop offset="0.55" stop-color="#2ec27e"/>
+      <stop offset="1" stop-color="#1a8f5c"/>
+    </linearGradient>
+  </defs>
+  <!-- squircle -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="2"/>
+  <!-- circuit traces from the V arms to node dots -->
+  <g stroke="#2ec27e" stroke-width="7" stroke-linecap="round" opacity="0.9">
+    <line x1="58" y1="62" x2="34" y2="62"/>
+    <line x1="34" y1="62" x2="34" y2="44"/>
+    <line x1="198" y1="62" x2="222" y2="62"/>
+    <line x1="222" y1="62" x2="222" y2="44"/>
+  </g>
+  <circle cx="34" cy="38" r="9" fill="#8ff0b3"/>
+  <circle cx="222" cy="38" r="9" fill="#8ff0b3"/>
+  <!-- bold V -->
+  <path d="M46 62 L116 198 L128 220 L140 198 L210 62 L174 62 L128 158 L82 62 Z" fill="url(#v)"/>
+  <!-- base node dot -->
+  <circle cx="128" cy="222" r="8" fill="#2ec27e"/>
+</svg>
