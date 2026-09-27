@@ -300,9 +300,7 @@ func matchPolicy(key string, want, have any) error {
 			return fmt.Errorf("policy %q requires at least %v, route announces %v", key, wantNum, haveNum)
 		}
 		return nil
-	case PolicySettlementModes:
-		return matchAnyOf(key, want, have)
-	case PolicyCurrencies:
+	case PolicySettlementModes, PolicyCurrencies:
 		return matchAnyOf(key, want, have)
 	default:
 		if fmt.Sprint(normalizeValue(want)) != fmt.Sprint(normalizeValue(have)) {
