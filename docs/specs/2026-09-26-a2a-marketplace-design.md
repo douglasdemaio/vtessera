@@ -154,7 +154,7 @@ The buyer is the fee payer and transaction signer. Because all instructions live
 
 ### 6.2 Build flow
 
-`POST /trades/{id}/settlement` (auth: buyer):
+`POST /v1/trades/{id}/settlement` (auth: buyer):
 
 1. Validate trade state is `accepted` and `settlement_mode = onchain`.
 2. Validate mint against the token registry.
@@ -165,7 +165,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 
 ### 6.3 Confirm flow
 
-`POST /trades/{id}/confirm {signature}` (auth: buyer or seller):
+`POST /v1/trades/{id}/confirm {signature}` (auth: buyer or seller):
 
 1. `getTransaction(signature, confirmed)` with retries/backoff for RPC finality lag.
 2. Decode and check, **exactly and in canonical order**: transfer mint/amount/ATA derivation vs. trade terms; memo == trade UUID; fee transfer == 500,000 lamports to the exact service wallet; buyer signature present.
@@ -213,7 +213,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 - `POST /v1/trades/{id}/cancel`, `POST /v1/trades/{id}/dispute` — off-ramps with a reason.
 - `GET /v1/tesseras/{tradeID}` — the signed tessera, its verification key, and its decoded claims.
 
-**Phase 2 additions:** `POST /trades/{id}/settlement`, `POST /trades/{id}/confirm`, `GET /tokens`, and the A2A `tasks/*` JSON-RPC lifecycle.
+**Phase 2 additions:** `POST /v1/trades/{id}/settlement`, `POST /v1/trades/{id}/confirm`, `GET /v1/tokens`, and the A2A `tasks/*` JSON-RPC lifecycle.
 
 ## 9. Security
 
