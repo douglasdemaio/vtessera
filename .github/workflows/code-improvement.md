@@ -33,6 +33,7 @@ permissions:
   pull-requests: read
   copilot-requests: write
 engine: copilot
+model: gpt-5.6
 tools:
   bash: true
   github:
