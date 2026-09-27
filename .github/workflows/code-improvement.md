@@ -55,7 +55,7 @@ permissions:
   pull-requests: read
   copilot-requests: write
 engine: copilot
-model: auto
+model: claude-haiku-4-5-20251001
 tools:
   bash: true
   github:
