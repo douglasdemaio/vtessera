@@ -361,3 +361,154 @@ func TestChallengeIsSingleUse(t *testing.T) {
 		t.Errorf("missing consume = %v, want ErrNotFound", err)
 	}
 }
+
+func TestUpdateAndListAgents(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	a := testAgent("alice")
+	if err := s.CreateAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	b := testAgent("bob")
+	if err := s.CreateAgent(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+
+	a.Card.Name = "alice v2"
+	a.UpdatedAt = time.Now().UTC()
+	if err := s.UpdateAgent(ctx, a); err != nil {
+		t.Fatalf("update agent: %v", err)
+	}
+	got, err := s.GetAgent(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Card.Name != "alice v2" {
+		t.Errorf("name = %q, want alice v2", got.Card.Name)
+	}
+
+	missing := testAgent("missing")
+	if err := s.UpdateAgent(ctx, missing); err != ErrNotFound {
+		t.Errorf("update missing agent = %v, want ErrNotFound", err)
+	}
+
+	if err := s.SetAgentStatus(ctx, "alice", domain.AgentSuspended, time.Now().UTC()); err != nil {
+		t.Fatalf("set agent status: %v", err)
+	}
+	if err := s.SetAgentStatus(ctx, "missing", domain.AgentSuspended, time.Now().UTC()); err != ErrNotFound {
+		t.Errorf("set status on missing agent = %v, want ErrNotFound", err)
+	}
+
+	active, err := s.ListAgents(ctx, domain.AgentActive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ID != "bob" {
+		t.Errorf("active agents = %v, want [bob]", active)
+	}
+	suspended, err := s.ListAgents(ctx, domain.AgentSuspended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(suspended) != 1 || suspended[0].ID != "alice" {
+		t.Errorf("suspended agents = %v, want [alice]", suspended)
+	}
+}
+
+func TestOfferLookupsAndStatus(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if err := s.CreateAgent(ctx, testAgent("alice")); err != nil {
+		t.Fatal(err)
+	}
+	o := testOffer("o1", "alice")
+	if err := s.CreateOffer(ctx, o, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.GetOffer(ctx, "o1")
+	if err != nil {
+		t.Fatalf("get offer: %v", err)
+	}
+	if got.Description != o.Description {
+		t.Errorf("description = %q, want %q", got.Description, o.Description)
+	}
+	if _, err := s.GetOffer(ctx, "missing"); err != ErrNotFound {
+		t.Errorf("get missing offer = %v, want ErrNotFound", err)
+	}
+
+	open, err := s.ListOpenOffers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 || open[0].ID != "o1" {
+		t.Errorf("open offers = %v, want [o1]", ids(open))
+	}
+
+	if err := s.SetOfferStatus(ctx, "o1", domain.OfferClosed, time.Now().UTC()); err != nil {
+		t.Fatalf("set offer status: %v", err)
+	}
+	if err := s.SetOfferStatus(ctx, "missing", domain.OfferClosed, time.Now().UTC()); err != ErrNotFound {
+		t.Errorf("set status on missing offer = %v, want ErrNotFound", err)
+	}
+	open, err = s.ListOpenOffers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Errorf("open offers after close = %v, want none", ids(open))
+	}
+}
+
+func TestGetTradeByIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	for _, id := range []string{"alice", "bob"} {
+		if err := s.CreateAgent(ctx, testAgent(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateOffer(ctx, testOffer("o1", "alice"), ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	tr := domain.Trade{
+		ID:             "t1",
+		OfferID:        "o1",
+		BuyerAgentID:   "bob",
+		SellerAgentID:  "alice",
+		Description:    "sentiment dataset",
+		Amount:         money.MustParse("25"),
+		Mint:           validMint,
+		SettlementMode: domain.SettlementOffchain,
+		State:          domain.TradeProposed,
+		CreatedAt:      now,
+	}
+	if err := s.CreateTrade(ctx, tr, "trade-key"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTradeAcceptance(ctx, "t1", "bob", now); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.GetTradeByIdempotencyKey(ctx, "trade-key")
+	if err != nil {
+		t.Fatalf("get by idempotency key: %v", err)
+	}
+	if got.ID != "t1" {
+		t.Errorf("id = %s, want t1", got.ID)
+	}
+	if len(got.Acceptances) != 1 || got.Acceptances[0] != "bob" {
+		t.Errorf("acceptances = %v, want [bob]", got.Acceptances)
+	}
+	if _, err := s.GetTradeByIdempotencyKey(ctx, "missing-key"); err != ErrNotFound {
+		t.Errorf("missing key = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPing(t *testing.T) {
+	s := testStore(t)
+	if err := s.Ping(context.Background()); err != nil {
+		t.Errorf("ping: %v", err)
+	}
+}
