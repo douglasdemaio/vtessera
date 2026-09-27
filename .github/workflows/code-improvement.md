@@ -29,6 +29,8 @@ on:
 if: needs.pre_activation.outputs.pr_pressure_result == 'success'
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
 engine: copilot
 tools:
   bash: true
