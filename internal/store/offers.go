@@ -46,10 +46,8 @@ func (s *Store) SearchOffers(ctx context.Context, q domain.OfferQuery) ([]domain
 	if q.Status == "" {
 		q.Status = domain.OfferOpen
 	}
-	if q.Status != "" {
-		where = append(where, "status = ?")
-		args = append(args, string(q.Status))
-	}
+	where = append(where, "status = ?")
+	args = append(args, string(q.Status))
 	if q.AgentID != "" {
 		where = append(where, "agent_id = ?")
 		args = append(args, q.AgentID)
