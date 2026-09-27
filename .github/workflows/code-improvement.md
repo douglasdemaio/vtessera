@@ -53,9 +53,8 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
-  copilot-requests: write
-engine: copilot
-model: claude-haiku-4-5-20251001
+engine: claude
+model: claude-sonnet-5
 tools:
   bash: true
   github:
@@ -97,9 +96,6 @@ safe-outputs:
   push-to-pull-request-branch:
   merge-pull-request:
   threat-detection:
-    engine:
-      id: claude
-      model: claude-haiku-4-5-20251001
     continue-on-error: false
     retries: 2
 concurrency:
