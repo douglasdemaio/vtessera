@@ -26,6 +26,28 @@ on:
               --json title --jq '[.[] | select(.title | startswith("code-improvement:"))] | length')
         echo "open code-improvement PRs: $n (ceiling 2)"
         [ "$n" -lt 2 ]
+    - name: Announce a skip so a green run is never mistaken for a pass
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -uo pipefail
+        n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+              --search '"gh-aw-workflow-id: code-improvement" in:body' \
+              --json number --jq 'length' 2>/dev/null || echo 0)
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        if [ "$n" -gt 0 ]; then
+          {
+            echo "## Skipped — no work performed"
+            echo
+            echo "An open issue carries the \`gh-aw-workflow-id: code-improvement\` marker, so"
+            echo "this run stopped before the agent started. **This run did nothing.**"
+            echo
+            echo "The green conclusion is a skip, not a pass. Close the marker issue to unblock."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=Skipped, no work performed::An open marker issue blocked this run before the agent started. The green conclusion is not a pass."
+        else
+          echo "no skip marker present; run proceeded"
+        fi
 if: needs.pre_activation.outputs.pr_pressure_result == 'success'
 permissions:
   contents: read
