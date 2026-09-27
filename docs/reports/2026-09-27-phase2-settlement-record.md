@@ -223,3 +223,18 @@ An unparseable value falls back to the default rather than failing startup. Defe
 **Phase 2 is committed as `56ac399`**, on top of `1ca720e Initial commit`, which predates the settlement work and contains only `README.md`. The history is therefore two commits: an empty scaffold, then the entire settlement service, with no intermediate states. `git show --stat 56ac399` covers 56 files — `cmd/`, `internal/`, `go.mod`, `go.sum`, `Makefile`, `scripts/`, `.gitignore`, `README.md`, `logo.png`, `logo.svg`.
 
 The Phase 3 spec and this record were committed after it, separately, so the two phases diff cleanly and §7's fixes can be attributed to the Phase 3 change rather than to the commit that introduced the defects. One correction is folded into `56ac399` itself: the `make validator-off` target. The original stop instruction in this record was `pkill -x`, which cannot work, because Linux truncates process names to 15 characters and `-x` demands an exact match against the full name.
+
+## 10. Addendum
+
+Added after this record was written, and deliberately kept out of §3 so the
+Phase 2 delivery table still describes only what Phase 2 built.
+
+**Public `GET /v1/metrics`.** A read-only aggregate over `trades` joined to
+`receipts`, served without credentials like `/v1/ledger`. It exists so a public
+directory can show which services are actually being consumed, and it is
+specified in `docs/specs/2026-09-27-agent-ai-tool-usage-metrics-design.md`.
+
+It adds no new table, write path, dependency, or migration, and it measures
+nothing that Phase 2's settlement path does not already record. It is
+deliberately not a Phase 3 dependency: it reads only local SQLite, so it is
+unaffected by the rent, mint, and cluster defects in §7.1–7.3.

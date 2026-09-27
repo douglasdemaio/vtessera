@@ -93,6 +93,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/tesseras/{tradeID}", s.authed(s.handleTessera))
 	s.mux.HandleFunc("GET /v1/ledger", s.handleLedger)
 	s.mux.HandleFunc("GET /v1/ledger/head", s.handleLedgerHead)
+	s.mux.HandleFunc("GET /v1/metrics", s.handleMetrics)
 	s.mux.HandleFunc("POST /v1/auth/challenge", s.handleChallenge)
 	s.mux.HandleFunc("POST /v1/auth/verify", s.handleVerify)
 	s.mux.HandleFunc("POST /agp/route", s.handleAGPRoute)
@@ -414,6 +415,15 @@ func (s *Server) handleLedgerHead(w http.ResponseWriter, r *http.Request) {
 		body["head"] = entries[len(entries)-1]
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	m, err := s.trades.UsageMetrics(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
 }
 
 type challengeRequest struct {

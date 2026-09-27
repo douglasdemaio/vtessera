@@ -400,3 +400,25 @@ type Challenge struct {
 	ExpiresAt time.Time  `json:"expiresAt"`
 	Consumed  *time.Time `json:"consumedAt,omitempty"`
 }
+
+type UsageTotals struct {
+	Delivered int `json:"delivered"`
+	Disputed  int `json:"disputed"`
+	Cancelled int `json:"cancelled"`
+	Consumers int `json:"consumers"`
+	Services  int `json:"services"`
+}
+
+type AgentUsage struct {
+	AgentID   string `json:"agentId"`
+	Delivered int    `json:"delivered"`
+	Disputed  int    `json:"disputed"`
+	Cancelled int    `json:"cancelled"`
+}
+
+type UsageMetrics struct {
+	GeneratedAt time.Time    `json:"generatedAt"`
+	AsOf        *time.Time   `json:"asOf"`
+	Totals      UsageTotals  `json:"totals"`
+	Agents      []AgentUsage `json:"agents"`
+}

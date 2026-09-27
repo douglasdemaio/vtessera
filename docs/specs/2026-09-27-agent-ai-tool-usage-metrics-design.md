@@ -1,7 +1,7 @@
 # agent-ai-tool.com usage metrics — design
 
 **Date:** 2026-09-27
-**Status:** Draft for review
+**Status:** `vtessera` step implemented; site steps pending
 **Related:** `2026-09-27-agent-ai-tool-design.md` (the site), `2026-09-26-a2a-marketplace-design.md` (the marketplace), `2026-09-27-phase3-cluster-aware-settlement-design.md`
 
 ## Summary
@@ -146,6 +146,24 @@ Stated explicitly so they cannot drift from the implementation.
 
 `trades.updated_at` is **not** used for any figure. `SetTradeState` bumps it on
 every transition, so it is a transition time, not a completion time.
+
+### The per-agent breakdown
+
+The per-agent figures are per `offers.agent_id`, and they must be reachable by
+two different joins for two different reasons. An agent appears if it has **any
+delivery or any failure**, which requires a `LEFT JOIN` on `receipts` plus a
+`WHERE` admitting `disputed` or `cancelled`. An inner join would silently omit
+an agent whose every trade failed, and the per-agent counts would stop summing
+to the totals. The failure mode is a plausible-looking number, not an error, so
+it is pinned by a test.
+
+The three counts are **mutually exclusive and partition the terminal trades**,
+which follows from the state machine rather than from convention: `recorded`
+and `settled` are terminal with no outgoing transitions, and they are the only
+states for which a tessera is issued. A trade that holds a receipt therefore can
+never go on to be `disputed` or `cancelled`. This is why the `LEFT JOIN` cannot
+double-count, and it is asserted so that a future change to the transition map
+cannot quietly invalidate the arithmetic.
 
 ### Deliberately absent
 
