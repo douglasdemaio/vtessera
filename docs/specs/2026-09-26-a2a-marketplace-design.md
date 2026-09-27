@@ -72,7 +72,7 @@ A *tessera* was a Roman token used as proof of exchange. In vtessera, every comp
 | `internal/ledger` | The Tessera Ledger: append-only off-chain record of completed trades. Issues virtual tesserae (Ed25519-signed JWS receipts). This is the free tier. |
 | `internal/settlement` | Solana settlement. Builds unsigned transactions (§6) and verifies submitted signatures on-chain. Uses `github.com/gagliardetto/solana-go` and its SPL Token libraries. |
 | `internal/fees` | Fee policy: amount (500,000 lamports), destination wallet, env overrides for testing. Consulted **only** on the on-chain path. |
-| `internal/auth` | Agent identity via keypair challenge-response: `POST /auth/challenge` → nonce; `POST /auth/verify {signature}` → short-lived session token (JWT). No passwords, no custody. |
+| `internal/auth` | Agent identity via keypair challenge-response: `POST /v1/auth/challenge` → nonce; `POST /v1/auth/verify {signature}` → short-lived session token (JWT). No passwords, no custody. |
 | `internal/store` | Repository interfaces (agents, offers, trades, ledger entries, receipts, token registry). SQLite for dev/embedded; Postgres for production. |
 
 ### 3.1 AGP: the marketplace as an Agent Gateway
