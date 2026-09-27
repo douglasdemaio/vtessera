@@ -136,15 +136,7 @@ func (s *Service) Redeem(ctx context.Context, challengeID, signature string) (Se
 func (s *Service) issueSession(agentID string) (Session, error) {
 	now := s.now().UTC()
 	expires := now.Add(s.sessionTTL)
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		ID:        uuid.NewString(),
-		Issuer:    "vtessera",
-		Subject:   sessionSubject,
-		IssuedAt:  jwt.NewNumericDate(now),
-		NotBefore: jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(expires),
-	})
-	token.Claims = jwt.MapClaims{
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"iss": "vtessera",
 		"sub": sessionSubject,
 		"aud": agentID,
@@ -152,7 +144,7 @@ func (s *Service) issueSession(agentID string) (Session, error) {
 		"nbf": now.Unix(),
 		"exp": expires.Unix(),
 		"jti": uuid.NewString(),
-	}
+	})
 	signed, err := token.SignedString(s.secret)
 	if err != nil {
 		return Session{}, fmt.Errorf("sign session: %w", err)
