@@ -5,11 +5,13 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/agp"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/store"
+	"github.com/douglasdemaio/vtessera/internal/tokens"
 	"github.com/google/uuid"
 )
 
@@ -325,5 +327,113 @@ func TestAnnouncementCountStaysBounded(t *testing.T) {
 	}
 	if len(announcements) > agp.MaxRoutes {
 		t.Errorf("got %d announcements, above the %d table cap", len(announcements), agp.MaxRoutes)
+	}
+}
+
+func TestAgentReturnsRegisteredAgentOrNotFound(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	if _, _, err := svc.Register(ctx, aliceKey, card("alice")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Agent(ctx, aliceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != aliceKey || got.Card.Name != "alice" {
+		t.Errorf("Agent = %+v, want the registered alice agent", got)
+	}
+	if _, err := svc.Agent(ctx, bobKey); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("Agent(unknown) err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestAgentsFiltersByStatusAndDefaultsToActive(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	svc := registry.New(db)
+	for _, id := range []string{aliceKey, bobKey} {
+		if _, _, err := svc.Register(ctx, id, card(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.SetAgentStatus(ctx, bobKey, domain.AgentSuspended, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	active, err := svc.Agents(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ID != aliceKey {
+		t.Fatalf("Agents(\"\") = %v, want only alice", active)
+	}
+	suspended, err := svc.Agents(ctx, domain.AgentSuspended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(suspended) != 1 || suspended[0].ID != bobKey {
+		t.Fatalf("Agents(suspended) = %v, want only bob", suspended)
+	}
+}
+
+func TestOfferReturnsPublishedOfferOrNotFound(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	if _, _, err := svc.Register(ctx, aliceKey, card("alice")); err != nil {
+		t.Fatal(err)
+	}
+	published, _, err := svc.PublishOffer(ctx, aliceKey, registry.NewOffer{
+		Direction:       domain.DirectionAsk,
+		Description:     "summarize a document",
+		PriceAmount:     "1.00",
+		PriceMint:       usdc,
+		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Offer(ctx, published.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != published.ID {
+		t.Errorf("Offer = %s, want %s", got.ID, published.ID)
+	}
+	if _, err := svc.Offer(ctx, uuid.NewString()); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("Offer(unknown) err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestWithMintsGovernsOnchainPrecisionCheck(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const testMint = "11111111111111111111111111111111"
+	mints, err := tokens.New([]tokens.Token{{Address: testMint, Symbol: "TEST", Decimals: 2, Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := registry.New(db, registry.WithMints(mints))
+	withCurrencies := card("alice")
+	withCurrencies.Currencies = []string{testMint}
+	if _, _, err := svc.Register(ctx, aliceKey, withCurrencies); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = svc.PublishOffer(ctx, aliceKey, registry.NewOffer{
+		Direction:       domain.DirectionAsk,
+		Description:     "more precision than the governed mint supports",
+		PriceAmount:     "1.005",
+		PriceMint:       testMint,
+		SettlementModes: []domain.SettlementMode{domain.SettlementOnchain},
+	}, "")
+	if !errors.Is(err, registry.ErrAmountTooPrecise) {
+		t.Fatalf("PublishOffer err = %v, want ErrAmountTooPrecise for the 2-decimal test mint", err)
 	}
 }
