@@ -1,7 +1,7 @@
 # agent-ai-tool.com — Design
 
 Date: 2026-09-27
-Status: Draft, pending review
+Status: Implemented and deployed (2026-09-28)
 Target repository: `douglasdemaio/agent-ai-tool` (separate from `vtessera`)
 
 ## Summary
@@ -150,6 +150,18 @@ The live entry overrides any curated vtessera stub during merge.
 pointing at GitHub's Pages addresses are required, configured at the registrar.
 This is a manual step and blocks the first deploy.
 
+Configured: `185.199.108.153`, `185.199.109.153`, `185.199.110.153`, and
+`185.199.111.153`. A wildcard `CNAME` was briefly used to cover `www` and was
+removed — see the note below. The registrar's certificate automation (`MX`,
+`SPF`, `_acme-challenge`) is unrelated to Pages and was left in place.
+
+A wildcard `CNAME` on `*.agent-ai-tool.com` resolves *every* subdomain to the
+Pages user site, which makes any name under the domain claimable by whoever
+registers a matching repository under `douglasdemaio`. `www` is covered by an
+explicit `CNAME` instead, and the wildcard is not used. The custom-domain
+certificate covers `www.agent-ai-tool.com` as well as the apex, so no separate
+certificate is needed for it.
+
 ## Discovery surface
 
 - `robots.txt` — retrieval and answer-engine crawlers allowed, training crawlers
@@ -228,11 +240,18 @@ unrelated to this project and is not expected to maintain this site.
 
 ## Open items
 
-- Verify current AI crawler token names against vendor documentation.
-- Confirm the Pages `A` records for the apex domain at the registrar.
-- Decide the initial curated entry set and who maintains it.
+- ~~Verify current AI crawler token names against vendor documentation.~~ Done;
+  see the generated `robots.txt` and the vendor notes in the implementation.
+- ~~Confirm the Pages `A` records for the apex domain at the registrar.~~ Done;
+  all four records resolve and the certificate is approved and enforced.
+- Decide the initial curated entry set and who maintains it. `vtessera` is
+  currently the only entry, so the directory is live but not yet useful as a
+  directory.
 - Confirm the full list of `vtessera` fields worth surfacing once deployed.
+- Add a `www` `CNAME` at the registrar if `www.agent-ai-tool.com` should
+  resolve. The wildcard that used to cover it is gone, so it currently does not.
 - Usage metrics are specified in
   `2026-09-27-agent-ai-tool-usage-metrics-design.md`. Their dependency,
   `GET /v1/metrics`, now exists and is public and unauthenticated; the site
-  work that consumes it has not started.
+  consumes it, and the live section stays absent until a deployed
+  `VTESSERA_BASE_URL` is supplied.
