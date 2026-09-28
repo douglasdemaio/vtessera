@@ -1,7 +1,10 @@
 # agent-ai-tool.com usage metrics — design
 
 **Date:** 2026-09-27
-**Status:** `vtessera` step implemented; site steps pending
+**Status:** Implemented on both sides (2026-09-28). `GET /v1/metrics` is public
+and unauthenticated; the site consumes it and renders the banner, per-agent
+badges, and the no-service, fallback, and stale states. The live section stays
+absent until a deployed `VTESSERA_BASE_URL` is supplied.
 **Related:** `2026-09-27-agent-ai-tool-design.md` (the site), `2026-09-26-a2a-marketplace-design.md` (the marketplace), `2026-09-27-phase3-cluster-aware-settlement-design.md`
 
 ## Summary
