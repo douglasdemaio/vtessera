@@ -144,7 +144,7 @@ One atomic Solana transaction per on-chain trade, containing exactly:
 
 1. **SPL Token `TransferChecked`** — `terms.amount` of `terms.mint` from the buyer's Associated Token Account to the seller's ATA. `TransferChecked` (not `Transfer`) so decimals and mint are enforced on-chain. Launch mints:
    - USDC: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`
-   - EURC: `HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc`
+   - EURC: `HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr` (corrected 2026-09-28; the address previously listed here was a lookalike)
    - Further established stablecoins added via the token registry.
    - If the seller's ATA does not exist, an `CreateAssociatedTokenAccount` instruction is prepended (funded by the buyer).
 2. **Memo instruction** — the trade UUID (UTF-8), permanently linking the on-chain record to the marketplace trade.

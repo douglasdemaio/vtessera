@@ -148,6 +148,13 @@ Queried on 2026-09-27 against two independent providers, this address returns no
 
 Consequences: any trade priced in the governed "EURC" can never settle, and every agent card advertising that currency names a token that does not exist. This is the exact spoofing failure the `tokens` package was written to prevent, shipped inside the package that claims to prevent it. **Phase 2 is not safe to run against devnet or mainnet until this is fixed.** It is the first item in Phase 3 §2.1.
 
+> **Resolved 2026-09-28.** `internal/tokens` now ships
+> `HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr`, re-verified against mainnet
+> `getAccountInfo` at slot 451247490 (owner `Tokenkeg...`, type `mint`,
+> decimals 6, initialized). The five test files that pinned the lookalike were
+> updated in the same change. The rest of this section stands as written, as the
+> record of what Phase 2 shipped.
+
 **Root cause.** A 30-character matching prefix cannot be the product of vanity-address grinding — that is computationally infeasible at this length. The value is therefore a transcription or generation error, not an attack. That distinction matters for two reasons:
 
 - **Impact is liveness, not safety.** No private key exists for the bogus address, so nobody — including an attacker — can create a token there. The realistic outcome is unsettled trades, not a spoofed asset being accepted. Anyone treating this as a security incident would be over-reading it.

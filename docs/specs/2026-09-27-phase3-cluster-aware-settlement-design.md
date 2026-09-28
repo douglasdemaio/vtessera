@@ -21,14 +21,25 @@ This document makes the cluster a first-class value so the service cannot settle
 
 ## 2. Motivation
 
-### 2.1 The governed EURC mint does not exist
+### 2.1 The governed EURC mint did not exist
 
-`internal/tokens` ships `HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc` as the governed EURC mint. Queried on 2026-09-27 (mainnet slot 450860693) against **two independent providers** — `api.mainnet-beta.solana.com` and `solana-rpc.publicnode.com`:
+**Fixed 2026-09-28.** `internal/tokens` shipped `HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc` as the governed EURC mint. Queried on 2026-09-27 (mainnet slot 450860693) against **two independent providers** — `api.mainnet-beta.solana.com` and `solana-rpc.publicnode.com`:
 
 ```
 getAccountInfo HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc -> {"value": null}   <-- both providers
 getAccountInfo HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr -> SPL mint, 6 decimals, owner Tokenkeg...
 ```
+
+The constant is now `HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr`, re-verified
+independently on 2026-09-28 at mainnet slot 451247490: `owner
+TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`, `type mint`, `decimals 6`,
+`isInitialized true`, supply 105019212790296. The five test files that pinned
+the lookalike as a fixture were updated in the same change, since leaving them
+would have left the bad address exercised as if it were real.
+
+This closes the liveness half of the finding only. §2.2 (no cluster awareness)
+and the on-chain mint *verification* in §12 are unchanged, so the remaining
+Phase 3 gates still block pointing this at mainnet.
 
 The shipped constant is a lookalike: it shares a **30-character** prefix with the real address and diverges at position 31. A 30-character match is computationally infeasible to grind, so this is a transcription or generation error rather than an attack — which means the impact is liveness, not safety: no private key exists for the bogus address, so nobody can create a token there. It also means every other hardcoded base58 constant from the same source is suspect (§12.5). This is precisely the spoofing case the `tokens` package documents itself as existing to prevent — *"Token identity is by mint address only — never by symbol — because symbols are not unique across issuers and are trivially spoofed."* Any trade priced in that "EURC" could never settle, and any agent card advertising it names a token that does not exist.
 

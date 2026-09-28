@@ -98,13 +98,21 @@ The documented mainnet-beta RPC endpoint for the future is
 `https://solana.publicnode.com/`, pinned by genesis hash
 `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`.
 
-### 5. A known critical defect is still in the tree
+### 5. The EURC mint defect is fixed; the rest of Phase 3 is not
 
-`internal/tokens` ships a governed EURC mint address that **does not exist
-on-chain** (`HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc`; the real mint ends
-`...zpKcFu7uBEDKtr`). Any trade priced in it can never settle. Phase 3 fixes it.
-Do not treat the current mint registry as trustworthy, and do not re-use
-constants from it without re-deriving them independently.
+**Fixed 2026-09-28.** `internal/tokens` shipped a lookalike EURC mint that does
+not exist on-chain (`...c2iXXcyK85CNzz7iwQc`). It now ships Circle's real mint,
+`HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr`, verified against mainnet
+`getAccountInfo`: `owner Tokenkeg...`, `type mint`, `decimals 6`, initialized.
+The two addresses share a 30-character prefix and diverge at position 31, which
+is why a visual check missed it.
+
+That fixed the liveness bug only. Still true: the service has **no cluster
+awareness** and performs no on-chain mint verification, so do not point it at
+mainnet-beta or a live devnet expecting production behaviour. See
+`docs/specs/2026-09-27-phase3-cluster-aware-settlement-design.md` for the gates
+that remain. Re-derive on-chain constants from an RPC query rather than copying
+them from source.
 
 ## Git
 
