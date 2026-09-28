@@ -221,7 +221,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 - **Auth:** Ed25519 challenge-response per agent; short-lived JWT sessions; all mutating endpoints authenticated.
 - **Mint validation:** token identity by mint address only — never by symbol string.
 - **Canonical verification:** §6.3 checks instruction order, amounts, mints, ATA derivations, memo, and fee destination exactly.
-- **Rate limiting:** per-agent on all endpoints; stricter on settlement build.
+- **Rate limiting:** planned per-agent on all endpoints, stricter on settlement build; not yet implemented.
 - **Receipt integrity:** tesserae are Ed25519-signed JWS; the verification key is published on `/healthz` and with every tessera, and a tessera is bound to its ledger entry hash.
 - **Truthful announcements:** an AGP policy constraint is only satisfiable against a key the marketplace actually knows, so a gateway cannot be tricked into routing sensitive Intents to an agent that never claimed to accept them.
 - **Party-scoped access:** a session token's agent *is* the acting identity; trade reads and actions verify the caller is a party, so a token cannot be replayed against another agent's trade.
