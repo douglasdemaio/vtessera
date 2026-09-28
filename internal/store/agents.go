@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/domain"
@@ -53,6 +54,35 @@ func scanAgent(row rowScanner) (domain.Agent, error) {
 	a.CreatedAt = fromNanos(crea)
 	a.UpdatedAt = fromNanos(upda)
 	return a, nil
+}
+
+// ListAgentsByIDs fetches every agent in ids with a single query, keyed by
+// agent ID. Missing IDs are simply absent from the result map.
+func (s *Store) ListAgentsByIDs(ctx context.Context, ids []string) (map[string]domain.Agent, error) {
+	out := make(map[string]domain.Agent, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, card, status, created_at, updated_at FROM agents WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		a, err := scanAgent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[a.ID] = a
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) UpdateAgent(ctx context.Context, a domain.Agent) error {
