@@ -2,6 +2,9 @@ package ledger
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,6 +12,7 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/store"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -235,5 +239,177 @@ func TestReceiptFetch(t *testing.T) {
 	}
 	if _, err := l.Receipt(ctx, "missing"); err == nil {
 		t.Error("expected error for trade without a receipt")
+	}
+}
+
+func TestVerificationKeyReturnsSignerPublicKey(t *testing.T) {
+	l, _ := newLedger(t)
+	if got, want := l.VerificationKey(), l.signer.PublicKeyBase58(); got != want {
+		t.Errorf("VerificationKey() = %q, want %q", got, want)
+	}
+}
+
+func TestNewSignerRejectsWrongKeySize(t *testing.T) {
+	if _, err := NewSigner(make([]byte, 10)); err == nil {
+		t.Fatal("expected error for an undersized signing key")
+	}
+}
+
+func TestLoadOrCreateSignerRejectsInvalidBase64(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signing.key")
+	if err := os.WriteFile(path, []byte("not-base64!!"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadOrCreateSigner(path); err == nil {
+		t.Fatal("expected error decoding a non-base64 signing key file")
+	}
+}
+
+func TestLoadOrCreateSignerRejectsUndersizedKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signing.key")
+	encoded := base64.StdEncoding.EncodeToString([]byte("too-short"))
+	if err := os.WriteFile(path, []byte(encoded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadOrCreateSigner(path); err == nil {
+		t.Fatal("expected error loading an undersized signing key")
+	}
+}
+
+func (l *Ledger) sign(t *testing.T, claims TesseraClaims) string {
+	t.Helper()
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(l.signer.private)
+	if err != nil {
+		t.Fatalf("sign test claims: %v", err)
+	}
+	return signed
+}
+
+func TestVerifyRejectsClaimsMissingRequiredFields(t *testing.T) {
+	base := func() TesseraClaims {
+		return TesseraClaims{
+			RegisteredClaims: jwt.RegisteredClaims{Subject: "t1"},
+			Trade: TradeRecord{
+				TradeID: "t1",
+				Buyer:   "buyer-agent",
+				Seller:  "seller-agent",
+				Mode:    domain.SettlementOffchain,
+			},
+		}
+	}
+
+	cases := map[string]func(TesseraClaims) TesseraClaims{
+		"missing trade id": func(c TesseraClaims) TesseraClaims {
+			c.Trade.TradeID = ""
+			return c
+		},
+		"missing buyer": func(c TesseraClaims) TesseraClaims {
+			c.Trade.Buyer = ""
+			return c
+		},
+		"missing seller": func(c TesseraClaims) TesseraClaims {
+			c.Trade.Seller = ""
+			return c
+		},
+		"missing subject": func(c TesseraClaims) TesseraClaims {
+			c.Subject = ""
+			return c
+		},
+		"invalid mode": func(c TesseraClaims) TesseraClaims {
+			c.Trade.Mode = "bogus"
+			return c
+		},
+	}
+
+	l, _ := newLedger(t)
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			jws := l.sign(t, mutate(base()))
+			if _, err := l.Verify(jws); err == nil {
+				t.Errorf("expected verification failure for %s", name)
+			}
+		})
+	}
+}
+
+type fakeLedgerStore struct {
+	Store
+	headEntry     domain.LedgerEntry
+	headFound     bool
+	headErr       error
+	appendErr     []error
+	appendCalls   int
+	appendedEntry domain.LedgerEntry
+}
+
+func (f *fakeLedgerStore) HeadLedgerEntry(ctx context.Context) (domain.LedgerEntry, bool, error) {
+	return f.headEntry, f.headFound, f.headErr
+}
+
+func (f *fakeLedgerStore) AppendLedgerEntry(ctx context.Context, a domain.LedgerAppend, hashEntry domain.EntryHasher) (domain.LedgerEntry, error) {
+	idx := f.appendCalls
+	f.appendCalls++
+	if idx < len(f.appendErr) && f.appendErr[idx] != nil {
+		return domain.LedgerEntry{}, f.appendErr[idx]
+	}
+	return f.appendedEntry, nil
+}
+
+func TestAppendPropagatesHeadLookupError(t *testing.T) {
+	signer, err := GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("head lookup failed")
+	fs := &fakeLedgerStore{headErr: wantErr}
+	l := New(fs, signer)
+
+	if _, err := l.append(context.Background(), domain.LedgerAppend{}); !errors.Is(err, wantErr) {
+		t.Errorf("append() error = %v, want %v", err, wantErr)
+	}
+	if fs.appendCalls != 0 {
+		t.Errorf("appendCalls = %d, want 0 (should not attempt write after a lookup failure)", fs.appendCalls)
+	}
+}
+
+func TestAppendRetriesOnStaleWriteThenSucceeds(t *testing.T) {
+	signer, err := GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := domain.LedgerEntry{Seq: 2, Hash: "final"}
+	fs := &fakeLedgerStore{
+		appendErr:     []error{domain.ErrStale},
+		appendedEntry: want,
+	}
+	l := New(fs, signer)
+
+	got, err := l.append(context.Background(), domain.LedgerAppend{})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if got.Seq != want.Seq || got.Hash != want.Hash {
+		t.Errorf("append() = %+v, want %+v", got, want)
+	}
+	if fs.appendCalls != 2 {
+		t.Errorf("appendCalls = %d, want 2 (one stale retry then success)", fs.appendCalls)
+	}
+}
+
+func TestAppendGivesUpAfterRepeatedStaleWrites(t *testing.T) {
+	signer, err := GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := &fakeLedgerStore{
+		appendErr: []error{domain.ErrStale, domain.ErrStale, domain.ErrStale},
+	}
+	l := New(fs, signer)
+
+	if _, err := l.append(context.Background(), domain.LedgerAppend{}); !errors.Is(err, domain.ErrStale) {
+		t.Errorf("append() error = %v, want wrapped %v", err, domain.ErrStale)
+	}
+	if fs.appendCalls != appendAttempts {
+		t.Errorf("appendCalls = %d, want %d", fs.appendCalls, appendAttempts)
 	}
 }
