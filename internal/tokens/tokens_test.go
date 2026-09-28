@@ -7,7 +7,7 @@ import (
 )
 
 const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-const eurch = "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc"
+const eurch = "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr"
 
 func TestDefaultSeedsLaunchMints(t *testing.T) {
 	reg := Default()

@@ -12,7 +12,7 @@ import (
 )
 
 const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-const eurc = "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc"
+const eurc = "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr"
 
 // usdcMint and eurcMint stand in for the governed token registry: the routing
 // table only needs identity and decimals, never a global mint table.

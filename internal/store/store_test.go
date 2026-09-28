@@ -94,7 +94,7 @@ func TestSearchOffersFilters(t *testing.T) {
 	bob := testOffer("o2", "bob")
 	bob.Description = "translation service (100% offline)"
 	bob.Capabilities = []string{"translation"}
-	bob.PriceMint = "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc"
+	bob.PriceMint = "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr"
 	bob.SettlementModes = []domain.SettlementMode{domain.SettlementOffchain, domain.SettlementOnchain}
 	if err := s.CreateOffer(ctx, bob, ""); err != nil {
 		t.Fatal(err)
@@ -114,7 +114,7 @@ func TestSearchOffersFilters(t *testing.T) {
 		{"open asks", domain.OfferQuery{Status: domain.OfferOpen, Direction: domain.DirectionAsk}, []string{"o1", "o2"}},
 		{"capability nlp", domain.OfferQuery{Status: domain.OfferOpen, Capability: "nlp"}, []string{"o1"}},
 		{"capability translation", domain.OfferQuery{Status: domain.OfferOpen, Capability: "translation"}, []string{"o2"}},
-		{"mint eurc", domain.OfferQuery{Status: domain.OfferOpen, Mint: "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc"}, []string{"o2"}},
+		{"mint eurc", domain.OfferQuery{Status: domain.OfferOpen, Mint: "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr"}, []string{"o2"}},
 		{"onchain mode", domain.OfferQuery{Status: domain.OfferOpen, Mode: domain.SettlementOnchain}, []string{"o2"}},
 		{"offchain mode", domain.OfferQuery{Status: domain.OfferOpen, Mode: domain.SettlementOffchain}, []string{"o1", "o2"}},
 		{"text search", domain.OfferQuery{Status: domain.OfferOpen, Text: "offline"}, []string{"o2"}},
