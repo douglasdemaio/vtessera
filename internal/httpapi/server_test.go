@@ -28,7 +28,7 @@ import (
 
 const (
 	usdc     = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-	eurc     = "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc"
+	eurc     = "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr"
 	sessionK = "0123456789abcdef0123456789abcdef"
 )
 

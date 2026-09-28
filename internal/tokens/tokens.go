@@ -88,6 +88,12 @@ func New(entries []Token) (Registry, error) {
 }
 
 // Default returns the launch registry: USDC and EURC.
+//
+// The EURC address is Circle's mint on mainnet-beta. It was previously a
+// 30-character-prefix lookalike, ...c2iXXcyK85CNzz7iwQc, which resolves to a
+// null account; the two differ only after that shared prefix, which is exactly
+// why a visual check missed it. Verified 2026-09-28 at mainnet slot 451247490
+// via getAccountInfo: owner Tokenkeg..., type mint, decimals 6, initialized.
 func Default() Registry {
 	reg, err := New([]Token{
 		{
@@ -97,7 +103,7 @@ func Default() Registry {
 			Enabled:  true,
 		},
 		{
-			Address:  "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc",
+			Address:  "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr",
 			Symbol:   "EURC",
 			Decimals: 6,
 			Enabled:  true,

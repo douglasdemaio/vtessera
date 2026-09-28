@@ -113,7 +113,7 @@ func TestPublishOfferRejectsPriceBeyondCardCurrencies(t *testing.T) {
 		Direction:       domain.DirectionAsk,
 		Description:     "forbidden currency",
 		PriceAmount:     "1.00",
-		PriceMint:       "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXcyK85CNzz7iwQc",
+		PriceMint:       "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr",
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
 	}, "")
 	if !errors.Is(err, registry.ErrCurrencyNotAccepted) {
