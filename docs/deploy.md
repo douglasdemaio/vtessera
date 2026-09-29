@@ -162,6 +162,55 @@ service runs can silently drop committed transactions that are still in the WAL.
 Use SQLite's own backup — `sqlite3 /data/vtessera.db ".backup /backup/vtessera.db"`
 — or stop the service first.
 
+### The Fly volume snapshot is the backup
+
+Snapshot retention was set to 5 days at deploy time, but the first *scheduled*
+snapshot did not exist until hours later. Retention is a policy, not a backup.
+The first snapshot was therefore taken by hand, and the volume was quiesced
+first so the WAL was checkpointed rather than captured mid-write:
+
+```bash
+flyctl machine stop 7845403b399e38 --app vtessera      # quiesce; WAL drains to 0
+flyctl volumes snapshots create vol_vdew3gmm6lljye14 --app vtessera
+flyctl machine start 7845403b399e38 --app vtessera
+```
+
+| | |
+|---|---|
+| Volume | `vtessera_data` / `vol_vdew3gmm6lljye14`, 1 GB, encrypted, `fra` |
+| Restore point | `vs_Byvj0n8vAKpMs0GByn23OP6j` (33 MiB, 5-day retention) |
+| `verificationKey` at that point | `5LRpM9wpvPfRYuQAC7oNdyaQa6sakpMcnZeR9FS5CgjB` |
+| `signer.key` sha256 | `22dd5280d2982c3821ae58b9a8a8a790754d595ee067d56db84e9ce89b84d882` |
+
+`make fly-verify` prints the live key; if it stops matching the value above, the
+volume is gone and this is a new marketplace, not a recovery.
+
+**Recovery is untested** — the snapshot has not been restored, deliberately, since
+restoring it would be the one way to lose the deployment. `flyctl` has no
+`restore` verb; you clone the snapshot into a new volume and swap the machine
+over:
+
+```bash
+# 1. Confirm what you are cloning, and that the volume is not attached.
+flyctl volumes snapshots list vol_vdew3gmm6lljye14 --app vtessera
+# 2. Free the name. A volume cannot be replaced while it is attached, and the
+#    snapshot must be cloned with the same size and region.
+flyctl machine stop 7845403b399e38 --app vtessera
+flyctl machine destroy 7845403b399e38 --app vtessera
+flyctl volumes destroy vol_vdew3gmm6lljye14 --app vtessera
+# 3. Clone, then bring up a machine mounting it. -v takes <name>:/path.
+flyctl volumes create vtessera_data --app vtessera --region fra --size 1 \
+  --snapshot-id vs_Byvj0n8vAKpMs0GByn23OP6j --snapshot-retention 5
+flyctl machine run --app vtessera -v vtessera_data:/data
+# 4. The one check that matters. A changed key means the clone did not carry
+#    /data/signer.key and the recovery is not a recovery.
+make fly-verify
+```
+
+If step 4 prints a different `verificationKey`, stop and redeploy. Do not carry
+on to republish the directory: `agent-ai-tool` would list a marketplace that
+cannot verify a single tessera it has already handed out.
+
 ## Pointing the directory at it
 
 **Done 2026-09-29** for `https://vtessera.fly.dev`. Kept here because it is what
