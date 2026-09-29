@@ -150,7 +150,9 @@ One atomic Solana transaction per on-chain trade, containing exactly:
 2. **Memo instruction** — the trade UUID (UTF-8), permanently linking the on-chain record to the marketplace trade.
 3. **System Program `Transfer`** — exactly **500,000 lamports (0.0005 SOL)** from the buyer to the service wallet `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`.
 
-The buyer is the fee payer and transaction signer. Because all instructions live in one transaction, the fee cannot be removed without invalidating the trade — this is the enforcement mechanism; no custody or smart contract is required.
+The buyer is the fee payer and transaction signer. Because all instructions live in one transaction, a fee cannot be removed from a settlement this service will recognise — this is the enforcement mechanism; no custody or smart contract is required.
+
+The chain does not enforce this policy; only the service does. A buyer who strips the fee submits the remaining instructions and the chain executes them, so the trade amount reaches the seller and the memo still lands before verification runs. The outcome is `409 SETTLEMENT_MISMATCH`, a `disputed` trade, no tessera, and no ledger entry — but no reversal of the transfer, and the buyer's remedy is the dispute and the ledger, not their money. The fee is therefore a deterrent priced at the buyer's risk. Making it a mechanism instead requires escrow, which §1 lists as out of scope, so this exposure is accepted rather than solved.
 
 ### 6.2 Build flow
 

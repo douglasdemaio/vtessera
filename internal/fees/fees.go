@@ -2,7 +2,15 @@
 // non-negotiable per-settlement fee that the buyer pays inside the same
 // transaction that moves the trade amount. Embedding the fee in the buyer's
 // transaction is the enforcement mechanism — there is no custody and no smart
-// contract, so the fee cannot be removed without invalidating the settlement.
+// contract, so a settlement missing the fee is one this service will not
+// recognise.
+//
+// That is a limit on recognition, not on the chain. A buyer who strips the fee
+// submits the remaining instructions, and the chain executes them: the trade
+// amount has already reached the seller, and the memo still lands. Verification
+// then fails, the settlement is refused as a mismatch, and the trade ends
+// disputed with no tessera and no ledger entry. The transfer is not reversed.
+// The fee deters tampering; it does not prevent it.
 package fees
 
 import (
@@ -32,8 +40,8 @@ type Policy struct {
 	wallet   solana.PublicKey
 }
 
-// New validates and returns a fee policy. A zero lamport fee is rejected: the
-// fee is what makes the settlement non-strippable.
+// New validates and returns a fee policy. A zero lamport fee is rejected
+// because it would make stripping the fee cost the buyer nothing.
 func New(lamports uint64, wallet string) (Policy, error) {
 	if lamports == 0 {
 		return Policy{}, fmt.Errorf("%w: got %d", ErrInvalidLamports, lamports)
