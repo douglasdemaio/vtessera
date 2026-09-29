@@ -34,6 +34,7 @@ type Server struct {
 	tokens        tokens.Registry
 	mux           *http.ServeMux
 	version       string
+	publicBaseURL string
 	agentCardBody map[string]any
 }
 
@@ -45,18 +46,25 @@ type Options struct {
 	// Tokens is the governed mint allowlist published by GET /v1/tokens.
 	Tokens  tokens.Registry
 	Version string
+	// PublicBaseURL is the externally reachable origin, advertised in the agent
+	// card as the gateway's own URL. An agent reads that field to decide where
+	// to send its requests, so a placeholder here sends it nowhere. When it is
+	// empty the card omits the field rather than claiming an address that is not
+	// this service.
+	PublicBaseURL string
 }
 
 func New(opts Options) *Server {
 	s := &Server{
-		registry: opts.Registry,
-		trades:   opts.Trades,
-		auth:     opts.Auth,
-		agp:      agp.NewRouting(),
-		ledger:   opts.Ledger,
-		tokens:   opts.Tokens,
-		version:  opts.Version,
-		mux:      http.NewServeMux(),
+		registry:      opts.Registry,
+		trades:        opts.Trades,
+		auth:          opts.Auth,
+		agp:           agp.NewRouting(),
+		ledger:        opts.Ledger,
+		tokens:        opts.Tokens,
+		version:       opts.Version,
+		publicBaseURL: strings.TrimRight(opts.PublicBaseURL, "/"),
+		mux:           http.NewServeMux(),
 	}
 	s.agentCardBody = s.buildAgentCard()
 	s.routes()
@@ -105,11 +113,10 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) buildAgentCard() map[string]any {
-	return map[string]any{
+	card := map[string]any{
 		"name":               "vtessera marketplace",
 		"description":        "A2A marketplace gateway: routes Intents to the cheapest policy-compliant agent and issues hash-chain anchored virtual tessera receipts.",
 		"version":            s.version,
-		"url":                "https://vtessera.example.com",
 		"protocolVersion":    "0.3.0",
 		"preferredTransport": "JSONRPC",
 		"capabilities": map[string]any{
@@ -143,6 +150,22 @@ func (s *Server) buildAgentCard() map[string]any {
 			},
 		},
 	}
+	// An agent reads url to decide where to send requests, so it is only
+	// published when the operator has told us the real origin. The reads an
+	// agent needs in order to discover what is for sale are listed explicitly:
+	// the A2A skill list alone does not tell it how to browse the marketplace.
+	if s.publicBaseURL != "" {
+		card["url"] = s.publicBaseURL
+		card["readEndpoints"] = map[string]string{
+			"agents":     s.publicBaseURL + "/v1/agents",
+			"offers":     s.publicBaseURL + "/v1/offers",
+			"metrics":    s.publicBaseURL + "/v1/metrics",
+			"tokens":     s.publicBaseURL + "/v1/tokens",
+			"ledgerHead": s.publicBaseURL + "/v1/ledger/head",
+			"health":     s.publicBaseURL + "/healthz",
+		}
+	}
+	return card
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

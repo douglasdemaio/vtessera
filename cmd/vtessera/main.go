@@ -108,13 +108,18 @@ func run(args []string) error {
 		logger.Warn("on-chain settlement disabled: no RPC endpoint, on-chain trades are refused")
 	}
 
+	if cfg.PublicBaseURL == "" {
+		logger.Warn("no public base URL configured: the agent card omits its url, so agents cannot discover where to reach this gateway")
+	}
+
 	api := httpapi.New(httpapi.Options{
-		Registry: registrySvc,
-		Trades:   trades,
-		Auth:     authSvc,
-		Ledger:   led,
-		Tokens:   mints,
-		Version:  cfg.Version,
+		Registry:      registrySvc,
+		Trades:        trades,
+		Auth:          authSvc,
+		Ledger:        led,
+		Tokens:        mints,
+		Version:       cfg.Version,
+		PublicBaseURL: cfg.PublicBaseURL,
 	})
 	server := &http.Server{
 		Addr:              cfg.Addr,

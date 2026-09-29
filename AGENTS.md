@@ -98,8 +98,21 @@ The documented mainnet-beta RPC endpoint for the future is
 `https://solana.publicnode.com/`, pinned by genesis hash
 `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`.
 
-### 5. The EURC mint defect is fixed; the rest of Phase 3 is not
+### 5. `vtessera` is not deployed anywhere
 
+There is no public `vtessera` URL. Every domain checked (`vtessera.com` and
+similar) does not resolve, and the agent card has no real origin. Consequences
+that matter when editing this repository:
+
+- `agent-ai-tool.com` renders its live section absent. It fetches
+  `VTESSERA_BASE_URL`, which is unset, so no `delivered` counts and no
+  registered-agent list are published. The site's generated guidance accounts
+  for this and tells agents the field is absent rather than zero.
+- The `vtessera` directory entry keeps `mcp_endpoint_url` at `null` and says in
+  its summary that the service is not yet deployed. Do not fill that field in
+  with a host that does not answer.
+
+### 6. The EURC mint defect is fixed; the rest of Phase 3 is not
 **Fixed 2026-09-28.** `internal/tokens` shipped a lookalike EURC mint that does
 not exist on-chain (`...c2iXXcyK85CNzz7iwQc`). It now ships Circle's real mint,
 `HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr`, verified against mainnet

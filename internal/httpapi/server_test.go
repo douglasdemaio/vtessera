@@ -48,6 +48,12 @@ type clientOptions struct {
 
 func setupServer(t *testing.T) (*httptest.Server, *ledger.Ledger) {
 	t.Helper()
+	server, led := setupServerAt(t, "")
+	return server, led
+}
+
+func setupServerAt(t *testing.T, publicBaseURL string) (*httptest.Server, *ledger.Ledger) {
+	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := store.Open(ctx, filepath.Join(dir, "api.db"))
@@ -65,11 +71,12 @@ func setupServer(t *testing.T) (*httptest.Server, *ledger.Ledger) {
 	}
 	led := ledger.New(db, signer)
 	api := httpapi.New(httpapi.Options{
-		Registry: registry.New(db),
-		Trades:   trade.New(db, db, db, led),
-		Auth:     authSvc,
-		Ledger:   led,
-		Version:  "0.1.0-test",
+		Registry:      registry.New(db),
+		Trades:        trade.New(db, db, db, led),
+		Auth:          authSvc,
+		Ledger:        led,
+		Version:       "0.1.0-test",
+		PublicBaseURL: publicBaseURL,
 	})
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)
@@ -263,6 +270,43 @@ func TestAgentCardDeclaresAGPGateway(t *testing.T) {
 	}
 	if len(card.Skills) == 0 {
 		t.Error("agent card advertises no skills")
+	}
+}
+
+func TestAgentCardAdvertisesConfiguredPublicURL(t *testing.T) {
+	server, _ := setupServerAt(t, "https://vtessera.test/")
+	resp, err := server.Client().Get(server.URL + "/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var card struct {
+		URL           string            `json:"url"`
+		ReadEndpoints map[string]string `json:"readEndpoints"`
+	}
+	decodeInto(t, mustRead(t, resp.Body), &card)
+	if card.URL != "https://vtessera.test" {
+		t.Errorf("url = %q, want the configured origin without a trailing slash", card.URL)
+	}
+	if got := card.ReadEndpoints["agents"]; got != "https://vtessera.test/v1/agents" {
+		t.Errorf("readEndpoints[agents] = %q", got)
+	}
+}
+
+func TestAgentCardOmitsURLWhenNoPublicBaseURLConfigured(t *testing.T) {
+	server, _ := setupServerAt(t, "")
+	resp, err := server.Client().Get(server.URL + "/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var card map[string]any
+	decodeInto(t, mustRead(t, resp.Body), &card)
+	if url, ok := card["url"]; ok {
+		t.Errorf("url = %v, want it absent rather than pointing at a placeholder", url)
+	}
+	if _, ok := card["readEndpoints"]; ok {
+		t.Error("readEndpoints present with no public base URL to build them from")
 	}
 }
 
