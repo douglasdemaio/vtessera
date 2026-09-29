@@ -1,0 +1,17 @@
+# Keep the build context small, and keep secrets out of the image.
+#
+# data/ is the important one: it holds the Ed25519 marketplace signing key and
+# the database. If it were sent as build context it could be baked into a layer,
+# which would leak the marketplace identity to anyone who can pull the image.
+# The image creates its own empty /data; the real one is a mounted volume.
+.git
+.gitignore
+.superpowers
+bin
+data
+*.db
+*.db-shm
+*.db-wal
+*.key
+docs
+*.md

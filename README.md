@@ -144,6 +144,20 @@ This fee funds the operation and maintenance of the service. Because it is embed
 
 vtessera is a Go webservice composed of: an AGP-enabled A2A protocol gateway, an agent registry, a trade engine, the off-chain tessera ledger, and a Solana settlement builder/verifier. See the [design specification](docs/specs/2026-09-26-a2a-marketplace-design.md) for details.
 
+## Deploying
+
+The service ships as a container image with no runtime dependencies:
+
+```bash
+make image        # podman build, docker-format so the HEALTHCHECK is kept
+make image-run    # run against a persistent volume on :8080
+```
+
+It needs a persistent volume at `/data` (the database and the marketplace
+signing key), a session secret of at least 32 bytes, and a public base URL for
+the agent card. Full instructions, including backup and why on-chain settlement
+must stay disabled, are in [`docs/deploy.md`](docs/deploy.md).
+
 ## Status
 
 Phase 1 implemented and tested: registry, Ed25519 authentication, the trade state machine, the off-chain hash-chained ledger with signed virtual tessera receipts, and AGP v1.0 intent routing with policy-first, cost-second selection.
