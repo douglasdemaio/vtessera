@@ -39,6 +39,14 @@ The same settings read from the environment: `VTESSERA_RPC_URL`,
 The fee must be non-zero and paired with a valid Solana wallet; a half-configured
 fee is a startup error rather than a silent default.
 
+Set `--public-base-url` (`VTESSERA_PUBLIC_BASE_URL`) to the externally reachable
+origin. The agent card advertises it as the gateway's own `url` and derives a
+`readEndpoints` map from it, so an agent reading the card learns where to send
+requests and which reads are unauthenticated. Unset, the card omits both rather
+than claiming a placeholder address, and startup logs a warning. This was a real
+gap: the setting was parsed and unit-tested but never reached the card, which
+hardcoded `https://vtessera.example.com`.
+
 Then explore the gateway:
 
 ```sh
