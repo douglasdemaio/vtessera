@@ -64,6 +64,64 @@ VTESSERA_SESSION_SECRET=... VTESSERA_PUBLIC_BASE_URL=https://<host> \
 Use a systemd unit with `Restart=on-failure` and the secret in
 `LoadCredential=` or an `EnvironmentFile=` that is mode 0600 and outside git.
 
+## Fly.io
+
+`fly.toml` is checked in: one machine, one volume mounted at `/data`, and the
+`/healthz` check. It is deliberately a single instance — two machines would be
+two marketplaces with two signing keys, and a tessera issued by one would not
+verify against the other. Do not scale it out before Phase 3 provides a shared
+store.
+
+The image is built by Fly from the same `Containerfile` used locally, so what
+ships is what was tested.
+
+### One-time setup
+
+```bash
+fly auth login
+
+# The app name is global across Fly; if "vtessera" is taken, pick another and
+# update the `app` line in fly.toml to match.
+fly apps create vtessera
+
+# The volume must exist before the first deploy, or the mount fails and the
+# machine will not start. 1 GB is ample; the database is small and WAL is the
+# only growth.
+fly volumes create vtessera_data --region fra --size 1
+
+# Signs session tokens. Generate a fresh one; never reuse the dev value.
+fly secrets set VTESSERA_SESSION_SECRET="$(openssl rand -hex 32)"
+
+# The agent card must advertise a URL that actually reaches the service. Fly
+# provides one, so going live needs no DNS record at all; a custom domain can be
+# added later with `fly certs add`.
+fly secrets set VTESSERA_PUBLIC_BASE_URL="https://<app>.fly.dev"
+```
+
+### Deploy
+
+```bash
+make fly-deploy          # fly deploy
+```
+
+Then verify it is real rather than merely green:
+
+```bash
+curl -fsS https://<app>.fly.dev/healthz
+fly ssh console -C 'ls /data'      # expect vtessera.db, -wal, -shm, signer.key
+```
+
+The `verificationKey` in the health output is the marketplace identity. It must
+be identical after every deploy. If it ever changes, the volume is gone and so
+is every tessera the service has issued.
+
+### Backup on Fly
+
+`fly ssh console` in and use SQLite's `.backup` (see [Backup](#backup) for why
+copying the `.db` alone is not enough), or snapshot the volume with
+`fly volumes snapshots`. The signing key is the part that cannot be recreated —
+consider retrieving it once and storing it somewhere other than the volume.
+
 ## Settlement: leave the RPC endpoint unset
 
 Do **not** set `VTESSERA_RPC_URL` for this deployment. Phase 3 is not

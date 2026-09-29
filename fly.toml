@@ -1,0 +1,61 @@
+# Fly.io configuration for vtessera.
+#
+# One machine, one volume, on purpose. The service keeps its SQLite database and
+# its Ed25519 marketplace signing key on local disk, so scaling this out would
+# produce two marketplaces with two different identities — every tessera issued
+# by one would fail to verify against the other. This is a single-instance
+# service until Phase 3 gives it a shared store; do not add machines.
+
+app = "vtessera"
+
+# Region only affects latency and where the volume physically lives. This one is
+# inferred from the maintainer's timezone; change it if the audience is
+# elsewhere. Run `fly platform regions` for the list.
+primary_region = "fra"
+
+[build]
+  # flyctl builds the same Containerfile used locally, so what ships is what was
+  # tested. .dockerignore (a symlink to .containerignore) keeps data/ out of the
+  # build context, so the signing key can never reach an image layer.
+  dockerfile = "Containerfile"
+
+[env]
+  # Non-secret configuration. The session secret and the public base URL are
+  # secrets, because one is sensitive and the other depends on the hostname Fly
+  # assigns; set both with `fly secrets set`.
+  VTESSERA_ADDR = ":8080"
+  VTESSERA_DB = "/data/vtessera.db"
+  VTESSERA_SIGNER_KEY = "/data/signer.key"
+  # VTESSERA_RPC_URL is deliberately absent. Unset is what disables on-chain
+  # settlement, which is required until Phase 3 lands.
+
+# This volume is the marketplace identity. The signing key is created here on
+# first boot and cannot be regenerated — a new key is a new marketplace, and
+# every previously issued tessera stops verifying. Back it up.
+[mounts]
+  source = "vtessera_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # The directory health-checks this service every six hours, and an agent
+  # fetching the agent card should not pay a cold start. Keeping one machine
+  # warm costs roughly the price of a coffee per month; `fly machines` shows the
+  # current bill. Set auto_stop_machines = true to trade that for cold starts.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    # First boot applies the schema and loads or creates the signing key, so
+    # give it room before the first check is allowed to fail it.
+    grace_period = "10s"
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
