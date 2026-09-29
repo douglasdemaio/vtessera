@@ -5,7 +5,7 @@ IMAGE ?= vtessera:local
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana validator validator-off vet fmt lint tidy clean smoke image image-run
+.PHONY: all build run test race test-solana validator validator-off vet fmt lint tidy clean smoke image image-run fly-deploy fly-verify
 
 all: fmt vet test build
 
@@ -69,6 +69,20 @@ image-run: image
 		-e VTESSERA_SESSION_SECRET="$${VTESSERA_SESSION_SECRET:-$$(openssl rand -hex 32)}" \
 		-e VTESSERA_PUBLIC_BASE_URL="$${VTESSERA_PUBLIC_BASE_URL:-}" \
 		$(IMAGE)
+
+# Deploy to Fly.io from fly.toml. The one-time setup (app, volume, secrets) is
+# in docs/deploy.md; this is the part you run on every change.
+#
+# --ha=false is deliberate: this service owns its state on one volume, so Fly's
+# default of two machines would create two marketplaces with two signing keys.
+fly-deploy:
+	fly deploy --ha=false
+
+# The verification key printed here is the marketplace identity. Run it before
+# and after a deploy: if it changed, the volume is gone.
+fly-verify:
+	@curl -fsS "https://$$(sed -n 's/^app *= *"\(.*\)"/\1/p' fly.toml).fly.dev/healthz" \
+		| python3 -c "import json,sys; print('verificationKey:', json.load(sys.stdin)['verificationKey'])"
 
 clean:
 	rm -rf bin
