@@ -16,6 +16,11 @@ var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
 	ErrStale    = errors.New("stale state")
+	// ErrInvalid marks a caller's own malformed input, as opposed to a server
+	// or store fault. Callers that return it get a 400, not a 500: an agent
+	// that sent a bad field should retry with a correction, never treat the
+	// marketplace as broken.
+	ErrInvalid = errors.New("invalid")
 )
 
 type SettlementMode string
@@ -68,7 +73,17 @@ type AgentSkill struct {
 	Output []string `json:"outputModes,omitempty"`
 }
 
+// Validate wraps every field failure in ErrInvalid so the HTTP layer can tell a
+// bad request from a broken service. The specific message is still the first
+// thing the caller reads; the sentinel only decides the status code.
 func (c AgentCard) Validate() error {
+	if err := c.validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	return nil
+}
+
+func (c AgentCard) validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("agent card name is required")
 	}
@@ -201,7 +216,16 @@ type Offer struct {
 	UpdatedAt       time.Time        `json:"updatedAt"`
 }
 
+// Validate wraps every field failure in ErrInvalid, for the same reason as
+// AgentCard.Validate.
 func (o Offer) Validate() error {
+	if err := o.validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	return nil
+}
+
+func (o Offer) validate() error {
 	if strings.TrimSpace(o.Description) == "" {
 		return fmt.Errorf("offer description is required")
 	}

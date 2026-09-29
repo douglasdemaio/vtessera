@@ -635,6 +635,7 @@ var statusByError = []struct {
 	{domain.ErrNotFound, http.StatusNotFound},
 	{domain.ErrConflict, http.StatusConflict},
 	{domain.ErrStale, http.StatusConflict},
+	{domain.ErrInvalid, http.StatusBadRequest},
 	{registry.ErrNotOwner, http.StatusForbidden},
 	{registry.ErrAgentSuspended, http.StatusForbidden},
 	{registry.ErrCurrencyNotAccepted, http.StatusBadRequest},
@@ -690,6 +691,8 @@ func codeName(err error) string {
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
 		return "NOT_FOUND"
+	case errors.Is(err, domain.ErrInvalid):
+		return "INVALID_REQUEST"
 	case errors.Is(err, domain.ErrConflict), errors.Is(err, domain.ErrStale):
 		return "CONFLICT"
 	case errors.Is(err, trade.ErrIllegalState):
