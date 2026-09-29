@@ -1,10 +1,11 @@
 BINARY := bin/vtessera
 PKG := ./...
 GO ?= go
+IMAGE ?= vtessera:local
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana validator validator-off vet fmt lint tidy clean smoke
+.PHONY: all build run test race test-solana validator validator-off vet fmt lint tidy clean smoke image image-run
 
 all: fmt vet test build
 
@@ -51,6 +52,23 @@ tidy:
 
 smoke: build
 	./scripts/smoke.sh $(BINARY)
+
+# podman defaults to the OCI image format, which has no HEALTHCHECK field, so it
+# drops the directive with a warning and the container reports no health status.
+# docker's own format keeps it. Requesting docker's format explicitly is correct
+# under both, and the alternative — losing the healthcheck under podman — fails
+# quietly, which is exactly the kind of thing that should not be left to memory.
+image:
+	podman build --format docker -t $(IMAGE) -f Containerfile .
+
+# A local run against a persistent volume. The session secret is regenerated per
+# run, which invalidates old sessions; set VTESSERA_SESSION_SECRET to keep them.
+# Set VTESSERA_PUBLIC_BASE_URL to make the agent card advertise a reachable URL.
+image-run: image
+	podman run --rm -it -p 8080:8080 -v vtessera-data:/data \
+		-e VTESSERA_SESSION_SECRET="$${VTESSERA_SESSION_SECRET:-$$(openssl rand -hex 32)}" \
+		-e VTESSERA_PUBLIC_BASE_URL="$${VTESSERA_PUBLIC_BASE_URL:-}" \
+		$(IMAGE)
 
 clean:
 	rm -rf bin

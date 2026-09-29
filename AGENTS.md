@@ -101,8 +101,14 @@ The documented mainnet-beta RPC endpoint for the future is
 ### 5. `vtessera` is not deployed anywhere
 
 There is no public `vtessera` URL. Every domain checked (`vtessera.com` and
-similar) does not resolve, and the agent card has no real origin. Consequences
-that matter when editing this repository:
+similar) does not resolve, and the agent card has no real origin.
+
+**The repository is deployable; the deployment does not exist.** A verified
+`Containerfile` and a runbook are in [`docs/deploy.md`](docs/deploy.md). What is
+missing is external — a host and a DNS record — not code. Deploy it with
+on-chain settlement disabled, which is the state the rest of this file requires.
+
+Consequences that matter when editing this repository:
 
 - `agent-ai-tool.com` renders its live section absent. It fetches
   `VTESSERA_BASE_URL`, which is unset, so no `delivered` counts and no
