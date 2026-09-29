@@ -70,13 +70,14 @@ func (s *Service) mintInfo(address string) domain.MintInfo {
 
 func (s *Service) Register(ctx context.Context, agentID string, card domain.AgentCard) (domain.Agent, bool, error) {
 	if _, err := domain.ParsePublicKey(agentID); err != nil {
-		return domain.Agent{}, false, fmt.Errorf("agent id: %w", err)
+		return domain.Agent{}, false, fmt.Errorf("%w: agent id: %w", domain.ErrInvalid, err)
 	}
 	if card.PublicKey == "" {
 		card.PublicKey = agentID
 	}
 	if card.PublicKey != agentID {
-		return domain.Agent{}, false, fmt.Errorf("agent card publicKey %q does not match the authenticated agent %q", card.PublicKey, agentID)
+		return domain.Agent{}, false, fmt.Errorf("%w: agent card publicKey %q does not match the authenticated agent %q",
+			domain.ErrInvalid, card.PublicKey, agentID)
 	}
 	if err := card.Validate(); err != nil {
 		return domain.Agent{}, false, err

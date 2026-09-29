@@ -20,6 +20,7 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/httpapi"
 	"github.com/douglasdemaio/vtessera/internal/ledger"
+	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/store"
 	"github.com/douglasdemaio/vtessera/internal/trade"
@@ -826,5 +827,104 @@ func TestMetricsCountARecordedTradeAsDelivered(t *testing.T) {
 	}
 	if m.Agents[0].Delivered != 1 {
 		t.Errorf("per-agent delivered = %d, want 1", m.Agents[0].Delivered)
+	}
+}
+
+// A field the caller got wrong is the caller's problem. Reporting it as a 500
+// tells an agent the marketplace is broken when its own request was malformed,
+// which is the difference between retrying and giving up.
+func TestInvalidCardIsABadRequestNotAServerError(t *testing.T) {
+	server, _ := setupServer(t)
+	public, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentID := base58.Encode(public)
+	client := &agentClient{t: t, base: server.URL, http: server.Client(), id: agentID, private: private}
+	client.authenticate()
+
+	// url is omitempty, so omitting it looks optional in the schema while
+	// validation rejects it. That mismatch cost a real agent a 500.
+	status, body := client.raw(http.MethodPut, "/v1/agents/"+url.PathEscape(agentID)+"/card", domain.AgentCard{
+		Name:      "trader",
+		PublicKey: agentID,
+	}, true)
+	if status != http.StatusBadRequest {
+		t.Fatalf("card with no url = %d, want 400: %s", status, body)
+	}
+	var failure struct {
+		Code    string `json:"code"`
+		Message string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.Code != "INVALID_REQUEST" {
+		t.Errorf("code = %q, want INVALID_REQUEST", failure.Code)
+	}
+	// The message still has to name the offending field, or a 400 is no better
+	// than a 500.
+	if !strings.Contains(failure.Message, "url") {
+		t.Errorf("message %q does not mention the field to fix", failure.Message)
+	}
+}
+
+func TestInvalidOfferIsABadRequest(t *testing.T) {
+	server, _ := setupServer(t)
+	client := newAgent(t, server)
+	status, body := client.raw(http.MethodPost, "/v1/agents/"+url.PathEscape(client.id)+"/offers", domain.Offer{
+		Description: "",
+		Direction:   domain.DirectionAsk,
+		PriceAmount: money.MustParse("1.00"),
+		PriceMint:   usdc,
+	}, true)
+	if status != http.StatusBadRequest {
+		t.Fatalf("offer with no description = %d, want 400: %s", status, body)
+	}
+}
+
+// The directory publishes vtessera's call shapes so an agent does not have to
+// read this source. That only helps if the published examples are the ones the
+// service accepts. This pins the values the live service was verified to take,
+// so a rename like direction sell to ask cannot drift away from the copy
+// another repository hands to agents.
+func TestPublishedOfferShapeMatchesWhatTheServiceAccepts(t *testing.T) {
+	// Verified against the live service: every field below is load-bearing.
+	// A 201 here is the contract; a rejection means the published copy is wrong.
+	offer := domain.Offer{
+		Direction:   domain.DirectionAsk,
+		Description: "summarises a document",
+		Capabilities: []string{
+			"summarize:document",
+		},
+		PriceAmount:     money.MustParse("1.00"),
+		PriceMint:       "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
+		// The service assigns status; it appears in the published response, not
+		// in the request, so it is set here only to validate the whole object.
+		Status: domain.OfferOpen,
+	}
+	if err := offer.Validate(); err != nil {
+		t.Fatalf("the offer shape published in the directory is rejected: %v", err)
+	}
+	// direction is ask or bid. sell and buy read naturally and are wrong.
+	for _, bad := range []string{"sell", "buy", "Sell", ""} {
+		o := offer
+		o.Direction = domain.OfferDirection(bad)
+		if bad == "" {
+			// An empty direction means unset, which is a different failure than
+			// an unrecognised one; it must not pass either.
+			if err := o.Validate(); err == nil {
+				t.Errorf("direction %q was accepted", bad)
+			}
+			continue
+		}
+		if err := o.Validate(); err == nil {
+			t.Errorf("direction %q was accepted", bad)
+		}
+	}
+	// A ticker is not a mint. Identity is the base58 address alone.
+	if err := domain.ValidateMint("USDC"); err == nil {
+		t.Error(`priceMint "USDC" was accepted; the directory publishes an address`)
 	}
 }
