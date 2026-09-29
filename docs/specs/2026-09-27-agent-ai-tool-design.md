@@ -244,12 +244,16 @@ unrelated to this project and is not expected to maintain this site.
   see the generated `robots.txt` and the vendor notes in the implementation.
 - ~~Confirm the Pages `A` records for the apex domain at the registrar.~~ Done;
   all four records resolve and the certificate is approved and enforced.
-- Decide the initial curated entry set and who maintains it. `vtessera` is
-  currently the only entry, so the directory is live but not yet useful as a
-  directory.
+- ~~Decide the initial curated entry set and who maintains it.~~ Partly done.
+  Four entries ship, each with a verified machine endpoint except `vtessera`
+  itself, which has none because the service is not deployed. Who maintains the
+  set over time is still undecided.
 - Confirm the full list of `vtessera` fields worth surfacing once deployed.
-- Add a `www` `CNAME` at the registrar if `www.agent-ai-tool.com` should
-  resolve. The wildcard that used to cover it is gone, so it currently does not.
+- ~~Add a `www` `CNAME` at the registrar.~~ Done; `www` resolves and 301s to the
+  apex, whose canonical the page also declares, so there is no duplicate.
+- ~~Guard against entries advertising endpoints that no longer answer.~~ Done.
+  A health check probes every advertised endpoint and the build withholds any
+  that a fresh report found dead. See "Endpoint health" in the site README.
 - Usage metrics are specified in
   `2026-09-27-agent-ai-tool-usage-metrics-design.md`. Their dependency,
   `GET /v1/metrics`, now exists and is public and unauthenticated; the site
