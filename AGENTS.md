@@ -29,6 +29,11 @@ Validator-backed tests are behind a build tag and need a running local validator
 make validator   # start a test validator
 make test-solana # ~8.5 minutes, 5 scenarios
 make validator-off   # STOP IT — see below
+
+make image      # -> vtessera:local, from the checked-in Containerfile
+make image-run  # run that image locally against a volume
+make fly-deploy # deploy to the live Fly app (see constraint 5)
+make fly-verify # print the marketplace verificationKey
 ```
 
 ## Hard constraints
@@ -98,25 +103,39 @@ The documented mainnet-beta RPC endpoint for the future is
 `https://solana.publicnode.com/`, pinned by genesis hash
 `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`.
 
-### 5. `vtessera` is not deployed anywhere
+### 5. `vtessera` is deployed at `https://vtessera.fly.dev`
 
-There is no public `vtessera` URL. Every domain checked (`vtessera.com` and
-similar) does not resolve, and the agent card has no real origin.
+**Live as of 2026-09-29.** One Fly machine (`shared-cpu-1x`, 256 MB, `fra`) with
+a 1 GB volume mounted at `/data`, and both kept warm. `fly.toml` and a verified
+`Containerfile` are in the repository; the runbook is
+[`docs/deploy.md`](docs/deploy.md).
 
-**The repository is deployable; the deployment does not exist.** A verified
-`Containerfile` and a runbook are in [`docs/deploy.md`](docs/deploy.md). What is
-missing is external — a host and a DNS record — not code. Deploy it with
-on-chain settlement disabled, which is the state the rest of this file requires.
+Deployed with `VTESSERA_RPC_URL` unset, so on-chain settlement is still refused
+with 501. That is required, not incidental — see constraints 4 and 6.
 
-Consequences that matter when editing this repository:
+The things that matter when editing this repository:
 
-- `agent-ai-tool.com` renders its live section absent. It fetches
-  `VTESSERA_BASE_URL`, which is unset, so no `delivered` counts and no
-  registered-agent list are published. The site's generated guidance accounts
-  for this and tells agents the field is absent rather than zero.
-- The `vtessera` directory entry keeps `mcp_endpoint_url` at `null` and says in
-  its summary that the service is not yet deployed. Do not fill that field in
-  with a host that does not answer.
+- **The signing key on the volume is the marketplace.** It was created on first
+  boot and cannot be regenerated: a new key is a new identity, and every
+  previously issued tessera stops verifying. Do not delete `/data` to "reset"
+  anything. Fly keeps 5 daily volume snapshots as the recovery path; if the key
+  is ever lost, the honest response is a new deployment, not a recovery.
+- **`verificationKey` in `/healthz` is the identity.** It must not change across
+  a deploy. `make fly-verify` prints it. A change means the volume is gone.
+- The volume is a SQLite database in WAL mode, so it is three files
+  (`vtessera.db`, `-wal`, `-shm`). Copying only the `.db` while the service runs
+  can silently drop committed trades.
+- `agent-ai-tool.com` now fetches this service. The `VTESSERA_BASE_URL` secret is
+  set in that repository and the nightly refresh job commits snapshots, so a
+  build that cannot reach the service still renders from cache.
+- The directory entry's `agent_card_url` points here and is probed by the site's
+  health check, so a machine that is not answering causes the entry to be
+  withheld and then republished on its own. `mcp_endpoint_url` is deliberately
+  `null`: this is an A2A/AGP gateway, not an MCP server, and that field must
+  only ever hold a URL an agent can speak MCP to.
+
+A Fly personal account with a token is required to deploy. Do not commit a
+token, and do not add a `.fly` config to the repository.
 
 ### 6. The EURC mint defect is fixed; the rest of Phase 3 is not
 **Fixed 2026-09-28.** `internal/tokens` shipped a lookalike EURC mint that does

@@ -244,11 +244,19 @@ unrelated to this project and is not expected to maintain this site.
   see the generated `robots.txt` and the vendor notes in the implementation.
 - ~~Confirm the Pages `A` records for the apex domain at the registrar.~~ Done;
   all four records resolve and the certificate is approved and enforced.
-- ~~Decide the initial curated entry set and who maintains it.~~ Partly done.
-  Four entries ship, each with a verified machine endpoint except `vtessera`
-  itself, which has none because the service is not deployed. Who maintains the
-  set over time is still undecided.
-- Confirm the full list of `vtessera` fields worth surfacing once deployed.
+- ~~Decide the initial curated entry set and who maintains it.~~ Done. Four
+  entries ship and every one now has a machine endpoint the health check probes,
+  including `vtessera`'s agent card. Ownership is the repository maintainer, the
+  review cadence is 180 days, and `review-entries.yml` opens an issue when an
+  entry falls overdue, so maintenance no longer depends on remembering. See
+  "Keeping the entries honest" in the site README.
+- ~~Confirm the full list of `vtessera` fields worth surfacing once deployed.~~
+  Done for the public surface. The site surfaces the agent card, the five open
+  `GET` endpoints, the AGP route, and the `delivered` counts. The two things an
+  agent most often gets wrong are called out in prose instead of being implied by
+  a field: that on-chain settlement returns 501 because the service cannot yet
+  verify its cluster, and that `mcp_endpoint_url` is null because this is an
+  A2A/AGP gateway and not an MCP server.
 - ~~Add a `www` `CNAME` at the registrar.~~ Done; `www` resolves and 301s to the
   apex, whose canonical the page also declares, so there is no duplicate.
 - ~~Guard against entries advertising endpoints that no longer answer.~~ Done.
@@ -256,6 +264,11 @@ unrelated to this project and is not expected to maintain this site.
   that a fresh report found dead. See "Endpoint health" in the site README.
 - Usage metrics are specified in
   `2026-09-27-agent-ai-tool-usage-metrics-design.md`. Their dependency,
-  `GET /v1/metrics`, now exists and is public and unauthenticated; the site
-  consumes it, and the live section stays absent until a deployed
-  `VTESSERA_BASE_URL` is supplied.
+  `GET /v1/metrics`, exists and is public and unauthenticated; the site consumes
+  it and the live section is now live, because the service is deployed at
+  `https://vtessera.fly.dev` and `VTESSERA_BASE_URL` is set. The marketplace has
+  no registered agents yet, so every count is genuinely zero and the site says
+  so rather than showing a blank.
+- A custom domain for the service is still open. `vtessera.fly.dev` works, and
+  `vtessera.com` does not resolve, so nothing has been claimed that would be
+  wrong.

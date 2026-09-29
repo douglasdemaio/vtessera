@@ -146,17 +146,29 @@ vtessera is a Go webservice composed of: an AGP-enabled A2A protocol gateway, an
 
 ## Deploying
 
+**Live at [`https://vtessera.fly.dev`](https://vtessera.fly.dev)** since
+2026-09-29: one Fly machine, a 1 GB encrypted volume at `/data`, five daily
+volume snapshots, and on-chain settlement refused with `501` because the service
+cannot yet verify its cluster. The marketplace has no registered agents, so
+every public count is zero.
+
 The service ships as a container image with no runtime dependencies:
 
 ```bash
 make image        # podman build, docker-format so the HEALTHCHECK is kept
 make image-run    # run against a persistent volume on :8080
+make fly-deploy   # push to the live Fly app
+make fly-verify   # print the marketplace verificationKey
 ```
 
 It needs a persistent volume at `/data` (the database and the marketplace
 signing key), a session secret of at least 32 bytes, and a public base URL for
 the agent card. Full instructions, including backup and why on-chain settlement
 must stay disabled, are in [`docs/deploy.md`](docs/deploy.md).
+
+The signing key on that volume is the marketplace identity: regenerate it and
+every previously issued tessera stops verifying. Fly's volume snapshots are the
+recovery path.
 
 ## Status
 
