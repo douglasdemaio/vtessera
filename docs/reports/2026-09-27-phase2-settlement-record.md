@@ -31,7 +31,7 @@ Not delivered, and not claimed: mainnet deployment readiness, cluster awareness,
 | Unsigned builder | `internal/settlement/build.go` | Emits the base64 transaction returned to the buyer. |
 | Verifier | `internal/settlement/verify.go` | Exact comparison of the on-chain transaction against the expected message, with typed mismatch errors. |
 | RPC adapter | `internal/settlement/client.go` | Wraps the Solana JSON-RPC client; `ErrTransactionNotFound` distinguishes "not landed" from "failed". |
-| Fee policy | `internal/fees/fees.go` | Flat per-settlement fee paid by the buyer inside the same transaction, which is what makes it non-strippable. |
+| Fee policy | `internal/fees/fees.go` | Flat per-settlement fee paid by the buyer inside the same transaction, which is what makes a fee-stripped settlement one the service refuses. See §7.8 for what that does not buy. |
 | Governed mints | `internal/tokens/tokens.go` | Service-side mint registry; identity by address, never by symbol. |
 | Persistence | `internal/store/settlement.go`, `internal/store/schema.sql` | `settlement_requests` table with a partial unique index enforcing one issued request per trade. |
 | Trade integration | `internal/trade/settlement.go`, `internal/trade/trade.go` | Issuance, signature recording, confirmation, dispute, expiry, and cancellation blocking. |
@@ -50,7 +50,7 @@ The invariants Phase 2 was supposed to guarantee, and where each one lives:
 
 1. **The service never holds a key that can move funds.** Agent identity is a Solana public key; the buyer signs and submits. The service *does* hold the ledger's Ed25519 receipt-signing key (`TestVerifyRejectsForeignSigner`), which can only sign tesserae and cannot move, hold or authorize lamports. The distinction matters: "the service holds no key" would be false, and is the kind of overstatement that erodes trust in the rest of the document. `internal/settlement/terms.go`, `internal/trade/settlement.go`, `internal/ledger/`.
 2. **Canonical instruction order** is optional seller-ATA creation, SPL `TransferChecked`, trade-UUID memo, exact system fee transfer. `internal/settlement/canonical.go`.
-3. **A fee cannot be stripped.** The verifier compares the whole compiled message, not the token transfer, so removing or redirecting the fee leg is a mismatch. `internal/settlement/verify.go`.
+3. **A fee cannot go unpaid and still settle.** The verifier compares the whole compiled message, not the token transfer, so removing or redirecting the fee leg is a mismatch and the trade ends `disputed`. The limit on that claim is §7.8: the chain still executes the stripped transaction, so the trade amount has already reached the seller when the mismatch is caught. `internal/settlement/verify.go`.
 4. **A signature that has not landed is `settlement_pending`, never `disputed`.** `ErrTransactionNotFound` is not an error verdict. `internal/settlement/client.go`, `internal/trade/reconcile.go`.
 5. **A mismatch is `disputed` and issues no tesserae.** `internal/trade/settlement.go`.
 6. **An on-chain execution failure expires the request but leaves the trade pending**, so a fresh request can be built. `internal/trade/settlement.go`.
@@ -214,6 +214,14 @@ Remediation is unchanged: the fee wallet must be funded to at least the queried 
 ### 7.7 LOW — an unparseable `VTESSERA_BLOCKHASH_TTL` is silently ignored
 
 An unparseable value falls back to the default rather than failing startup. Defensible when documented, but a silent fallback on a safety-relevant setting contradicts the fail-closed posture Phase 3 adopts everywhere else. **Phase 3 makes this a startup error** for consistency; an operator who mistypes a settlement setting should find out at boot, not discover the fallback later.
+
+### 7.8 MEDIUM — the fee is a deterrent, not a mechanism, and the docs claimed otherwise
+
+`canonical.go` appends the fee as the third instruction debited from the buyer, and `verify.go:67` requires the buyer to be the fee payer and a signer. A buyer who omits the fee submits the two remaining instructions, and the chain accepts and finalizes them: the trade amount moves to the seller, the memo still lands, and the fee never moves. Verification only runs afterwards, so the service returns `409 SETTLEMENT_MISMATCH`, the trade is `disputed`, `GET /v1/tesseras/{id}` is `404`, and the ledger is not appended. The seller's transfer is not unwound and there is no refund path, because there is no custody to refund from.
+
+So enforcement works exactly as specified and is worth having. What was overstated was the claim around it — "cannot be removed without invalidating the settlement", repeated in `internal/fees/fees.go`, `README.md`, and spec §6.1. Read literally, it says removal is impossible; what is true is that removal makes the settlement unrecognisable to this service, which is a weaker and more dangerous guarantee to advertise than it appears. Enforcement deters, it does not prevent, and the party carrying the risk is the buyer.
+
+**Not fixed here, and not fixable without changing the custody model.** Escrow or a split transfer is the only mechanism-level answer, and §1 lists escrow as out of scope. What was done instead is to correct the wording in all three places and state the exposure plainly, so nobody builds a client that assumes a stripped fee costs them nothing. Phase 3 changes the fee default from `500000` to `1000` lamports, which lowers the amount at risk but not who bears it.
 
 ## 8. Explicitly not done
 

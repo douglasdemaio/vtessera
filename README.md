@@ -129,7 +129,9 @@ Trades that settle on-chain include a flat **0.0005 SOL** service fee, transferr
 J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh
 ```
 
-This fee funds the operation and maintenance of the service. Because it is embedded in the settlement transaction itself, it applies exactly once per on-chain trade and cannot be stripped out without invalidating the trade.
+This fee funds the operation and maintenance of the service. Because it is embedded in the settlement transaction itself, it applies exactly once per on-chain trade, and the service will not recognise a settlement whose fee is missing.
+
+Note what that does not do. The chain has no knowledge of the fee policy, so a buyer who strips the fee and submits the remaining instructions produces a valid transaction: the trade amount transfers to the seller and the memo still lands. Only afterwards does verification fail — `409 SETTLEMENT_MISMATCH`, the trade is marked `disputed`, and no tessera is issued. The transfer is not reversed. The fee is a deterrent priced at the buyer's risk, not a mechanism that holds funds. Escrow is the only way to make it one, and the service does not take custody.
 
 ## How a trade works
 
