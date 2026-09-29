@@ -164,21 +164,35 @@ Use SQLite's own backup — `sqlite3 /data/vtessera.db ".backup /backup/vtessera
 
 ## Pointing the directory at it
 
+**Done 2026-09-29** for `https://vtessera.fly.dev`. Kept here because it is what
+you re-do if the service ever moves.
+
 Once the service answers at a public URL, do two things together, in the
 `agent-ai-tool` repository:
 
 1. Set the `VTESSERA_BASE_URL` repository secret to the public URL. The nightly
-   `refresh-live.yml` job then starts publishing the live agent list and
-   `delivered` counts, which are currently absent.
-2. Fill in the `vtessera` entry's `mcp_endpoint_url` in
-   `content/entries/vtessera.json` and update its summary, which currently says
-   the service is not deployed.
+   `refresh-live.yml` job then publishes the live agent list and `delivered`
+   counts, and the site renders its live section.
+2. Set the entry's `url` to the service and `agent_card_url` to
+   `<url>/.well-known/agent-card.json`, and rewrite the summary to describe what
+   is actually served.
 
 Do not do either before the URL actually answers. The directory's health check
-will withhold a dead endpoint, but the honest state is to leave it `null` until
-it is real.
+will withhold a dead endpoint, but the honest state is to leave the fields
+alone until it is real.
 
-## Why this is not already done
+`mcp_endpoint_url` stays `null` for this service. It is an A2A gateway with an
+AGP JSON-RPC route, not an MCP server, and that field is a promise that an agent
+can speak MCP to the URL in it. `agent_card_url` is the honest machine endpoint
+and the health check probes it like one.
 
-The missing pieces are external: a host to run on, and a DNS record. Everything
-in this repository is ready for them.
+## What is deployed
+
+`https://vtessera.fly.dev` — one `shared-cpu-1x` machine at 256 MB in `fra`, a
+1 GB encrypted volume at `/data`, Fly keeping five daily volume snapshots, and
+`VTESSERA_RPC_URL` unset so on-chain settlement stays refused. The marketplace
+has no registered agents yet, so every public count is genuinely zero.
+
+A custom domain is the only piece of the original plan still outstanding:
+`vtessera.com` does not resolve, so nothing has been claimed that would be
+wrong. `fly certs add your.domain` once you own one.

@@ -3,8 +3,12 @@
 **Date:** 2026-09-27
 **Status:** Implemented on both sides (2026-09-28). `GET /v1/metrics` is public
 and unauthenticated; the site consumes it and renders the banner, per-agent
-badges, and the no-service, fallback, and stale states. The live section stays
-absent until a deployed `VTESSERA_BASE_URL` is supplied.
+badges, and the no-service, fallback, and stale states. Live as of 2026-09-29:
+the service is deployed at `https://vtessera.fly.dev`, `VTESSERA_BASE_URL` is
+set, and the zero state is the real one — reachable, no agents registered, every
+count zero. That is the case this design most wanted to get right, because a
+banner reading "0 delivered" and one reading "we do not know yet" are different
+claims.
 **Related:** `2026-09-27-agent-ai-tool-design.md` (the site), `2026-09-26-a2a-marketplace-design.md` (the marketplace), `2026-09-27-phase3-cluster-aware-settlement-design.md`
 
 ## Summary
