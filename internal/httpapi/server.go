@@ -631,99 +631,59 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 var statusByError = []struct {
 	err    error
 	status int
+	code   string
 }{
-	{domain.ErrNotFound, http.StatusNotFound},
-	{domain.ErrConflict, http.StatusConflict},
-	{domain.ErrStale, http.StatusConflict},
-	{domain.ErrInvalid, http.StatusBadRequest},
-	{registry.ErrNotOwner, http.StatusForbidden},
-	{registry.ErrAgentSuspended, http.StatusForbidden},
-	{registry.ErrCurrencyNotAccepted, http.StatusBadRequest},
-	{registry.ErrAmountTooPrecise, http.StatusBadRequest},
-	{registry.ErrOfferClosed, http.StatusConflict},
-	{trade.ErrNotParty, http.StatusForbidden},
-	{trade.ErrIllegalState, http.StatusConflict},
-	{trade.ErrOfferUnavailable, http.StatusConflict},
-	{trade.ErrModeNotAccepted, http.StatusBadRequest},
-	{trade.ErrAgentUnavailable, http.StatusConflict},
-	{trade.ErrOnchainUnavailable, http.StatusNotImplemented},
-	{trade.ErrNotBuyer, http.StatusForbidden},
-	{trade.ErrNotOnchain, http.StatusConflict},
-	{trade.ErrSettlementLive, http.StatusConflict},
-	{trade.ErrSettlementFailed, http.StatusConflict},
-	{trade.ErrSettlementPending, http.StatusAccepted},
-	{trade.ErrInvalidSignature, http.StatusBadRequest},
-	{settlement.ErrMismatch, http.StatusConflict},
-	{auth.ErrSessionInvalid, http.StatusUnauthorized},
-	{auth.ErrInvalidSignature, http.StatusUnauthorized},
-	{auth.ErrSecretTooShort, http.StatusInternalServerError},
-	{agp.ErrRouteNotFound, http.StatusNotFound},
-	{agp.ErrPolicyViolation, http.StatusUnprocessableEntity},
-	{agp.ErrTableStale, http.StatusConflict},
-	{ledger.ErrNotSettled, http.StatusConflict},
-	{ledger.ErrAlreadyIssued, http.StatusConflict},
+	{domain.ErrNotFound, http.StatusNotFound, "NOT_FOUND"},
+	{domain.ErrConflict, http.StatusConflict, "CONFLICT"},
+	{domain.ErrStale, http.StatusConflict, "CONFLICT"},
+	{domain.ErrInvalid, http.StatusBadRequest, "INVALID_REQUEST"},
+	{registry.ErrNotOwner, http.StatusForbidden, "FORBIDDEN"},
+	{registry.ErrAgentSuspended, http.StatusForbidden, "INVALID_REQUEST"},
+	{registry.ErrCurrencyNotAccepted, http.StatusBadRequest, "CURRENCY_NOT_ACCEPTED"},
+	{registry.ErrAmountTooPrecise, http.StatusBadRequest, "AMOUNT_TOO_PRECISE"},
+	{registry.ErrOfferClosed, http.StatusConflict, "INVALID_REQUEST"},
+	{trade.ErrNotParty, http.StatusForbidden, "FORBIDDEN"},
+	{trade.ErrIllegalState, http.StatusConflict, "ILLEGAL_STATE"},
+	{trade.ErrOfferUnavailable, http.StatusConflict, "INVALID_REQUEST"},
+	{trade.ErrModeNotAccepted, http.StatusBadRequest, "INVALID_REQUEST"},
+	{trade.ErrAgentUnavailable, http.StatusConflict, "INVALID_REQUEST"},
+	{trade.ErrOnchainUnavailable, http.StatusNotImplemented, "ONCHAIN_UNAVAILABLE"},
+	{trade.ErrNotBuyer, http.StatusForbidden, "FORBIDDEN"},
+	{trade.ErrNotOnchain, http.StatusConflict, "NOT_ONCHAIN"},
+	{trade.ErrSettlementLive, http.StatusConflict, "SETTLEMENT_IN_PROGRESS"},
+	{trade.ErrSettlementFailed, http.StatusConflict, "SETTLEMENT_FAILED"},
+	{trade.ErrSettlementPending, http.StatusAccepted, "SETTLEMENT_PENDING"},
+	{trade.ErrInvalidSignature, http.StatusBadRequest, "INVALID_SIGNATURE"},
+	{settlement.ErrMismatch, http.StatusConflict, "SETTLEMENT_MISMATCH"},
+	{auth.ErrSessionInvalid, http.StatusUnauthorized, "UNAUTHORIZED"},
+	{auth.ErrInvalidSignature, http.StatusUnauthorized, "UNAUTHORIZED"},
+	{auth.ErrSecretTooShort, http.StatusInternalServerError, "INVALID_REQUEST"},
+	{agp.ErrRouteNotFound, http.StatusNotFound, "INVALID_REQUEST"},
+	{agp.ErrPolicyViolation, http.StatusUnprocessableEntity, "INVALID_REQUEST"},
+	{agp.ErrTableStale, http.StatusConflict, "INVALID_REQUEST"},
+	{ledger.ErrNotSettled, http.StatusConflict, "INVALID_REQUEST"},
+	{ledger.ErrAlreadyIssued, http.StatusConflict, "ALREADY_ISSUED"},
 }
 
 func writeError(w http.ResponseWriter, err error) {
-	status, matched := http.StatusInternalServerError, false
+	status, code, matched := http.StatusInternalServerError, "", false
 	for _, candidate := range statusByError {
 		if errors.Is(err, candidate.err) {
-			status, matched = candidate.status, true
+			status, code, matched = candidate.status, candidate.code, true
 			break
 		}
 	}
-	if code, ok := agp.CodeOf(err); ok {
-		writeJSON(w, status, rpcError(nil, code, err.Error()))
+	if agpCode, ok := agp.CodeOf(err); ok {
+		writeJSON(w, status, rpcError(nil, agpCode, err.Error()))
 		return
 	}
 	if !matched {
 		writeErrorStatus(w, status, "INTERNAL", err.Error())
 		return
 	}
-	writeErrorStatus(w, status, codeName(err), err.Error())
+	writeErrorStatus(w, status, code, err.Error())
 }
 
 func writeErrorStatus(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": message, "code": code})
-}
-
-func codeName(err error) string {
-	switch {
-	case errors.Is(err, domain.ErrNotFound):
-		return "NOT_FOUND"
-	case errors.Is(err, domain.ErrInvalid):
-		return "INVALID_REQUEST"
-	case errors.Is(err, domain.ErrConflict), errors.Is(err, domain.ErrStale):
-		return "CONFLICT"
-	case errors.Is(err, trade.ErrIllegalState):
-		return "ILLEGAL_STATE"
-	case errors.Is(err, trade.ErrNotParty), errors.Is(err, registry.ErrNotOwner):
-		return "FORBIDDEN"
-	case errors.Is(err, trade.ErrOnchainUnavailable):
-		return "ONCHAIN_UNAVAILABLE"
-	case errors.Is(err, trade.ErrNotBuyer):
-		return "FORBIDDEN"
-	case errors.Is(err, trade.ErrNotOnchain):
-		return "NOT_ONCHAIN"
-	case errors.Is(err, trade.ErrSettlementLive):
-		return "SETTLEMENT_IN_PROGRESS"
-	case errors.Is(err, trade.ErrSettlementPending):
-		return "SETTLEMENT_PENDING"
-	case errors.Is(err, trade.ErrSettlementFailed):
-		return "SETTLEMENT_FAILED"
-	case errors.Is(err, trade.ErrInvalidSignature):
-		return "INVALID_SIGNATURE"
-	case errors.Is(err, settlement.ErrMismatch):
-		return "SETTLEMENT_MISMATCH"
-	case errors.Is(err, registry.ErrAmountTooPrecise):
-		return "AMOUNT_TOO_PRECISE"
-	case errors.Is(err, registry.ErrCurrencyNotAccepted):
-		return "CURRENCY_NOT_ACCEPTED"
-	case errors.Is(err, auth.ErrSessionInvalid), errors.Is(err, auth.ErrInvalidSignature):
-		return "UNAUTHORIZED"
-	case errors.Is(err, ledger.ErrAlreadyIssued):
-		return "ALREADY_ISSUED"
-	default:
-		return "INVALID_REQUEST"
-	}
 }
