@@ -16,14 +16,16 @@ import (
 const chainDomain = "vtessera/ledger/v1"
 
 type Signer struct {
-	private ed25519.PrivateKey
+	private         ed25519.PrivateKey
+	publicKeyBase58 string
 }
 
 func NewSigner(private ed25519.PrivateKey) (*Signer, error) {
 	if len(private) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("signing key must be %d bytes, got %d", ed25519.PrivateKeySize, len(private))
 	}
-	return &Signer{private: private}, nil
+	publicKey := private.Public().(ed25519.PublicKey)
+	return &Signer{private: private, publicKeyBase58: base58.Encode(publicKey)}, nil
 }
 
 func GenerateSigner() (*Signer, error) {
@@ -69,7 +71,7 @@ func (s *Signer) PublicKey() ed25519.PublicKey {
 }
 
 func (s *Signer) PublicKeyBase58() string {
-	return base58.Encode(s.PublicKey())
+	return s.publicKeyBase58
 }
 
 func EntryHash(seq int64, prevHash, payloadHash string) string {
