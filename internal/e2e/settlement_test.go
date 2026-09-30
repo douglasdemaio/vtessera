@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/douglasdemaio/vtessera/internal/auth"
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/fees"
 	"github.com/douglasdemaio/vtessera/internal/httpapi"
@@ -241,7 +242,10 @@ func newMarketWithBank(t *testing.T, mint solana.PublicKey, policy fees.Policy, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mints, err := tokens.New([]tokens.Token{{
+	// A local validator is a local cluster: there is no genesis pin for it, and
+	// the mint is created on it below, so the governed set is declared for
+	// localnet rather than borrowed from a public one.
+	mints, err := tokens.New(cluster.Localnet, []tokens.Token{{
 		Address:  mint.String(),
 		Symbol:   "TUSD",
 		Decimals: 6,
@@ -251,8 +255,9 @@ func newMarketWithBank(t *testing.T, mint solana.PublicKey, policy fees.Policy, 
 		t.Fatal(err)
 	}
 	led := ledger.New(db, signer)
-	registrySvc := registry.New(db, registry.WithMints(mints))
-	client := settlement.NewRPCClient(testRPCURL())
+	registrySvc := registry.New(db, mints)
+	rpcURL := testRPCURL()
+	client := settlement.NewRPCClient(rpcURL)
 	trades := trade.New(db, db, db, led).WithSettlement(trade.SettlementDeps{
 		Registry: mints,
 		Policy:   policy,
@@ -260,6 +265,12 @@ func newMarketWithBank(t *testing.T, mint solana.PublicKey, policy fees.Policy, 
 		Verifier: settlement.NewVerifier(),
 		Chain:    client,
 		Store:    db,
+		Cluster:  cluster.Localnet,
+		Genesis:  client,
+		// The mint is created on the validator a moment after this wiring, so
+		// there is nothing on chain to verify yet. The verifier is exercised by
+		// internal/settlement and by the boot preflight, which runs later here.
+		TradeList: db,
 	})
 	api := httpapi.New(httpapi.Options{
 		Registry: registrySvc,
@@ -268,6 +279,7 @@ func newMarketWithBank(t *testing.T, mint solana.PublicKey, policy fees.Policy, 
 		Ledger:   led,
 		Tokens:   mints,
 		Version:  "e2e",
+		Cluster:  cluster.Localnet,
 	})
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)

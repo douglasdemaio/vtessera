@@ -22,8 +22,14 @@ import (
 )
 
 const (
-	// DefaultLamports is 0.0005 SOL.
-	DefaultLamports uint64 = 500_000
+	// DefaultLamports is 0.000001 SOL.
+	//
+	// Phase 2 charged 500,000 lamports, which is below the 650,240 lamport rent
+	// exemption for a zero-data account on every real cluster: the fee transfer
+	// would have failed on a wallet that did not already hold a balance above
+	// that line. The fee exists to bind a settlement to a real signature, not to
+	// raise money, so it is set just above a base transaction.
+	DefaultLamports uint64 = 1_000
 	// DefaultWallet receives every on-chain settlement fee.
 	DefaultWallet = "J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh"
 )

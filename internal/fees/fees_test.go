@@ -10,8 +10,8 @@ import (
 
 func TestDefaultMatchesSpec(t *testing.T) {
 	p := Default()
-	if p.Lamports() != 500_000 {
-		t.Errorf("lamports = %d, want 500000", p.Lamports())
+	if p.Lamports() != 1_000 {
+		t.Errorf("lamports = %d, want 1000", p.Lamports())
 	}
 	if p.WalletAddress() != DefaultWallet {
 		t.Errorf("wallet = %s, want %s", p.WalletAddress(), DefaultWallet)
@@ -54,8 +54,8 @@ func TestMarshalJSON(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got["lamports"] != float64(500_000) {
-		t.Errorf("lamports = %v, want 500000", got["lamports"])
+	if got["lamports"] != float64(1_000) {
+		t.Errorf("lamports = %v, want 1000", got["lamports"])
 	}
 	if got["wallet"] != DefaultWallet {
 		t.Errorf("wallet = %v, want %s", got["wallet"], DefaultWallet)

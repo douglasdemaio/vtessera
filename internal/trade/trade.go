@@ -12,12 +12,26 @@ import (
 )
 
 var (
-	ErrNotParty           = errors.New("agent is not a party to this trade")
-	ErrIllegalState       = errors.New("trade state does not allow this transition")
-	ErrOfferUnavailable   = errors.New("offer cannot be traded")
-	ErrOnchainUnavailable = errors.New("on-chain settlement is not available yet")
+	ErrNotParty         = errors.New("agent is not a party to this trade")
+	ErrIllegalState     = errors.New("trade state does not allow this transition")
+	ErrOfferUnavailable = errors.New("offer cannot be traded")
+	// ErrSettlementUnconfigured means this deployment has no cluster and no
+	// endpoint, so on-chain trades are refused rather than half-handled. It is
+	// a 501: the feature is not switched on here.
+	ErrSettlementUnconfigured = errors.New("on-chain settlement is not configured for this deployment")
+	// ErrOnchainUnavailable means the chain could not be consulted: an RPC
+	// error, a timeout, a rate limit, or a genesis hash that no longer matches
+	// the declared cluster. It is a 503 with retry semantics, kept separate from
+	// ErrSettlementUnconfigured so a transient node problem is never reported as
+	// a missing feature.
+	ErrOnchainUnavailable = errors.New("the chain could not be consulted")
 	ErrModeNotAccepted    = errors.New("offer does not accept this settlement mode")
 	ErrAgentUnavailable   = errors.New("counterparty agent is not available")
+	// ErrMintUngoverned means the offer names a governed mint that is not
+	// governed on this cluster. It is a 409 rather than a 400: the mint was the
+	// seller's choice and the buyer cannot correct it, so it is a conflict with
+	// server state and not a malformed request.
+	ErrMintUngoverned = errors.New("offer price mint is not governed on this cluster")
 )
 
 type Store interface {
@@ -41,7 +55,7 @@ type AgentStore interface {
 }
 
 type Ledger interface {
-	Record(ctx context.Context, t domain.Trade, solanaSignature string) (domain.Receipt, error)
+	Record(ctx context.Context, t domain.Trade, solanaSignature, clusterName string) (domain.Receipt, error)
 	Receipt(ctx context.Context, tradeID string) (domain.Receipt, error)
 }
 
@@ -105,7 +119,7 @@ func (s *Service) Create(ctx context.Context, actorID, offerID string, mode doma
 		return domain.Trade{}, false, fmt.Errorf("%w: %q", ErrModeNotAccepted, mode)
 	}
 	if mode == domain.SettlementOnchain {
-		if err := s.requireSettlement(); err != nil {
+		if err := s.requireSettlement(ctx); err != nil {
 			return domain.Trade{}, false, err
 		}
 	}
@@ -249,7 +263,10 @@ func (s *Service) Record(ctx context.Context, actorID, tradeID string) (domain.T
 	if err != nil {
 		return domain.Trade{}, domain.Receipt{}, err
 	}
-	receipt, err := s.ledger.Record(ctx, recorded, "")
+	// An off-chain trade settles on no chain, so the tessera names none. Passing
+	// the configured cluster here would assert a fact about a settlement that
+	// never touched a block.
+	receipt, err := s.ledger.Record(ctx, recorded, "", "")
 	if err != nil {
 		return domain.Trade{}, domain.Receipt{}, err
 	}

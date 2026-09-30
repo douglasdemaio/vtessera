@@ -122,14 +122,44 @@ copying the `.db` alone is not enough), or snapshot the volume with
 `fly volumes snapshots`. The signing key is the part that cannot be recreated —
 consider retrieving it once and storing it somewhere other than the volume.
 
-## Settlement: leave the RPC endpoint unset
+## Settlement: leave the cluster and RPC endpoint unset
 
-Do **not** set `VTESSERA_RPC_URL` for this deployment. Phase 3 is not
-implemented: the service has no cluster awareness and performs no on-chain mint
-verification, so it must not be pointed at mainnet-beta or a live devnet. Leave
-it unset and on-chain settlement is refused with `501 ONCHAIN_UNAVAILABLE`, while
-off-chain settlement — the hash-chained ledger and signed virtual tessera — works
-fully. That is the correct state, not a degraded one.
+Do **not** set `VTESSERA_RPC_URL` or `VTESSERA_CLUSTER` for this deployment, and
+note that the service refuses to start with only one of the two. Settlement needs
+both, and it needs both named: a service that inferred its cluster from the URL
+would have nothing to check that URL against.
+
+On-chain settlement is refused with `501 ONCHAIN_UNAVAILABLE` while off-chain
+settlement — the hash-chained ledger and signed virtual tessera — works fully.
+That is the correct state for the live app, not a degraded one: the marketplace
+has no registered agents, so there is nothing to settle.
+
+Phase 3 is implemented, and the service now verifies the chain it is pointed at:
+the genesis hash and every governed mint are checked at boot, on every settlement
+request and on every reconciler tick, and a mismatch refuses to serve. What
+prevents enabling it here is not a missing capability but a missing decision.
+Turning it on is a deliberate act, and the sequence is:
+
+1. `make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana.publicnode.com/`.
+   Read the report. Every mint must say `verified`, the genesis hash must be
+   `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`, and the fee wallet must hold
+   more than the reported rent minimum. This step creates no database and no
+   signing key, so it is safe to run against a host you are only inspecting.
+2. Set `VTESSERA_CLUSTER=mainnet-beta`, `VTESSERA_RPC_URL`, and
+   `VTESSERA_MAINNET_ACK=1`. The acknowledgement is required because settlement
+   there moves real value.
+3. Deploy, then confirm `curl /healthz` reports the cluster and genesis hash you
+   verified in step 1.
+
+**Do not edit the genesis pin to make a mismatch disappear.** A changed genesis
+hash is either a provider incident or a DNS hijack, and updating the pin converts
+a detectable incident into an undetectable compromise. Stop and investigate; see
+the Phase 3 design §12.4.
+
+A governed mint whose authority has rotated stops the deploy as well. That is
+intentional: it is a governance change on a token the marketplace prices, and a
+human should re-derive the pin from a second provider rather than have a deploy
+re-pin it automatically.
 
 ## Verify a deployment
 
@@ -143,6 +173,11 @@ The health output carries `verificationKey`. Record it: it is the marketplace
 identity, and it must be identical after every deploy and restart. If it changes,
 `/data` was not persisted. The container image was verified against exactly that
 failure — stop, restart, confirm the key is unchanged.
+
+When settlement is enabled, `/healthz` also carries `cluster` and `genesisHash`.
+Those are the chain this deployment settled on, and a tessera is only meaningful
+relative to one. They are absent rather than empty when settlement is
+unconfigured, which is the live app's current state.
 
 A second check that the volume is real, not just present:
 

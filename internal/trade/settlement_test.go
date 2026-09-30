@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/fees"
 	"github.com/douglasdemaio/vtessera/internal/registry"
@@ -74,6 +75,26 @@ type chainResult struct {
 type fakeChain struct {
 	results []chainResult
 	calls   int
+	// genesis is what the endpoint claims to be. Empty string reports a chain
+	// identity that matches no cluster, which is how a repoint is simulated.
+	genesis      string
+	genesisErr   error
+	genesisCalls int
+}
+
+// GetGenesisHash satisfies the reconciler's per-tick cluster re-check. An unset
+// genesis reports the cluster the harness declares, so a test that is not about
+// cluster identity does not have to restate it; a test that is sets it
+// deliberately.
+func (c *fakeChain) GetGenesisHash(context.Context) (string, error) {
+	c.genesisCalls++
+	if c.genesisErr != nil {
+		return "", c.genesisErr
+	}
+	if c.genesis == "" {
+		return cluster.MainnetBeta.GenesisHash(), nil
+	}
+	return c.genesis, nil
 }
 
 func (c *fakeChain) Transaction(_ context.Context, sig solana.Signature) (settlement.Fetched, error) {
@@ -106,15 +127,27 @@ func notVisible() chainResult {
 func onchainHarness(t *testing.T, opts ...func(*trade.SettlementDeps)) (harness, *trade.SettlementDeps) {
 	t.Helper()
 	h := setup(t)
-	registry := tokens.Default()
+	// mainnet-beta, not localnet: localnet has no genesis pin, so Verify accepts
+	// anything and the per-tick re-check would be a no-op that proved nothing.
+	// A pinned cluster is what makes the identity assertions below real.
+	registry, err := tokens.ForCluster(cluster.MainnetBeta)
+	if err != nil {
+		t.Fatalf("test mints: %v", err)
+	}
 	policy := fees.Default()
+	// Cluster and Genesis are populated with the declared value rather than left
+	// empty, because Enabled() now requires them: a request that does not name
+	// the cluster it was compiled for cannot be proved safe to execute.
+	chain := &fakeChain{genesis: cluster.MainnetBeta.GenesisHash()}
 	deps := trade.SettlementDeps{
 		Registry: registry,
 		Policy:   policy,
 		Builder:  &fakeBuilder{},
 		Verifier: &fakeVerifier{},
-		Chain:    &fakeChain{},
+		Chain:    chain,
 		Store:    h.db,
+		Cluster:  cluster.MainnetBeta,
+		Genesis:  chain,
 		Confirm:  trade.ConfirmPolicy{Attempts: 3, Backoff: time.Millisecond},
 		Sleep:    func(context.Context, time.Duration) error { return nil },
 	}
@@ -124,8 +157,14 @@ func onchainHarness(t *testing.T, opts ...func(*trade.SettlementDeps)) (harness,
 	return h, &deps
 }
 
+// withChain swaps in a fake endpoint. It sets Genesis as well as Chain because
+// both come from the same node: a test that swapped only one would be asserting
+// against a service with two different clusters, which cannot be configured.
 func withChain(f *fakeChain) func(*trade.SettlementDeps) {
-	return func(d *trade.SettlementDeps) { d.Chain = f }
+	return func(d *trade.SettlementDeps) {
+		d.Chain = f
+		d.Genesis = f
+	}
 }
 
 func withVerifier(v *fakeVerifier) func(*trade.SettlementDeps) {
@@ -151,12 +190,20 @@ func acceptedOnchainTrade(t *testing.T, h harness) domain.Trade {
 	return accepted
 }
 
+// TestOnchainTradeRefusedWhenSettlementIsNotConfigured is the 501 case: no
+// cluster and no endpoint, so the feature is not switched on here. It is a
+// different refusal from a 503, where the feature is on and the chain is
+// merely unreachable, and conflating them would tell an operator to fix their
+// configuration during a network outage.
 func TestOnchainTradeRefusedWhenSettlementIsNotConfigured(t *testing.T) {
 	ctx := context.Background()
 	h := setup(t)
 	_, _, err := h.svc.Create(ctx, buyerKey, h.offerID, domain.SettlementOnchain, "idem-1")
-	if !errors.Is(err, trade.ErrOnchainUnavailable) {
-		t.Errorf("err = %v, want ErrOnchainUnavailable so on-chain is never half-handled", err)
+	if !errors.Is(err, trade.ErrSettlementUnconfigured) {
+		t.Errorf("err = %v, want ErrSettlementUnconfigured so on-chain is never half-handled", err)
+	}
+	if errors.Is(err, trade.ErrOnchainUnavailable) {
+		t.Error("an unconfigured deployment must not report a 503-style outage")
 	}
 }
 
@@ -236,7 +283,10 @@ func TestBuildSettlementRefusesOffchainTrades(t *testing.T) {
 	}
 }
 
-func TestOnchainTradeRefusesAnUnregisteredMint(t *testing.T) {
+// TestOnchainTradeRefusesAnUngovernedMint is a 409, not a 400: the mint was the
+// seller's choice and the buyer cannot correct it, so it is a conflict with
+// server state rather than a malformed request.
+func TestOnchainTradeRefusesAnUngovernedMint(t *testing.T) {
 	ctx := context.Background()
 	h, deps := onchainHarness(t)
 	h.svc.WithSettlement(*deps)
@@ -246,8 +296,8 @@ func TestOnchainTradeRefusesAnUnregisteredMint(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, err = h.svc.Create(ctx, buyerKey, offer.ID, domain.SettlementOnchain, "unlisted-1")
-	if !errors.Is(err, trade.ErrModeNotAccepted) {
-		t.Errorf("err = %v, want the unregistered mint refused", err)
+	if !errors.Is(err, trade.ErrMintUngoverned) {
+		t.Errorf("err = %v, want ErrMintUngoverned", err)
 	}
 }
 
@@ -585,4 +635,242 @@ func mustListRequests(t *testing.T, h harness, tradeID string) []domain.Settleme
 		t.Fatal(err)
 	}
 	return requests
+}
+
+// --- cluster identity ---
+
+// fakeMints is a mint verifier whose verdict the test chooses, so the three
+// outcomes can each be provoked without a chain that misbehaves on demand.
+type fakeMints struct {
+	err   error
+	calls int
+}
+
+func (f *fakeMints) Verify(context.Context, tokens.Token) error {
+	f.calls++
+	return f.err
+}
+
+func withMints(m *fakeMints) func(*trade.SettlementDeps) {
+	return func(d *trade.SettlementDeps) { d.Mints = m }
+}
+
+func withCluster(c cluster.Cluster) func(*trade.SettlementDeps) {
+	return func(d *trade.SettlementDeps) { d.Cluster = c }
+}
+
+func TestBuildSettlementRecordsTheClusterItWasCompiledFor(t *testing.T) {
+	ctx := context.Background()
+	h, deps := onchainHarness(t)
+	h.svc.WithSettlement(*deps)
+	tr := acceptedOnchainTrade(t, h)
+
+	request, err := h.svc.BuildSettlement(ctx, buyerKey, tr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Cluster != cluster.MainnetBeta {
+		t.Errorf("cluster = %q, want %q", request.Cluster, cluster.MainnetBeta)
+	}
+}
+
+// TestBuildSettlementVerifiesTheMintOnUse is the property that makes the boot
+// check insufficient on its own: a mint that stopped being that mint after
+// startup must not be used to compile a transaction.
+func TestBuildSettlementVerifiesTheMintOnUse(t *testing.T) {
+	ctx := context.Background()
+	mints := &fakeMints{}
+	h, deps := onchainHarness(t, withMints(mints))
+	h.svc.WithSettlement(*deps)
+	tr := acceptedOnchainTrade(t, h)
+
+	if _, err := h.svc.BuildSettlement(ctx, buyerKey, tr.ID); err != nil {
+		t.Fatal(err)
+	}
+	if mints.calls == 0 {
+		t.Error("the mint was not re-verified before the transaction was built")
+	}
+}
+
+func TestBuildSettlementRefusesAMintThatNoLongerHolds(t *testing.T) {
+	// A 409, not a 503: the token is not the one that was priced, and no amount
+	// of retrying changes that.
+	ctx := context.Background()
+	h, deps := onchainHarness(t, withMints(&fakeMints{err: settlement.ErrMintUnverified}))
+	h.svc.WithSettlement(*deps)
+	tr := acceptedOnchainTrade(t, h)
+
+	_, err := h.svc.BuildSettlement(ctx, buyerKey, tr.ID)
+	if !errors.Is(err, trade.ErrMintUngoverned) {
+		t.Errorf("err = %v, want ErrMintUngoverned", err)
+	}
+	if errors.Is(err, trade.ErrOnchainUnavailable) {
+		t.Error("a wrong mint must not be reported as a chain outage")
+	}
+}
+
+func TestBuildSettlementReportsAnUnreachableChainAsRetryable(t *testing.T) {
+	// The opposite case: nothing is known, so the caller should come back rather
+	// than conclude the token is wrong.
+	ctx := context.Background()
+	h, deps := onchainHarness(t, withMints(&fakeMints{err: settlement.ErrMintUnreachable}))
+	h.svc.WithSettlement(*deps)
+	tr := acceptedOnchainTrade(t, h)
+
+	_, err := h.svc.BuildSettlement(ctx, buyerKey, tr.ID)
+	if !errors.Is(err, trade.ErrOnchainUnavailable) {
+		t.Errorf("err = %v, want ErrOnchainUnavailable", err)
+	}
+	if errors.Is(err, trade.ErrMintUngoverned) {
+		t.Error("an unreachable chain must not be reported as an ungoverned mint")
+	}
+}
+
+func TestBuildSettlementRefusesWhenTheEndpointIsNotTheDeclaredCluster(t *testing.T) {
+	// A fixed URL can be repointed behind the process, so the identity is
+	// re-read on the request path rather than trusted from boot.
+	ctx := context.Background()
+	chain := &fakeChain{}
+	h, deps := onchainHarness(t, withChain(chain))
+	h.svc.WithSettlement(*deps)
+	tr := acceptedOnchainTrade(t, h)
+
+	// The endpoint now points at devnet while the service declares mainnet-beta.
+	chain.genesis = cluster.Devnet.GenesisHash()
+
+	_, err := h.svc.BuildSettlement(ctx, buyerKey, tr.ID)
+	if !errors.Is(err, trade.ErrOnchainUnavailable) {
+		t.Errorf("err = %v, want ErrOnchainUnavailable", err)
+	}
+	if chain.genesisCalls == 0 {
+		t.Error("the cluster identity was not re-checked on the request path")
+	}
+}
+
+func TestConfirmSettlementRefusesARequestIssuedForAnotherCluster(t *testing.T) {
+	// A request compiled against mainnet-beta mints is still in the table after
+	// the operator repoints at devnet. Its transaction names accounts that do
+	// not exist on the new chain, so honouring it here would either fail on
+	// chain or, worse, succeed against addresses nobody priced.
+	ctx := context.Background()
+	chain := (&fakeChain{}).add(landed().fetched, nil)
+	h, deps := onchainHarness(t, withChain(chain))
+	h.svc.WithSettlement(*deps)
+	tr := acceptedOnchainTrade(t, h)
+	if _, err := h.svc.BuildSettlement(ctx, buyerKey, tr.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Repoint the operator's configuration without touching the stored request.
+	// The endpoint now honestly reports devnet, so the identity re-check passes
+	// and the only thing standing between the request and execution is the
+	// cluster stamped on the request itself.
+	deps.Cluster = cluster.Devnet
+	deps.Genesis = &fakeChain{genesis: cluster.Devnet.GenesisHash()}
+	h.svc.WithSettlement(*deps)
+
+	_, _, err := h.svc.ConfirmSettlement(ctx, buyerKey, tr.ID, signature)
+	if !errors.Is(err, trade.ErrClusterMismatch) {
+		t.Errorf("err = %v, want ErrClusterMismatch", err)
+	}
+	// The refusal has to come before the chain is consulted. Polling first would
+	// report a signature this cluster has never seen as merely not-yet-visible,
+	// which is an outage the operator would go looking for on the wrong host.
+	if chain.calls != 0 {
+		t.Errorf("chain reads = %d, want 0: a request from another cluster must not be polled", chain.calls)
+	}
+	// And the signature must not be recorded, or the reconciliation worker would
+	// re-poll it every interval forever.
+	stored, err := h.svc.SettlementRequestFor(ctx, buyerKey, tr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Signature != "" {
+		t.Errorf("signature = %q, want it left unrecorded for a wrong-cluster request", stored.Signature)
+	}
+}
+
+func TestReconcilerRechecksTheClusterBeforeTouchingAnyTrade(t *testing.T) {
+	// A worker that keeps polling a repointed URL fetches "not found" for every
+	// pending signature and reports the whole backlog as still pending, which
+	// reads like chain congestion rather than a configuration fault.
+	ctx := context.Background()
+	chain := (&fakeChain{}).add(landed().fetched, nil)
+	h, _ := reconcilingHarness(t, withChain(chain))
+	pendingWithSignature(t, h)
+
+	// The endpoint now points at devnet while the service declares mainnet-beta.
+	chain.genesis = cluster.Devnet.GenesisHash()
+	before := chain.genesisCalls
+	if _, err := h.svc.ReconcileOutstanding(ctx, trade.ReconcilePolicy{Batch: 10}); err == nil {
+		t.Error("ReconcileOutstanding should report a repointed endpoint")
+	}
+	if chain.genesisCalls <= before {
+		t.Error("the reconciler did not re-read the cluster identity")
+	}
+}
+
+func TestReconcilerProceedsWhenTheClusterStillMatches(t *testing.T) {
+	ctx := context.Background()
+	chain := (&fakeChain{}).add(landed().fetched, nil)
+	h, _ := reconcilingHarness(t, withChain(chain))
+	pendingWithSignature(t, h)
+
+	stats, err := h.svc.ReconcileOutstanding(ctx, trade.ReconcilePolicy{Batch: 10})
+	if err != nil {
+		t.Fatalf("ReconcileOutstanding: %v", err)
+	}
+	if stats.Settled != 1 {
+		t.Errorf("stats = %+v, want the pending trade settled by the worker", stats)
+	}
+}
+
+func TestReconcilerWithdrawsARequestIssuedForAnotherClusterAndUnblocksTheTrade(t *testing.T) {
+	// The reconciliation worker runs unattended. Left to re-poll a mainnet-beta
+	// signature on a devnet process, it would spend one RPC call per interval per
+	// trade indefinitely, and every result would read as "not yet visible" — an
+	// operator would conclude the chain was congested.
+	ctx := context.Background()
+	chain := (&fakeChain{}).add(landed().fetched, nil)
+	h, deps := reconcilingHarness(t, withChain(chain))
+	tr := pendingWithSignature(t, h)
+
+	// The stored request still says mainnet-beta; the process now says devnet.
+	deps.Cluster = cluster.Devnet
+	deps.Genesis = &fakeChain{genesis: cluster.Devnet.GenesisHash()}
+	h.svc.WithSettlement(*deps)
+
+	stats, err := h.svc.ReconcileOutstanding(ctx, trade.ReconcilePolicy{Batch: 10})
+	if err != nil {
+		t.Fatalf("ReconcileOutstanding: %v", err)
+	}
+	if chain.calls != 0 {
+		t.Errorf("chain reads = %d, want 0: the worker must not poll another cluster's signature", chain.calls)
+	}
+	// Withdrawn, not settled and not disputed: the operator's configuration
+	// changed, which says nothing about the trade.
+	if stats.Settled != 0 || stats.Disputed != 0 {
+		t.Errorf("stats = %+v, want neither settled nor disputed", stats)
+	}
+	if stats.ExpiredClusterMismatch != 1 {
+		t.Errorf("stats = %+v, want one request expired for a cluster mismatch", stats)
+	}
+
+	// The trade stays pending — a human decides, not a code path — and the
+	// withdrawn request is what unblocks it: an issued request holds the trade's
+	// partial unique index, so leaving it would make every future request fail.
+	after, err := h.svc.Get(ctx, buyerKey, tr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != domain.TradeSettlementPending {
+		t.Errorf("state = %s, want the trade left pending for an operator to decide", after.State)
+	}
+	fresh, err := h.svc.BuildSettlement(ctx, buyerKey, tr.ID)
+	if err != nil {
+		t.Fatalf("a fresh request on the correct cluster must be possible: %v", err)
+	}
+	if fresh.Cluster != cluster.Devnet {
+		t.Errorf("cluster = %q, want the replacement request stamped devnet", fresh.Cluster)
+	}
 }

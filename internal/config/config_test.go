@@ -1,13 +1,13 @@
 package config
 
 import (
+	"errors"
 	"strings"
-
 	"testing"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/fees"
-	"github.com/douglasdemaio/vtessera/internal/settlement"
 )
 
 const goodSecret = "0123456789abcdef0123456789abcdef"
@@ -106,15 +106,13 @@ func TestBlockhashTTLComesFromTheEnvironment(t *testing.T) {
 	}
 }
 
-func TestUnparseableBlockhashTTLFallsBackToTheDefault(t *testing.T) {
-	// A typo must not stop the service from starting; the default is safe.
+func TestUnparseableBlockhashTTLIsRefusedRatherThanIgnored(t *testing.T) {
+	// A mistyped setting that silently falls back to the default is an operator
+	// who believes they set a window and did not. The default is safe, but
+	// knowing you did not choose it is the point, so this fails at boot.
 	t.Setenv("VTESSERA_BLOCKHASH_TTL", "ninety seconds")
-	cfg, err := Parse([]string{"-session-secret", goodSecret})
-	if err != nil {
-		t.Fatalf("err = %v, want a startable configuration", err)
-	}
-	if cfg.Solana.BlockhashTTL != settlement.DefaultBlockhashTTL {
-		t.Errorf("blockhashTtl = %s, want the default %s", cfg.Solana.BlockhashTTL, settlement.DefaultBlockhashTTL)
+	if _, err := Parse([]string{"-session-secret", goodSecret}); err == nil {
+		t.Fatal("err = nil, want a refusal naming the unparseable value")
 	}
 }
 
@@ -140,6 +138,7 @@ func TestSolanaConfigEnablesSettlement(t *testing.T) {
 	cfg, err := Parse([]string{
 		"-session-secret", strings.Repeat("a", 40),
 		"-rpc-url", "http://127.0.0.1:8899",
+		"-cluster", "localnet",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +156,11 @@ func TestSolanaConfigEnablesSettlement(t *testing.T) {
 }
 
 func TestSolanaConfigRejectsAnUnusableFeePolicy(t *testing.T) {
-	secret := []string{"-session-secret", strings.Repeat("a", 40), "-rpc-url", "http://127.0.0.1:8899"}
+	secret := []string{
+		"-session-secret", strings.Repeat("a", 40),
+		"-rpc-url", "http://127.0.0.1:8899",
+		"-cluster", "localnet",
+	}
 	cases := map[string][]string{
 		"zero fee":     {"-fee-lamports", "0"},
 		"bad wallet":   {"-fee-wallet", "not-a-solana-address"},
@@ -178,5 +181,92 @@ func TestSolanaConfigRejectsAZeroBlockhashTTL(t *testing.T) {
 		"-blockhash-ttl", "0s",
 	}); err == nil {
 		t.Error("expected a non-positive blockhash ttl to be refused")
+	}
+}
+
+func TestSolanaConfigRefusesAnEndpointWithoutACluster(t *testing.T) {
+	// The dangerous direction: an endpoint with no declared cluster. Inferring
+	// one from the URL would be exactly the guess this work exists to remove, so
+	// this fails at boot and names the missing setting.
+	_, err := Parse([]string{
+		"-session-secret", strings.Repeat("a", 40),
+		"-rpc-url", "https://api.devnet.solana.com",
+	})
+	if err == nil {
+		t.Fatal("err = nil, want a refusal naming the missing cluster")
+	}
+	if !strings.Contains(err.Error(), "VTESSERA_CLUSTER") {
+		t.Errorf("err = %v, want the message to name VTESSERA_CLUSTER", err)
+	}
+}
+
+func TestSolanaConfigRefusesAClusterWithoutAnEndpoint(t *testing.T) {
+	// The other direction is also refused: a declared cluster with no endpoint
+	// is a half-finished configuration, and starting would look like settlement
+	// was configured when it is not.
+	t.Setenv("VTESSERA_CLUSTER", "devnet")
+	if _, err := Parse([]string{"-session-secret", goodSecret}); err == nil {
+		t.Fatal("err = nil, want a refusal naming the missing endpoint")
+	}
+}
+
+func TestSolanaConfigRefusesTestnetAsUnsupported(t *testing.T) {
+	_, err := Parse([]string{
+		"-session-secret", strings.Repeat("a", 40),
+		"-rpc-url", "https://api.testnet.solana.com",
+		"-cluster", "testnet",
+	})
+	if err == nil {
+		t.Fatal("err = nil, want testnet refused as unsupported")
+	}
+	if !errors.Is(err, cluster.ErrClusterUnsupported) {
+		t.Errorf("err = %v, want cluster.ErrClusterUnsupported", err)
+	}
+}
+
+func TestLocalnetRejectsANonLoopbackEndpoint(t *testing.T) {
+	// A localnet cluster pointed at a public host is a misconfiguration that
+	// would otherwise be discovered by the operator reading a transfer.
+	_, err := Parse([]string{
+		"-session-secret", strings.Repeat("a", 40),
+		"-rpc-url", "https://api.devnet.solana.com",
+		"-cluster", "localnet",
+	})
+	if err == nil {
+		t.Fatal("err = nil, want localnet to refuse a public endpoint")
+	}
+}
+
+func TestMainnetSettlementRequiresAnExplicitAcknowledgement(t *testing.T) {
+	base := []string{
+		"-session-secret", strings.Repeat("a", 40),
+		"-rpc-url", "https://solana.publicnode.com/",
+		"-cluster", "mainnet-beta",
+	}
+	_, err := Parse(base)
+	if err == nil {
+		t.Fatal("err = nil, want mainnet-beta to require an explicit acknowledgement")
+	}
+	cfg, err := Parse(append(base, "-mainnet-ack", "1"))
+	if err != nil {
+		t.Fatalf("err = %v, want the acknowledged configuration to parse", err)
+	}
+	if cfg.Solana.Cluster != cluster.MainnetBeta {
+		t.Errorf("cluster = %q, want mainnet-beta", cfg.Solana.Cluster)
+	}
+	if !cfg.SettlementEnabled() {
+		t.Error("an acknowledged mainnet-beta endpoint should enable settlement")
+	}
+}
+
+func TestLocalnetMintsAreRefusedOffLocalnet(t *testing.T) {
+	_, err := Parse([]string{
+		"-session-secret", strings.Repeat("a", 40),
+		"-rpc-url", "https://api.devnet.solana.com",
+		"-cluster", "devnet",
+		"-localnet-mints", "TUSD:11111111111111111111111111111111:6",
+	})
+	if err == nil {
+		t.Fatal("err = nil, want localnet mints refused on devnet")
 	}
 }

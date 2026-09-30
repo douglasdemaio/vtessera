@@ -21,23 +21,52 @@ make build
 ./bin/vtessera --session-secret "$(openssl rand -hex 32)"
 ```
 
-On-chain settlement stays **off** until an RPC endpoint is configured, so a
-deployment without one refuses on-chain trades with `501 ONCHAIN_UNAVAILABLE`
-instead of half-handling them. Enable it with:
+On-chain settlement stays **off** until an RPC endpoint **and** a cluster are
+both configured, so a deployment without them refuses on-chain trades with
+`501 ONCHAIN_UNAVAILABLE` instead of half-handling them. Enable it with:
 
 ```sh
 ./bin/vtessera \
   --session-secret "$(openssl rand -hex 32)" \
-  --rpc-url http://127.0.0.1:8899 \
-  --fee-lamports 500000 \
-  --fee-wallet J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh \
-  --blockhash-ttl 90s
+  --cluster localnet \
+  --rpc-url http://127.0.0.1:8899
 ```
 
-The same settings read from the environment: `VTESSERA_RPC_URL`,
-`VTESSERA_FEE_LAMPORTS`, `VTESSERA_FEE_WALLET`, and `VTESSERA_BLOCKHASH_TTL`.
-The fee must be non-zero and paired with a valid Solana wallet; a half-configured
-fee is a startup error rather than a silent default.
+The same settings read from the environment: `VTESSERA_CLUSTER`,
+`VTESSERA_RPC_URL`, `VTESSERA_BLOCKHASH_TTL`, and, for localnet only,
+`VTESSERA_LOCALNET_MINTS` and `VTESSERA_LOCALNET_ALLOW_HOST`.
+
+`--cluster` is one of `mainnet-beta`, `devnet` or `localnet`, and it is
+**required** alongside the endpoint. Naming the cluster is the point: a fixed
+URL can be repointed at another chain behind the process, and a service that
+guessed its cluster from the URL would have no way to notice. `testnet` is
+recognised and refused as unsupported.
+
+At boot the service verifies the endpoint against the declared cluster before
+serving: it re-reads the genesis hash, and for every governed mint it checks the
+account exists, is owned by the SPL Token program, is initialized, and reports
+the pinned decimals and authorities. A failure is a refusal to start, not a
+warning. The identity is re-checked on every settlement request and on every
+reconciler tick, so a URL repointed at runtime is caught rather than honoured.
+
+Check a cluster without starting the service — this opens no database and
+creates no signing key, so it is safe to point at a host you are only
+inspecting:
+
+```sh
+make preflight-live CLUSTER=devnet
+make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana.publicnode.com/
+```
+
+`mainnet-beta` additionally requires `--mainnet-ack 1` (`VTESSERA_MAINNET_ACK=1`),
+because settlement there moves real value. Fee overrides are rejected on both
+public clusters: the fee is fixed at 1000 lamports, which is far enough above
+zero to bind a settlement to a signature and far below the 650,240 lamport rent
+exemption that made the previous 500,000 default fail on an unfunded wallet.
+
+`localnet` accepts only loopback endpoints unless `--localnet-allow-host` is
+given, and governs only the mints you declare in `--localnet-mints`. The public
+governed set cannot be widened by configuration.
 
 Set `--public-base-url` (`VTESSERA_PUBLIC_BASE_URL`) to the externally reachable
 origin. The agent card advertises it as the gateway's own `url` and derives a
@@ -87,6 +116,7 @@ make smoke  # drives a real vtessera process with real Ed25519 keys
 - **Stablecoins at launch** — USDC and EURC (SPL tokens). Additional established stablecoins are added through the token registry, published at `GET /v1/tokens`.
 - **Atomic trades** — every settlement transaction contains the stablecoin transfer, a trade memo, and the service fee in a single transaction, so a trade and its fee can never be separated.
 - **The agent ID is the wallet** — an on-chain trade requires both agent IDs to be Solana public keys, and the buyer must control the one that pays.
+- **Cluster-aware and fail-closed** — the chain is named in configuration and verified against the endpoint at boot, on every request, and on every reconciler tick. A receipt, a settlement request, and `GET /v1/tokens` all name the cluster they belong to.
 
 ### The settlement API
 
@@ -109,6 +139,20 @@ ways, and never a fourth:
 | Signature not visible on chain yet | `202 SETTLEMENT_PENDING` | `settlement_pending` |
 | Landed, but not the agreed transaction | `409 SETTLEMENT_MISMATCH` | `disputed`, no tessera |
 
+A refusal to settle comes in two kinds, because they need different responses:
+
+| Code | Status | Means |
+| --- | --- | --- |
+| `ONCHAIN_UNAVAILABLE` | `501` | No cluster is configured here. Retrying cannot help. |
+| `ONCHAIN_UNAVAILABLE` | `503` | A cluster is configured and could not be reached or verified. Retrying may help. |
+| `MINT_UNGOVERNED` | `409` | The offer is priced in a token this service does not govern, or the token on chain is not the one priced. |
+| `CLUSTER_MISMATCH` | `409` | The request was compiled for a different cluster than the one now running. |
+
+The status carries the difference between "switched off" and "temporarily
+unavailable", which a shared code would otherwise erase. `CLUSTER_MISMATCH`
+leaves the trade untouched and the reconciler subsequently withdraws the request,
+so the buyer can request a fresh one on the correct chain.
+
 Only the chain proves settlement. A signature that is merely unknown is *not* a
 mismatch, so it stays pending and a background reconciler re-polls until it lands.
 A transaction that failed on chain expires its request so the buyer can request a
@@ -123,7 +167,7 @@ memo is a dispute.
 
 Using the marketplace is **free** for agents that stay off-chain: discovery, negotiation, and off-chain trade records carry no charge.
 
-Trades that settle on-chain include a flat **0.0005 SOL** service fee, transferred as an instruction inside the same atomic settlement transaction to the service wallet:
+Trades that settle on-chain include a flat **0.000001 SOL (1000 lamports)** service fee, transferred as an instruction inside the same atomic settlement transaction to the service wallet:
 
 ```
 J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh
@@ -139,7 +183,7 @@ Note what that does not do. The chain has no knowledge of the fee policy, so a b
 2. **Negotiate** — The agents exchange a trade proposal over A2A and agree on terms: what's exchanged, price, currency, and settlement mode.
 3. **Choose settlement** —
    - *Off-chain* (free): the trade is recorded in the marketplace ledger and both agents receive a signed virtual tessera.
-   - *On-chain*: the service builds an unsigned Solana transaction — stablecoin transfer + `0.0005 SOL` fee + trade memo — for the paying agent to sign and submit.
+   - *On-chain*: the service builds an unsigned Solana transaction — stablecoin transfer + `0.000001 SOL` fee + trade memo — for the paying agent to sign and submit.
 4. **Record** — On-chain trades are verified against the submitted signature and linked to the trade record; the tessera references the Solana transaction signature as permanent proof.
 
 ## Architecture
@@ -150,9 +194,16 @@ vtessera is a Go webservice composed of: an AGP-enabled A2A protocol gateway, an
 
 **Live at [`https://vtessera.fly.dev`](https://vtessera.fly.dev)** since
 2026-09-29: one Fly machine, a 1 GB encrypted volume at `/data`, five daily
-volume snapshots, and on-chain settlement refused with `501` because the service
-cannot yet verify its cluster. The marketplace has no registered agents, so
-every public count is zero.
+volume snapshots, and on-chain settlement refused with `501`. The service now
+*can* verify its cluster, and still refuses: `VTESSERA_RPC_URL` is unset, so it
+has no chain to verify and declines to settle on one. The marketplace has no
+registered agents, so every public count is zero.
+
+Turning settlement on against mainnet-beta is a deliberate deploy decision, not
+a default: set `VTESSERA_CLUSTER`, `VTESSERA_RPC_URL` and `VTESSERA_MAINNET_ACK`,
+run `make preflight-live` first, and read the report. The signing key on the
+volume is the marketplace's identity and cannot be replaced without invalidating
+every tessera already issued.
 
 The service ships as a container image with no runtime dependencies:
 
@@ -180,4 +231,18 @@ Phase 2 implemented and tested: non-custodial Solana settlement, with the unsign
 transaction builder, exact canonical verifier, request persistence, the
 reconciliation worker, the governed token and fee policies, and the HTTP surface.
 The full settlement path is exercised end to end against a real validator by
-`make test-solana`. Logos: [`logo.svg`](logo.svg) (source), [`logo.png`](logo.png) (rendered).
+`make test-solana`.
+
+Phase 3 implemented and tested: cluster-aware settlement. The cluster is named in
+configuration and verified against the endpoint at boot, on every request and on
+every reconciler tick; a settlement request and a receipt both carry the cluster
+they belong to; the governed mint table is per-cluster and asserted against a
+recorded snapshot in `internal/tokens/testdata`; the fee default moved to 1000
+lamports; and the lookalike EURC address that cost Phase 2 its liveness is gone.
+`make preflight-live` runs the verification by hand against a real cluster.
+
+Known limitation, unchanged: settlement is still **not** enabled in the live
+deployment. `VTESSERA_RPC_URL` is unset there, so on-chain trades are refused
+with `501` — correct, not an accident.
+
+Logos: [`logo.svg`](logo.svg) (source), [`logo.png`](logo.png) (rendered).

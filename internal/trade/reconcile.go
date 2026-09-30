@@ -55,6 +55,12 @@ type ReconcileStats struct {
 	Disputed int
 	Expired  int
 	Pending  int
+	// ExpiredClusterMismatch counts requests withdrawn because they were
+	// compiled for a cluster this process is not running. It is reported
+	// separately from Expired because it is not an ordinary timeout: it means
+	// the operator repointed the service, and the count is how they see that
+	// the backlog they inherited belongs to another chain.
+	ExpiredClusterMismatch int
 }
 
 // ReconcileOutstanding drives one pass over trades awaiting an on-chain verdict.
@@ -69,6 +75,14 @@ func (s *Service) ReconcileOutstanding(ctx context.Context, policy ReconcilePoli
 	}
 	trades, err := s.settlement.TradeList.TradesInState(ctx, domain.TradeSettlementPending)
 	if err != nil {
+		return stats, err
+	}
+	// Re-read the endpoint's identity once per pass, before touching any trade.
+	// A worker that keeps polling a URL that now points somewhere else is worse
+	// than idle: it would fetch a "transaction not found" for every pending
+	// signature and report the whole backlog as still pending, which reads like
+	// chain congestion rather than a configuration fault.
+	if err := s.settlement.CheckCluster(ctx); err != nil {
 		return stats, err
 	}
 	limit := policy.batch()
@@ -90,6 +104,9 @@ func (s *Service) ReconcileOutstanding(ctx context.Context, policy ReconcilePoli
 			stats.Disputed++
 		case reconcileExpired:
 			stats.Expired++
+		case reconcileExpiredClusterMismatch:
+			stats.Expired++
+			stats.ExpiredClusterMismatch++
 		default:
 			stats.Pending++
 		}
@@ -123,6 +140,9 @@ const (
 	reconcileSettled
 	reconcileDisputed
 	reconcileExpired
+	// reconcileExpiredClusterMismatch is counted apart from reconcileExpired so
+	// the reason a request was withdrawn survives into the pass report.
+	reconcileExpiredClusterMismatch
 )
 
 // reconcileTrade settles one trade if its recorded signature has landed. It is
@@ -139,6 +159,22 @@ func (s *Service) reconcileTrade(ctx context.Context, tr domain.Trade) (reconcil
 	signed, ok := latestSignedRequest(requests)
 	if !ok {
 		return reconcilePending, nil
+	}
+	// Withdraw a request built for another cluster instead of polling for it.
+	// The pass already re-read the endpoint's identity, so this is about the
+	// trade's own history rather than the URL. Expiring rather than skipping is
+	// what unblocks the buyer: an issued request holds the trade's partial
+	// unique index, so leaving it in place means a fresh request on the correct
+	// cluster is rejected forever. The trade itself stays pending and a human
+	// decides, but the buyer is not left with a permanently stuck trade.
+	if err := s.checkRequestCluster(requests, signed.ID); err != nil {
+		if !errors.Is(err, ErrClusterMismatch) {
+			return reconcilePending, err
+		}
+		if err := s.settlement.Store.ExpireSettlementRequests(ctx, tr.ID, s.now().UTC()); err != nil {
+			return reconcilePending, err
+		}
+		return reconcileExpiredClusterMismatch, nil
 	}
 	sig, err := solana.SignatureFromBase58(signed.Signature)
 	if err != nil {
@@ -188,6 +224,9 @@ func latestSignedRequest(requests []domain.SettlementRequest) (domain.Settlement
 // the other. currentID names the request that carried the signature.
 func (s *Service) settleFetched(ctx context.Context, tr domain.Trade, requests []domain.SettlementRequest, currentID string, sig solana.Signature, fetched settlement.Fetched) (domain.Trade, domain.Receipt, error) {
 	actor := tr.BuyerAgentID
+	if err := s.checkRequestCluster(requests, currentID); err != nil {
+		return domain.Trade{}, domain.Receipt{}, err
+	}
 	if fetched.ExecErr != nil {
 		if err := s.settlement.Store.ExpireSettlementRequests(ctx, tr.ID, s.now().UTC()); err != nil {
 			return domain.Trade{}, domain.Receipt{}, err
@@ -215,7 +254,7 @@ func (s *Service) settleFetched(ctx context.Context, tr domain.Trade, requests [
 	if err != nil {
 		return domain.Trade{}, domain.Receipt{}, err
 	}
-	receipt, err := s.ledger.Record(ctx, settled, sig.String())
+	receipt, err := s.ledger.Record(ctx, settled, sig.String(), string(s.settlement.Cluster))
 	if err != nil {
 		return domain.Trade{}, domain.Receipt{}, err
 	}
@@ -223,6 +262,44 @@ func (s *Service) settleFetched(ctx context.Context, tr domain.Trade, requests [
 		return settled, receipt, err
 	}
 	return settled, receipt, nil
+}
+
+// checkRequestCluster refuses to honour a request that was not compiled for the
+// cluster this process is running.
+//
+// The trade's history can predate the current configuration: a request issued
+// while the operator pointed at devnet is still in the table after they repoint
+// at mainnet, and its unsigned transaction names devrent-minted ATAs that do not
+// exist on mainnet-beta. Executing or settling it here would either fail on chain
+// or, worse, succeed against addresses nobody priced. A `pre-phase-3` request
+// predates the column and is refused for the same reason, more bluntly: nothing
+// recorded which cluster it was built for, so nothing can vouch for it.
+func (s *Service) checkRequestCluster(requests []domain.SettlementRequest, currentID string) error {
+	if s.settlement.Cluster == "" {
+		return nil
+	}
+	// An empty currentID means the caller could not identify a current request,
+	// which happens only on a trade with no request at all. The verifier then
+	// finds nothing to match and disputes, which is already the safe answer.
+	if currentID == "" {
+		return nil
+	}
+	want := s.settlement.Cluster
+	for _, request := range requests {
+		if request.ID != currentID {
+			continue
+		}
+		if request.Cluster == domain.PrePhase3Cluster {
+			return fmt.Errorf("%w: request %s predates cluster awareness and cannot be attributed to %s",
+				ErrClusterMismatch, request.ID, want)
+		}
+		if request.Cluster != want {
+			return fmt.Errorf("%w: request %s was issued for %s, this process runs %s",
+				ErrClusterMismatch, request.ID, request.Cluster, want)
+		}
+		return nil
+	}
+	return nil
 }
 
 // confirmRequests marks the request that carried this signature as confirmed and

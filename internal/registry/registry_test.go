@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/agp"
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/store"
@@ -29,7 +30,20 @@ func newService(t *testing.T) *registry.Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return registry.New(db)
+	return registry.New(db, mainnetMints(t))
+}
+
+// mainnetMints is the governed set these tests run against. It is built from
+// the production table rather than a fixture, because the registry's job is to
+// enforce that table: a fixture would let the tests pass while the real
+// governed set said something different.
+func mainnetMints(t *testing.T) tokens.Registry {
+	t.Helper()
+	mints, err := tokens.ForCluster(cluster.MainnetBeta)
+	if err != nil {
+		t.Fatalf("governed mints: %v", err)
+	}
+	return mints
 }
 
 func card(name string) domain.AgentCard {
@@ -355,7 +369,7 @@ func TestAgentsFiltersByStatusAndDefaultsToActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	svc := registry.New(db)
+	svc := registry.New(db, mainnetMints(t))
 	for _, id := range []string{aliceKey, bobKey} {
 		if _, _, err := svc.Register(ctx, id, card(id)); err != nil {
 			t.Fatal(err)
@@ -416,11 +430,11 @@ func TestWithMintsGovernsOnchainPrecisionCheck(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	const testMint = "11111111111111111111111111111111"
-	mints, err := tokens.New([]tokens.Token{{Address: testMint, Symbol: "TEST", Decimals: 2, Enabled: true}})
+	mints, err := tokens.New(cluster.Localnet, []tokens.Token{{Address: testMint, Symbol: "TEST", Decimals: 2, Enabled: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := registry.New(db, registry.WithMints(mints))
+	svc := registry.New(db, mints)
 	withCurrencies := card("alice")
 	withCurrencies.Currencies = []string{testMint}
 	if _, _, err := svc.Register(ctx, aliceKey, withCurrencies); err != nil {

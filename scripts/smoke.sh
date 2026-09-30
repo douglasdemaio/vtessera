@@ -7,9 +7,14 @@ PORT="${PORT:-18080}"
 BASE="http://127.0.0.1:${PORT}"
 WORKDIR="$(mktemp -d)"
 SECRET="0123456789abcdef0123456789abcdef"
-# Set SMOKE_RPC_URL to a Solana test validator to also smoke the on-chain path.
-# Without it, the run proves on-chain trades are refused rather than mishandled.
-export SMOKE_RPC_URL="${SMOKE_RPC_URL:-}"
+# SMOKE_RPC_URL is deliberately not supported. Enabling on-chain settlement needs
+# a fee wallet funded above the rent-exempt minimum and at least one governed
+# mint that actually exists on the chain being pointed at; a fresh local validator
+# has neither, and preflight now refuses to start without both. Rather than
+# provision a mint here, the on-chain path is covered by make test-solana, which
+# does exactly that setup. Without an endpoint, this run proves the property that
+# matters for a default deployment: on-chain trades are refused, not mishandled.
+export SMOKE_RPC_URL=""
 AGP_URI="https://github.com/a2aproject/a2a-samples/tree/main/extensions/agp"
 
 cleanup() {
@@ -26,7 +31,6 @@ ok()   { echo "  ok $*"; }
   --db "${WORKDIR}/smoke.db" \
   --signer-key "${WORKDIR}/signer.key" \
   --session-secret "${SECRET}" \
-  ${SMOKE_RPC_URL:+--rpc-url "${SMOKE_RPC_URL}"} \
   >"${WORKDIR}/server.log" 2>&1 &
 SERVER_PID=$!
 
@@ -48,6 +52,7 @@ import base64, json, os, subprocess, sys, tempfile, urllib.error, urllib.request
 
 base, workdir = sys.argv[1], sys.argv[2]
 rpc_url = os.environ.get("SMOKE_RPC_URL", "")
+cluster = os.environ.get("SMOKE_CLUSTER", "")
 usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
@@ -204,7 +209,12 @@ if rpc_url:
     listed = {token["address"]: token for token in tokens["tokens"]}
     assert usdc in listed, tokens
     assert listed[usdc]["decimals"] == 6, tokens
-    assert tokens["settlementFee"]["lamports"] == 500000, tokens
+    # A mint address names an account on one chain, so the list has to say which
+    # chain it is describing or it reintroduces the ambiguity the cluster work
+    # exists to remove.
+    assert tokens["cluster"] == cluster, tokens
+    assert all(t["cluster"] == cluster for t in tokens["tokens"]), tokens
+    assert tokens["settlementFee"]["lamports"] == 1000, tokens
     assert tokens["settlementFee"]["payer"] == "buyer", tokens
     print("  ok governed tokens and the exact buyer-paid fee are published")
 

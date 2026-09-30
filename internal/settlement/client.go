@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/preflight"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
@@ -38,6 +39,10 @@ type Client interface {
 }
 
 // RPCClient adapts a solana-go JSON-RPC client to Client.
+//
+// It also satisfies preflight.RPC, so one endpoint stays one client with one
+// timeout. A second connection to the same node would be a second thing to
+// configure and a second thing to rate-limit against.
 type RPCClient struct {
 	inner *rpc.Client
 }
@@ -99,4 +104,65 @@ func (c *RPCClient) Transaction(ctx context.Context, sig solana.Signature) (Fetc
 		fetched.ExecErr = fmt.Errorf("transaction %s failed on chain: %v", sig, res.Meta.Err)
 	}
 	return fetched, nil
+}
+
+// GetGenesisHash reports the node's chain identity. It is the one call that
+// turns a URL into a cluster, and the reconciler re-reads it every tick because
+// a proxy behind a fixed URL can repoint without a restart.
+func (c *RPCClient) GetGenesisHash(ctx context.Context) (string, error) {
+	hash, err := c.inner.GetGenesisHash(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get genesis hash: %w", err)
+	}
+	return hash.String(), nil
+}
+
+// GetAccountInfo reads an account. A missing account is an answer, not a
+// failure: callers distinguish Exists false from a transport error, because
+// conflating them turns a rate-limited request into a spurious "wrong mint".
+func (c *RPCClient) GetAccountInfo(ctx context.Context, account solana.PublicKey) (preflight.AccountInfo, error) {
+	res, err := c.inner.GetAccountInfoWithOpts(ctx, account, &rpc.GetAccountInfoOpts{
+		Commitment: rpc.CommitmentConfirmed,
+		Encoding:   solana.EncodingBase64,
+	})
+	if err != nil {
+		if errors.Is(err, rpc.ErrNotFound) {
+			return preflight.AccountInfo{}, nil
+		}
+		return preflight.AccountInfo{}, fmt.Errorf("get account info: %w", err)
+	}
+	if res == nil || res.Value == nil {
+		return preflight.AccountInfo{}, nil
+	}
+	return preflight.AccountInfo{
+		Owner:  res.Value.Owner,
+		Data:   res.Value.Data.GetBinary(),
+		Exists: true,
+	}, nil
+}
+
+// GetBalance reads a lamport balance.
+func (c *RPCClient) GetBalance(ctx context.Context, account solana.PublicKey) (uint64, error) {
+	res, err := c.inner.GetBalance(ctx, account, rpc.CommitmentFinalized)
+	if err != nil {
+		return 0, fmt.Errorf("get balance: %w", err)
+	}
+	if res == nil {
+		return 0, errors.New("get balance: empty response")
+	}
+	return res.Value, nil
+}
+
+// GetMinimumBalanceForRentExemption reports the lamports an account of this size
+// needs to exist rent-exempt.
+//
+// It is queried, never hardcoded, and that is not tidiness: the same call
+// returns 650,240 on mainnet-beta and 890,880 on a local validator, so a
+// constant would be wrong in one of those places by a third.
+func (c *RPCClient) GetMinimumBalanceForRentExemption(ctx context.Context, dataLen uint64) (uint64, error) {
+	amount, err := c.inner.GetMinimumBalanceForRentExemption(ctx, dataLen, rpc.CommitmentFinalized)
+	if err != nil {
+		return 0, fmt.Errorf("get minimum balance for rent exemption: %w", err)
+	}
+	return amount, nil
 }

@@ -44,15 +44,17 @@ type Service struct {
 // Option configures the service.
 type Option func(*Service)
 
-// WithMints supplies the governed token registry. The same registry governs
-// settlement, so an agent can never advertise a currency the service would
-// refuse to settle in.
-func WithMints(mints tokens.Registry) Option {
-	return func(s *Service) { s.mints = mints }
-}
-
-func New(store Store, opts ...Option) *Service {
-	s := &Service{store: store, mints: tokens.Default(), now: func() time.Time { return time.Now().UTC() }}
+// New builds the service over a governed mint registry. The registry is a
+// required argument rather than a defaulted one: a service that silently assumes
+// a token set has no way to be correct about a cluster it was never told, and
+// the assumption is invisible from the call site.
+//
+// Pass nil for a deployment with on-chain settlement unconfigured. Every mint is
+// then unknown, which means the service declines to check price precision
+// against a scale it does not govern — the honest answer when there is no
+// cluster to take a scale from.
+func New(store Store, mints tokens.Registry, opts ...Option) *Service {
+	s := &Service{store: store, mints: mints, now: func() time.Time { return time.Now().UTC() }}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -61,7 +63,11 @@ func New(store Store, opts ...Option) *Service {
 
 // mintInfo describes a mint through the governed registry, never through a
 // hardcoded table: token identity is by address, and a symbol is decoration.
+// A deployment with no governed registry knows no scale, and says so.
 func (s *Service) mintInfo(address string) domain.MintInfo {
+	if s.mints == nil {
+		return domain.MintInfo{Address: address}
+	}
 	if entry, ok := s.mints.Lookup(address); ok {
 		return entry.MintInfo()
 	}

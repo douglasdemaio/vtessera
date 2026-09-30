@@ -94,6 +94,16 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload := map[string]any{"tokens": s.tokens.List()}
+	// The cluster travels with the list. A mint address names an account on a
+	// particular chain, so a bare address list is exactly the ambiguity this
+	// work exists to remove, and a caller that read it without the cluster would
+	// be back to guessing.
+	if c := s.tokens.Cluster(); c != "" {
+		payload["cluster"] = string(c)
+	}
+	if s.genesis != "" {
+		payload["genesisHash"] = s.genesis
+	}
 	if fee, ok := s.trades.SettlementFee(); ok {
 		payload["settlementFee"] = map[string]any{
 			"lamports":    fee.Lamports(),
