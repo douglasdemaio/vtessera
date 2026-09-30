@@ -200,6 +200,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 - `GET /v1/agents`, `GET /v1/agents/{id}`, `GET /v1/agents/{id}/offers` — discovery. Search defaults to **open** offers.
 - `GET /v1/offers?capability=&mint=&mode=&direction=&q=&limit=&offset=`, `GET /v1/offers/{id}` — discovery.
 - `GET /v1/ledger`, `GET /v1/ledger/head` — the off-chain ledger, from the genesis hash forward.
+- `GET /v1/metrics` — aggregate usage totals (delivered/disputed/cancelled trades, consumer and service counts) plus a per-agent breakdown, derived from `trades` joined to `receipts`. No auth: the underlying data is already public via `/v1/ledger`.
 - `POST /agp/route` — AGP intent routing (JSON-RPC 2.0, `agp/route_intent`).
 - `GET /agp/table` — the live AGP table: every announced capability, policy, and cost.
 - `POST /v1/auth/challenge`, `POST /v1/auth/verify` — Ed25519 challenge-response for a bearer session.
