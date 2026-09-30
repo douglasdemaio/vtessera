@@ -11,6 +11,7 @@ import (
 
 	"github.com/douglasdemaio/vtessera/internal/agp"
 	"github.com/douglasdemaio/vtessera/internal/auth"
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/ledger"
 	"github.com/douglasdemaio/vtessera/internal/registry"
@@ -36,6 +37,11 @@ type Server struct {
 	version       string
 	publicBaseURL string
 	agentCardBody map[string]any
+	// cluster and genesis are the chain this deployment settles on, reported by
+	// /healthz. Both are empty when settlement is unconfigured, which is the
+	// correct state for the live deployment rather than a missing field.
+	cluster cluster.Cluster
+	genesis string
 }
 
 type Options struct {
@@ -43,9 +49,16 @@ type Options struct {
 	Trades   *trade.Service
 	Auth     *auth.Service
 	Ledger   *ledger.Ledger
-	// Tokens is the governed mint allowlist published by GET /v1/tokens.
+	// Tokens is the governed mint allowlist published by GET /v1/tokens. It is
+	// nil for a deployment with settlement unconfigured, in which case the route
+	// reports that rather than inventing an empty governed set.
 	Tokens  tokens.Registry
 	Version string
+	// Cluster is the chain this deployment settles against, and GenesisHash the
+	// identity verified at boot. Both are reported by /healthz so a caller can
+	// see which chain a tessera will refer to.
+	Cluster     cluster.Cluster
+	GenesisHash string
 	// PublicBaseURL is the externally reachable origin, advertised in the agent
 	// card as the gateway's own URL. An agent reads that field to decide where
 	// to send its requests, so a placeholder here sends it nowhere. When it is
@@ -63,6 +76,8 @@ func New(opts Options) *Server {
 		ledger:        opts.Ledger,
 		tokens:        opts.Tokens,
 		version:       opts.Version,
+		cluster:       opts.Cluster,
+		genesis:       opts.GenesisHash,
 		publicBaseURL: strings.TrimRight(opts.PublicBaseURL, "/"),
 		mux:           http.NewServeMux(),
 	}
@@ -169,7 +184,11 @@ func (s *Server) buildAgentCard() map[string]any {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	// cluster and genesis are the chain identity a caller needs before trusting
+	// a tessera: a signature alone does not say which chain settled it, so a
+	// deployment that settles on mainnet-beta and one that settles on devnet
+	// would otherwise look identical from outside.
+	body := map[string]any{
 		"status":          "ok",
 		"version":         s.version,
 		"verificationKey": s.ledger.VerificationKey(),
@@ -177,7 +196,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"version":   agp.Version,
 			"extension": agp.ExtensionURI,
 		},
-	})
+	}
+	if s.cluster != "" {
+		body["cluster"] = string(s.cluster)
+	}
+	if s.genesis != "" {
+		body["genesisHash"] = s.genesis
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
@@ -647,7 +673,17 @@ var statusByError = []struct {
 	{trade.ErrOfferUnavailable, http.StatusConflict, "INVALID_REQUEST"},
 	{trade.ErrModeNotAccepted, http.StatusBadRequest, "INVALID_REQUEST"},
 	{trade.ErrAgentUnavailable, http.StatusConflict, "INVALID_REQUEST"},
-	{trade.ErrOnchainUnavailable, http.StatusNotImplemented, "ONCHAIN_UNAVAILABLE"},
+	// Two refusals that share a code but not a meaning. An unconfigured
+	// deployment is a 501 because the feature is not switched on there and
+	// retrying will not change that; an unreachable chain is a 503 with retry
+	// semantics. Merging them would tell an operator to fix their configuration
+	// during a network outage.
+	{trade.ErrSettlementUnconfigured, http.StatusNotImplemented, "ONCHAIN_UNAVAILABLE"},
+	{trade.ErrOnchainUnavailable, http.StatusServiceUnavailable, "ONCHAIN_UNAVAILABLE"},
+	// A 409 rather than a 400: the mint was the seller's choice, the buyer
+	// cannot correct it, and the fix is a governance or configuration decision.
+	{trade.ErrMintUngoverned, http.StatusConflict, "MINT_UNGOVERNED"},
+	{trade.ErrClusterMismatch, http.StatusConflict, "CLUSTER_MISMATCH"},
 	{trade.ErrNotBuyer, http.StatusForbidden, "FORBIDDEN"},
 	{trade.ErrNotOnchain, http.StatusConflict, "NOT_ONCHAIN"},
 	{trade.ErrSettlementLive, http.StatusConflict, "SETTLEMENT_IN_PROGRESS"},
@@ -655,6 +691,8 @@ var statusByError = []struct {
 	{trade.ErrSettlementPending, http.StatusAccepted, "SETTLEMENT_PENDING"},
 	{trade.ErrInvalidSignature, http.StatusBadRequest, "INVALID_SIGNATURE"},
 	{settlement.ErrMismatch, http.StatusConflict, "SETTLEMENT_MISMATCH"},
+	{settlement.ErrMintUnverified, http.StatusConflict, "MINT_UNGOVERNED"},
+	{settlement.ErrMintUnreachable, http.StatusServiceUnavailable, "ONCHAIN_UNAVAILABLE"},
 	{auth.ErrSessionInvalid, http.StatusUnauthorized, "UNAUTHORIZED"},
 	{auth.ErrInvalidSignature, http.StatusUnauthorized, "UNAUTHORIZED"},
 	{auth.ErrSecretTooShort, http.StatusInternalServerError, "INVALID_REQUEST"},

@@ -155,6 +155,14 @@ Consequences: any trade priced in the governed "EURC" can never settle, and ever
 > updated in the same change. The rest of this section stands as written, as the
 > record of what Phase 2 shipped.
 
+> **Resolved in Phase 3 (2026-09-30).** The lookalike is gone from all
+> non-test source and is asserted absent by
+> `TestTheLookalikeEURCAddressAppearsInNoGovernedSet`. The governed table is
+> additionally pinned to `internal/tokens/testdata/governed-mints.json`, a
+> snapshot of what `make preflight-live` actually read from the chain, so the
+> next transcription error is caught by a test rather than by a deploy. Both
+> public clusters verify clean as of 2026-09-30.
+
 **Root cause.** A 30-character matching prefix cannot be the product of vanity-address grinding — that is computationally infeasible at this length. The value is therefore a transcription or generation error, not an attack. That distinction matters for two reasons:
 
 - **Impact is liveness, not safety.** No private key exists for the bogus address, so nobody — including an attacker — can create a token there. The realistic outcome is unsettled trades, not a spoofed asset being accepted. Anyone treating this as a security incident would be over-reading it.
@@ -221,13 +229,13 @@ An unparseable value falls back to the default rather than failing startup. Defe
 
 So enforcement works exactly as specified and is worth having. What was overstated was the claim around it — "cannot be removed without invalidating the settlement", repeated in `internal/fees/fees.go`, `README.md`, and spec §6.1. Read literally, it says removal is impossible; what is true is that removal makes the settlement unrecognisable to this service, which is a weaker and more dangerous guarantee to advertise than it appears. Enforcement deters, it does not prevent, and the party carrying the risk is the buyer.
 
-**Not fixed here, and not fixable without changing the custody model.** Escrow or a split transfer is the only mechanism-level answer, and §1 lists escrow as out of scope. What was done instead is to correct the wording in all three places and state the exposure plainly, so nobody builds a client that assumes a stripped fee costs them nothing. Phase 3 changes the fee default from `500000` to `1000` lamports, which lowers the amount at risk but not who bears it.
+**Not fixed here, and not fixable without changing the custody model.** Escrow or a split transfer is the only mechanism-level answer, and §1 lists escrow as out of scope. What was done instead is to correct the wording in all three places and state the exposure plainly, so nobody builds a client that assumes a stripped fee costs them nothing. Phase 3 changed the fee default from `500000` to `1000` lamports, which lowers the amount at risk but not who bears it. Nothing about the fee being a deterrent rather than a mechanism changed, and the fee is still read off the node rather than hardcoded.
 
 ## 8. Explicitly not done
 
 | Gap | Status |
 |---|---|
-| Mainnet readiness | No cluster concept, no endpoint pinning, no mint verification against the chain. §7.1–7.3. **Owned by Phase 3.** |
+| Mainnet readiness | No cluster concept, no endpoint pinning, no mint verification against the chain. §7.1–7.3. **Owned by Phase 3 — landed 2026-09-30**, see the Phase 3 design and `README.md`. The cluster is now named in configuration and verified at boot, per request and per reconciler tick; §7.1 (the lookalike mint) and §7.2 (the fee default) are fixed. |
 | A2A `tasks/*` lifecycle and conformance | **Unassigned — at risk of drifting indefinitely.** Deferred from Phase 1 to Phase 2, not picked up, deferred again by Phase 3. It has now slipped twice and needs a named owner and target phase before it is deferred a third time. Recommendation: a standalone Phase 4 spec, since it is independent of the Solana work and of the Postgres work. |
 | Postgres store | SQLite only, via `modernc.org/sqlite`. Parent spec §11 promises Postgres for production. Unassigned. |
 | Token-registry governance | No admin surface, no audit trail. Adding a stablecoin is a code edit. Named in Phase 3 §12.6 as the phase that will carry the per-entry program field; the governance design itself is unwritten. |

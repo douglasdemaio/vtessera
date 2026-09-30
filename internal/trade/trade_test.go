@@ -9,10 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/ledger"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/store"
+	"github.com/douglasdemaio/vtessera/internal/tokens"
 	"github.com/douglasdemaio/vtessera/internal/trade"
 )
 
@@ -54,7 +56,14 @@ func setup(t *testing.T) harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registrySvc := registry.New(db)
+	// The governed set matters here even for the off-chain tests: the published
+	// offer declares on-chain as an accepted mode, and the registry checks the
+	// price's precision against a governed scale when it does.
+	mints, err := tokens.ForCluster(cluster.MainnetBeta)
+	if err != nil {
+		t.Fatalf("governed mints: %v", err)
+	}
+	registrySvc := registry.New(db, mints)
 	for _, id := range []string{buyerKey, sellerKey, outsider} {
 		if _, _, err := registrySvc.Register(ctx, id, card(id)); err != nil {
 			t.Fatal(err)
@@ -276,8 +285,8 @@ func TestOnchainSettlementRefused(t *testing.T) {
 	ctx := context.Background()
 	h := setup(t)
 	_, _, err := h.svc.Create(ctx, buyerKey, h.offerID, domain.SettlementOnchain, "")
-	if !errors.Is(err, trade.ErrOnchainUnavailable) {
-		t.Errorf("onchain err = %v, want ErrOnchainUnavailable", err)
+	if !errors.Is(err, trade.ErrSettlementUnconfigured) {
+		t.Errorf("onchain err = %v, want ErrSettlementUnconfigured", err)
 	}
 }
 
@@ -350,7 +359,11 @@ func TestBidSwapsParties(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registrySvc := registry.New(db)
+	mints, err := tokens.ForCluster(cluster.MainnetBeta)
+	if err != nil {
+		t.Fatalf("governed mints: %v", err)
+	}
+	registrySvc := registry.New(db, mints)
 	for _, id := range []string{buyerKey, sellerKey} {
 		if _, _, err := registrySvc.Register(ctx, id, card(id)); err != nil {
 			t.Fatal(err)

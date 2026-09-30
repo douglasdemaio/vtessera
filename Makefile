@@ -5,7 +5,7 @@ IMAGE ?= vtessera:local
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana validator validator-off vet fmt lint tidy clean smoke image image-run fly-deploy fly-verify
+.PHONY: all build run test race test-solana validator validator-off vet fmt lint tidy clean smoke image image-run fly-deploy fly-verify preflight-live
 
 all: fmt vet test build
 
@@ -40,6 +40,22 @@ validator-off:
 
 test-solana:
 	$(GO) test -tags solana -timeout 30m ./internal/e2e/
+
+# Checks a cluster for real without starting the service. The service has no
+# cluster awareness of its own until it has verified one, so this is the only way
+# to find out whether an endpoint is the cluster it claims to be before a deploy
+# depends on it. Override any of the four settings:
+#
+#   make preflight-live CLUSTER=devnet RPC_URL=https://api.devnet.solana.com
+#   make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana.publicnode.com/ MAINNET_ACK=1
+#
+# mainnet-beta requires MAINNET_ACK=1 because settlement there moves real value.
+preflight-live: build
+	./$(BINARY) --preflight-only \
+		--cluster $(or $(CLUSTER),devnet) \
+		--rpc-url $(or $(RPC_URL),https://api.devnet.solana.com) \
+		$(if $(filter mainnet-beta,$(CLUSTER)),--mainnet-ack $(or $(MAINNET_ACK),1),) \
+		--session-secret $(or $(VTESSERA_SESSION_SECRET),0123456789abcdef0123456789abcdef)
 
 vet:
 	$(GO) vet $(PKG)

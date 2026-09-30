@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/fees"
 	"github.com/douglasdemaio/vtessera/internal/money"
@@ -32,6 +33,24 @@ var (
 	sellerKey = solana.MustPrivateKeyFromBase58("R43d6RoGJRKR815gb3XLGCK4av3PS7qCwicmnXid3awYySwUZ6FksYxAuao8N7efejAKhvFxST2BXtfgaW8iNC6").PublicKey()
 	thiefKey  = thiefPriv.PublicKey()
 )
+
+// testRegistry is the governed set a terms test settles against. It is spelled
+// out here rather than taken from tokens.ForCluster so that a change to the
+// production mint table cannot quietly change what these tests prove: a terms
+// test should break when its own fixture breaks, not when governance does.
+func testRegistry(t *testing.T) tokens.Registry {
+	t.Helper()
+	reg, err := tokens.New(cluster.Localnet, []tokens.Token{{
+		Address:  usdcMint,
+		Symbol:   "USDC",
+		Decimals: 6,
+		Enabled:  true,
+	}})
+	if err != nil {
+		t.Fatalf("test registry: %v", err)
+	}
+	return reg
+}
 
 func testTerms(t *testing.T) Terms {
 	t.Helper()
@@ -157,7 +176,7 @@ func signAs(t *testing.T, tx *solana.Transaction, keys ...solana.PrivateKey) *so
 // --- terms ---
 
 func TestNewTermsFromAcceptedTrade(t *testing.T) {
-	terms, err := NewTerms(acceptedTrade(t), tokens.Default(), fees.Default())
+	terms, err := NewTerms(acceptedTrade(t), testRegistry(t), fees.Default())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,12 +197,12 @@ func TestNewTermsFromAcceptedTrade(t *testing.T) {
 func TestNewTermsRejectsOffChainAndWrongState(t *testing.T) {
 	tr := acceptedTrade(t)
 	tr.SettlementMode = domain.SettlementOffchain
-	if _, err := NewTerms(tr, tokens.Default(), fees.Default()); !errors.Is(err, ErrTradeNotSettleable) {
+	if _, err := NewTerms(tr, testRegistry(t), fees.Default()); !errors.Is(err, ErrTradeNotSettleable) {
 		t.Errorf("off-chain trade: err = %v, want ErrTradeNotSettleable", err)
 	}
 	tr = acceptedTrade(t)
 	tr.State = domain.TradeProposed
-	if _, err := NewTerms(tr, tokens.Default(), fees.Default()); !errors.Is(err, ErrTradeNotSettleable) {
+	if _, err := NewTerms(tr, testRegistry(t), fees.Default()); !errors.Is(err, ErrTradeNotSettleable) {
 		t.Errorf("proposed trade: err = %v, want ErrTradeNotSettleable", err)
 	}
 }
@@ -191,13 +210,13 @@ func TestNewTermsRejectsOffChainAndWrongState(t *testing.T) {
 func TestNewTermsRejectsUnregisteredMint(t *testing.T) {
 	tr := acceptedTrade(t)
 	tr.Mint = thiefKey.String()
-	if _, err := NewTerms(tr, tokens.Default(), fees.Default()); !errors.Is(err, tokens.ErrNotRegistered) {
+	if _, err := NewTerms(tr, testRegistry(t), fees.Default()); !errors.Is(err, tokens.ErrNotRegistered) {
 		t.Errorf("err = %v, want ErrNotRegistered", err)
 	}
 }
 
 func TestNewTermsRejectsDisabledMint(t *testing.T) {
-	registry, err := tokens.New([]tokens.Token{{
+	registry, err := tokens.New(cluster.Localnet, []tokens.Token{{
 		Address: usdcMint, Symbol: "USDC", Decimals: 6, Enabled: false,
 	}})
 	if err != nil {
@@ -211,7 +230,7 @@ func TestNewTermsRejectsDisabledMint(t *testing.T) {
 func TestNewTermsRejectsAmountTooPreciseForMint(t *testing.T) {
 	tr := acceptedTrade(t)
 	tr.Amount = money.MustParse("12.5000001")
-	if _, err := NewTerms(tr, tokens.Default(), fees.Default()); !errors.Is(err, money.ErrTooPrecise) {
+	if _, err := NewTerms(tr, testRegistry(t), fees.Default()); !errors.Is(err, money.ErrTooPrecise) {
 		t.Errorf("err = %v, want ErrTooPrecise", err)
 	}
 }
@@ -219,7 +238,7 @@ func TestNewTermsRejectsAmountTooPreciseForMint(t *testing.T) {
 func TestNewTermsRejectsNonSolanaPartyID(t *testing.T) {
 	tr := acceptedTrade(t)
 	tr.SellerAgentID = "not-a-solana-address"
-	if _, err := NewTerms(tr, tokens.Default(), fees.Default()); err == nil {
+	if _, err := NewTerms(tr, testRegistry(t), fees.Default()); err == nil {
 		t.Error("expected an error for a non-Solana seller id")
 	}
 }

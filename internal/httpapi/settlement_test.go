@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/auth"
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/fees"
 	"github.com/douglasdemaio/vtessera/internal/httpapi"
@@ -49,11 +51,24 @@ type stubVerifier struct{ err error }
 
 func (v stubVerifier) Verify(settlement.Terms, *solana.Transaction) error { return v.err }
 
-// stubChain scripts the chain's answer to a confirmation.
+// stubChain scripts the chain's answer to a confirmation, and answers the
+// genesis re-read with the cluster under test so a request is not refused for a
+// mismatch the stub invented.
 type stubChain struct {
-	fetched settlement.Fetched
-	err     error
-	calls   int
+	fetched      settlement.Fetched
+	err          error
+	calls        int
+	genesis      string
+	genesisCalls int
+	genesisErr   error
+}
+
+func (c *stubChain) GetGenesisHash(context.Context) (string, error) {
+	c.genesisCalls++
+	if c.genesisErr != nil {
+		return "", c.genesisErr
+	}
+	return c.genesis, nil
 }
 
 func (c *stubChain) Transaction(context.Context, solana.Signature) (settlement.Fetched, error) {
@@ -80,26 +95,41 @@ func settlementSetup(t *testing.T, verifier stubVerifier, chain *stubChain) (*ht
 	if err != nil {
 		t.Fatal(err)
 	}
-	mints := tokens.Default()
+	mints, err := tokens.ForCluster(cluster.MainnetBeta)
+	if err != nil {
+		t.Fatalf("governed mints: %v", err)
+	}
+	// A stubChain built by a caller without a genesis answer must not be read as
+	// a cluster mismatch, so seed the one the harness declares.
+	if chain.genesis == "" {
+		chain.genesis = cluster.MainnetBeta.GenesisHash()
+	}
 	led := ledger.New(db, signer)
 	trades := trade.New(db, db, db, led).WithSettlement(trade.SettlementDeps{
-		Registry:  mints,
+		Cluster:  cluster.MainnetBeta,
+		Registry: mints,
+		// Mint verification is left unset on purpose: these tests cover the HTTP
+		// contract, and a stub chain has no mint accounts to verify against.
+		// The verifier itself is tested in internal/settlement.
 		Policy:    fees.Default(),
 		Builder:   stubBuilder{},
 		Verifier:  verifier,
 		Chain:     chain,
+		Genesis:   chain,
 		Store:     db,
 		TradeList: db,
 		Confirm:   trade.ConfirmPolicy{Attempts: 1},
 		Sleep:     func(context.Context, time.Duration) error { return nil },
 	})
 	server := httptest.NewServer(httpapi.New(httpapi.Options{
-		Registry: registry.New(db, registry.WithMints(mints)),
-		Trades:   trades,
-		Auth:     authSvc,
-		Ledger:   led,
-		Tokens:   mints,
-		Version:  "0.1.0-test",
+		Registry:    registry.New(db, mints),
+		Trades:      trades,
+		Auth:        authSvc,
+		Ledger:      led,
+		Tokens:      mints,
+		Version:     "0.1.0-test",
+		Cluster:     cluster.MainnetBeta,
+		GenesisHash: cluster.MainnetBeta.GenesisHash(),
 	}))
 	t.Cleanup(server.Close)
 	return server, led
@@ -436,7 +466,7 @@ func TestTokensPublishesTheGovernedMintsAndTheFeeTheBuyerPays(t *testing.T) {
 }
 
 func TestTokensAreUnavailableRatherThanMisleadingWhenUnconfigured(t *testing.T) {
-	server, _ := setupServer(t)
+	server, _ := setupServerAt(t, "", unconfigured{})
 	anon := &agentClient{t: t, base: server.URL, http: server.Client()}
 	status, body := anon.raw(http.MethodGet, "/v1/tokens", nil, false)
 	if status != http.StatusNotImplemented {
@@ -448,5 +478,83 @@ func TestTokensAreUnavailableRatherThanMisleadingWhenUnconfigured(t *testing.T) 
 	decodeInto(t, body, &apiErr)
 	if apiErr.Code != "NOT_CONFIGURED" {
 		t.Errorf("code = %s, want NOT_CONFIGURED", apiErr.Code)
+	}
+}
+
+func TestAnUnreachableChainIs503RatherThan501(t *testing.T) {
+	chain := &stubChain{}
+	server, _ := settlementSetup(t, stubVerifier{}, chain)
+	seller := newAgent(t, server)
+	buyer := newAgent(t, server)
+	offer := seller.publishOffer("12.50", usdc, "summarize:document")
+	tr := acceptedOnchain(t, buyer, seller, offer)
+
+	// The endpoint stopped answering. The feature is switched on here, so a
+	// client that retries may succeed, and a 501 would tell an operator to fix
+	// a configuration that is already correct.
+	chain.genesisErr = errors.New("dial tcp: i/o timeout")
+	status, body := buyer.raw(http.MethodPost, "/v1/trades/"+tr.ID+"/settlement", nil, true)
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 for an unreachable chain: %s", status, body)
+	}
+	var apiErr struct {
+		Code string `json:"code"`
+	}
+	decodeInto(t, body, &apiErr)
+	if apiErr.Code != "ONCHAIN_UNAVAILABLE" {
+		t.Errorf("code = %s, want ONCHAIN_UNAVAILABLE for an unreachable chain", apiErr.Code)
+	}
+}
+
+func TestAnUnconfiguredDeploymentRefusesOnchainTradesWith501(t *testing.T) {
+	server, _ := setupServerAt(t, "", unconfigured{})
+	seller := newAgent(t, server)
+	buyer := newAgent(t, server)
+	offer := seller.publishOffer("12.50", usdc, "summarize:document")
+
+	// The refusal lands at trade creation rather than at settlement: an on-chain
+	// trade that can never settle should not be recorded as agreed. 501 says the
+	// capability is absent here, and no amount of retrying will change that.
+	status, body := buyer.raw(http.MethodPost, "/v1/trades", map[string]any{
+		"offerId": offer.ID, "settlementMode": "onchain", "idempotencyKey": "trade-1",
+	}, true)
+	if status != http.StatusNotImplemented {
+		t.Errorf("status = %d, want 501 when settlement is unconfigured: %s", status, body)
+	}
+	var apiErr struct {
+		Code string `json:"code"`
+	}
+	decodeInto(t, body, &apiErr)
+	if apiErr.Code != "ONCHAIN_UNAVAILABLE" {
+		t.Errorf("code = %s, want ONCHAIN_UNAVAILABLE when settlement is unconfigured", apiErr.Code)
+	}
+}
+
+func TestTheTokenListNamesTheClusterItDescribes(t *testing.T) {
+	chain := &stubChain{}
+	server, _ := settlementSetup(t, stubVerifier{}, chain)
+	anon := &agentClient{t: t, base: server.URL, http: server.Client()}
+	_, body := anon.raw(http.MethodGet, "/v1/tokens", nil, false)
+	var payload struct {
+		Cluster     string `json:"cluster"`
+		GenesisHash string `json:"genesisHash"`
+		Tokens      []struct {
+			Address string `json:"address"`
+			Cluster string `json:"cluster"`
+		} `json:"tokens"`
+	}
+	decodeInto(t, body, &payload)
+	// A mint address names an account on one chain. Without the cluster, the
+	// list reintroduces exactly the ambiguity the deployment otherwise removes.
+	if payload.Cluster != "mainnet-beta" {
+		t.Errorf("cluster = %q, want mainnet-beta", payload.Cluster)
+	}
+	if payload.GenesisHash != cluster.MainnetBeta.GenesisHash() {
+		t.Errorf("genesisHash = %q, want %s", payload.GenesisHash, cluster.MainnetBeta.GenesisHash())
+	}
+	for _, tok := range payload.Tokens {
+		if tok.Cluster != payload.Cluster {
+			t.Errorf("mint %s claims cluster %q, list says %q", tok.Address, tok.Cluster, payload.Cluster)
+		}
 	}
 }

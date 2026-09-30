@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/fees"
 	"github.com/douglasdemaio/vtessera/internal/settlement"
@@ -32,6 +33,10 @@ var (
 	// ErrInvalidSignature marks a submitted signature the service cannot even
 	// parse. It is a bad request, never a dispute.
 	ErrInvalidSignature = errors.New("settlement signature is not valid")
+	// ErrClusterMismatch marks a signed request whose terms were compiled for a
+	// different cluster than the one running. It is neither a settlement nor a
+	// dispute: the trade is fine and the operator's configuration is wrong.
+	ErrClusterMismatch = errors.New("settlement request was issued for a different cluster")
 )
 
 // ConfirmPolicy bounds how long a confirm waits for RPC finality lag before
@@ -94,6 +99,22 @@ type ChainReader interface {
 	Transaction(ctx context.Context, sig solana.Signature) (settlement.Fetched, error)
 }
 
+// ClusterReader reports the chain identity behind the RPC endpoint, so the
+// reconciler can re-check it on every tick rather than trusting the answer the
+// process got at boot.
+type ClusterReader interface {
+	GetGenesisHash(ctx context.Context) (string, error)
+}
+
+// MintVerifier re-checks a governed mint against the chain immediately before
+// a request is built from it. It is narrower than the startup preflight by
+// design: at request time only the properties settlement correctness depends on
+// are load-bearing, and a governance rotation must not become a settlement
+// outage.
+type MintVerifier interface {
+	Verify(ctx context.Context, mint tokens.Token) error
+}
+
 // SettlementDeps are the on-chain capabilities of the service. They are absent
 // unless the deployment is configured with an RPC endpoint and a fee policy,
 // which is what keeps `settlementMode: onchain` a 501 when it cannot be honoured.
@@ -104,6 +125,19 @@ type SettlementDeps struct {
 	Verifier SettlementVerifier
 	Chain    ChainReader
 	Store    SettlementStore
+	// Cluster is the identity every request is stamped with and every request is
+	// checked against. It is required when settlement is enabled, not optional:
+	// a request that does not name the cluster it was compiled for cannot be
+	// proved safe to execute.
+	Cluster cluster.Cluster
+	// Genesis re-reads the endpoint's chain identity. Required for the same
+	// reason as Cluster, and it is what makes a mid-flight repoint detectable
+	// instead of silent.
+	Genesis ClusterReader
+	// Mints re-verifies the mint on the build path. When nil the boot-time
+	// preflight is the only mint check, which is weaker but not incorrect for
+	// a deployment that has not wired it yet.
+	Mints MintVerifier
 	// TradeList is optional: without it the reconciliation worker cannot run,
 	// and settlement itself still works for callers that use /confirm.
 	TradeList TradeLister
@@ -113,14 +147,37 @@ type SettlementDeps struct {
 
 // Enabled reports whether on-chain settlement can be honoured.
 func (d SettlementDeps) Enabled() bool {
-	return d.Registry != nil && d.Builder != nil && d.Verifier != nil && d.Chain != nil && d.Store != nil
+	return d.Registry != nil && d.Builder != nil && d.Verifier != nil && d.Chain != nil && d.Store != nil && d.Cluster != ""
 }
 
 // Reconciles reports whether outstanding settlements can be reconciled in the
 // background. Reconciliation is additive: a deployment without it still settles
 // whenever the buyer calls /confirm.
 func (d SettlementDeps) Reconciles() bool {
-	return d.Enabled() && d.TradeList != nil
+	return d.Enabled() && d.TradeList != nil && d.Genesis != nil
+}
+
+// CheckCluster re-reads the endpoint's genesis hash and compares it with the
+// declared cluster. It is the check that keeps a fixed URL honest: a proxy or a
+// mistyped endpoint can repoint at another cluster without the process
+// restarting, and the only way to notice is to keep asking.
+func (d SettlementDeps) CheckCluster(ctx context.Context) error {
+	if !d.Enabled() {
+		return ErrSettlementUnconfigured
+	}
+	if d.Genesis == nil {
+		// Without a reader there is nothing to compare, so the declared cluster
+		// is all there is. Say so rather than implying a check happened.
+		return nil
+	}
+	hash, err := d.Genesis.GetGenesisHash(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrOnchainUnavailable, err)
+	}
+	if err := d.Cluster.Verify(hash); err != nil {
+		return fmt.Errorf("%w: %v", ErrOnchainUnavailable, err)
+	}
+	return nil
 }
 
 // WithSettlement attaches on-chain settlement capabilities. Until it is called,
@@ -139,12 +196,41 @@ func (s *Service) SettlementFee() (fees.Policy, bool) {
 	return s.settlement.Policy, true
 }
 
+// verifyMint re-checks the governed mint against the chain, mapping the three
+// outcomes onto three different operational meanings.
+//
+// A hard invariant failing is a 409: the token the offer was priced in is not
+// the token that exists, and neither party can fix it by retrying. A governance
+// pin drifting still settles, because the token is the same token and a
+// legitimate issuer rotation must not halt the marketplace. The chain being
+// unreachable is a 503, because nothing is known and retrying is exactly right.
+func (s *Service) verifyMint(ctx context.Context, address string) error {
+	if s.settlement.Mints == nil {
+		return nil
+	}
+	mint, err := s.settlement.Registry.Enabled(address)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrMintUngoverned, err)
+	}
+	err = s.settlement.Mints.Verify(ctx, mint)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, settlement.ErrMintUnverified):
+		return fmt.Errorf("%w: %v", ErrMintUngoverned, err)
+	case errors.Is(err, settlement.ErrMintUnreachable):
+		return fmt.Errorf("%w: %v", ErrOnchainUnavailable, err)
+	default:
+		return err
+	}
+}
+
 // SettlementRequestFor returns the current settlement request for a trade.
 func (s *Service) SettlementRequestFor(ctx context.Context, actorID, tradeID string) (domain.SettlementRequest, error) {
 	if _, err := s.partyTrade(ctx, actorID, tradeID); err != nil {
 		return domain.SettlementRequest{}, err
 	}
-	if err := s.requireSettlement(); err != nil {
+	if err := s.requireSettlement(ctx); err != nil {
 		return domain.SettlementRequest{}, err
 	}
 	return s.settlement.Store.GetSettlementRequest(ctx, tradeID)
@@ -158,7 +244,7 @@ func (s *Service) BuildSettlement(ctx context.Context, actorID, tradeID string) 
 	if err != nil {
 		return domain.SettlementRequest{}, err
 	}
-	if err := s.requireSettlement(); err != nil {
+	if err := s.requireSettlement(ctx); err != nil {
 		return domain.SettlementRequest{}, err
 	}
 	if tr.BuyerAgentID != actorID {
@@ -176,6 +262,12 @@ func (s *Service) BuildSettlement(ctx context.Context, actorID, tradeID string) 
 	if err != nil {
 		return domain.SettlementRequest{}, err
 	}
+	// The registry answers from boot-time configuration; the chain is what the
+	// buyer will actually be paid in. Re-checking here is what stops a request
+	// being compiled against a mint that stopped being that mint after startup.
+	if err := s.verifyMint(ctx, tr.Mint); err != nil {
+		return domain.SettlementRequest{}, err
+	}
 	built, err := s.settlement.Builder.Build(ctx, terms)
 	if err != nil {
 		return domain.SettlementRequest{}, err
@@ -186,6 +278,7 @@ func (s *Service) BuildSettlement(ctx context.Context, actorID, tradeID string) 
 	request, err := s.settlement.Store.CreateSettlementRequest(ctx, domain.SettlementRequest{
 		ID:          uuid.NewString(),
 		TradeID:     tr.ID,
+		Cluster:     s.settlement.Cluster,
 		UnsignedTx:  built.Request.UnsignedTx,
 		Blockhash:   built.Request.Blockhash,
 		LastValid:   built.Request.LastValid,
@@ -219,7 +312,7 @@ func (s *Service) ConfirmSettlement(ctx context.Context, actorID, tradeID, signa
 	if err != nil {
 		return domain.Trade{}, domain.Receipt{}, err
 	}
-	if err := s.requireSettlement(); err != nil {
+	if err := s.requireSettlement(ctx); err != nil {
 		return domain.Trade{}, domain.Receipt{}, err
 	}
 	if tr.SettlementMode != domain.SettlementOnchain {
@@ -248,6 +341,16 @@ func (s *Service) ConfirmSettlement(ctx context.Context, actorID, tradeID, signa
 	currentID := ""
 	if request, err := s.settlement.Store.GetSettlementRequest(ctx, tradeID); err == nil {
 		currentID = request.ID
+		// Refuse a request built for another cluster before recording anything or
+		// touching the chain. Recording the signature first would be evidence for
+		// a transaction this process can never settle, and the reconciliation
+		// worker would then re-poll it forever; polling it here would report a
+		// signature this cluster has never seen as merely not-yet-visible.
+		if err := s.checkRequestCluster(requests, currentID); err != nil {
+			return domain.Trade{}, domain.Receipt{}, err
+		}
+		// Record the signature first so a crash between here and the verdict still
+		// leaves evidence for the reconciliation worker to re-poll.
 		if err := s.settlement.Store.SetSettlementSignature(ctx, request.ID, sig.String(), s.now().UTC()); err != nil {
 			return domain.Trade{}, domain.Receipt{}, err
 		}
@@ -299,11 +402,14 @@ func (s *Service) sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func (s *Service) requireSettlement() error {
+// requireSettlement reports why an on-chain trade cannot be handled, or nil when
+// it can. The two refusals are distinct on purpose: no cluster is a 501, while
+// a cluster that cannot be reached is a 503 with retry semantics.
+func (s *Service) requireSettlement(ctx context.Context) error {
 	if !s.settlement.Enabled() {
-		return ErrOnchainUnavailable
+		return ErrSettlementUnconfigured
 	}
-	return nil
+	return s.settlement.CheckCluster(ctx)
 }
 
 // liveSettlement reports the trade's unexpired request, if any.
@@ -322,11 +428,15 @@ func (s *Service) liveSettlement(ctx context.Context, tradeID string) (domain.Se
 }
 
 // checkSettleable refuses to open an on-chain trade that could not be settled:
-// the mint must be on the service's allowlist, and both party agent IDs must be
+// the mint must be on the cluster's allowlist, and both party agent IDs must be
 // Solana addresses, because the buyer and seller wallets are the agent IDs.
 func (s *Service) checkSettleable(buyer, seller, mint string) error {
+	// The mint is the seller's choice, so a mint this cluster does not govern is
+	// a conflict the buyer cannot resolve by editing their request. It is
+	// reported separately from the other two checks because it is the one an
+	// operator fixes by configuration rather than by the caller.
 	if _, err := s.settlement.Registry.Enabled(mint); err != nil {
-		return fmt.Errorf("%w: %v", ErrModeNotAccepted, err)
+		return fmt.Errorf("%w: %v", ErrMintUngoverned, err)
 	}
 	for _, party := range []string{buyer, seller} {
 		if _, err := solana.PublicKeyFromBase58(party); err != nil {

@@ -17,12 +17,14 @@ import (
 
 	"github.com/douglasdemaio/vtessera/internal/agp"
 	"github.com/douglasdemaio/vtessera/internal/auth"
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/httpapi"
 	"github.com/douglasdemaio/vtessera/internal/ledger"
 	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/store"
+	"github.com/douglasdemaio/vtessera/internal/tokens"
 	"github.com/douglasdemaio/vtessera/internal/trade"
 	"github.com/mr-tron/base58"
 )
@@ -53,7 +55,11 @@ func setupServer(t *testing.T) (*httptest.Server, *ledger.Ledger) {
 	return server, led
 }
 
-func setupServerAt(t *testing.T, publicBaseURL string) (*httptest.Server, *ledger.Ledger) {
+// unconfigured reports whether the harness should behave like a deployment with
+// settlement switched off: no governed mint scale and no chain to name.
+type unconfigured struct{}
+
+func setupServerAt(t *testing.T, publicBaseURL string, unconfigured ...unconfigured) (*httptest.Server, *ledger.Ledger) {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -71,14 +77,26 @@ func setupServerAt(t *testing.T, publicBaseURL string) (*httptest.Server, *ledge
 		t.Fatal(err)
 	}
 	led := ledger.New(db, signer)
-	api := httpapi.New(httpapi.Options{
-		Registry:      registry.New(db),
-		Trades:        trade.New(db, db, db, led),
-		Auth:          authSvc,
-		Ledger:        led,
-		Version:       "0.1.0-test",
-		PublicBaseURL: publicBaseURL,
-	})
+	// An offer priced on chain is checked for precision against a governed scale,
+	// so the default harness governs mainnet mints even though it never settles.
+	// A test that needs the settlement-unconfigured routes asks for it explicitly.
+	var mints tokens.Registry
+	opts := httpapi.Options{}
+	if len(unconfigured) == 0 {
+		var err error
+		if mints, err = tokens.ForCluster(cluster.MainnetBeta); err != nil {
+			t.Fatalf("governed mints: %v", err)
+		}
+		opts.Cluster = cluster.MainnetBeta
+	}
+	opts.Registry = registry.New(db, mints)
+	opts.Trades = trade.New(db, db, db, led)
+	opts.Auth = authSvc
+	opts.Ledger = led
+	opts.Tokens = mints
+	opts.Version = "0.1.0-test"
+	opts.PublicBaseURL = publicBaseURL
+	api := httpapi.New(opts)
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)
 	return server, led

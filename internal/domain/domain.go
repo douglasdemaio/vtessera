@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/mr-tron/base58"
 )
@@ -349,6 +350,12 @@ func (s SettlementStatus) Valid() bool {
 	return false
 }
 
+// PrePhase3Cluster is the value settlement_requests.cluster carries for rows
+// written before cluster-awareness. It is deliberately not a declarable
+// Cluster: a request whose terms were compiled with a flat registry cannot be
+// known to be valid for any particular chain, so it can never be confirmed.
+const PrePhase3Cluster = "pre-phase-3"
+
 // SettlementRequest is one unsigned transaction issued to the buyer, persisted
 // so a confirm can be matched against exactly what was offered and so an
 // operator can audit a dispute. The service holds no keys: the transaction is
@@ -366,9 +373,13 @@ type SettlementRequest struct {
 	FeeWallet   string           `json:"feeWallet"`
 	Status      SettlementStatus `json:"status"`
 	Signature   string           `json:"signature,omitempty"`
-	CreatedAt   time.Time        `json:"createdAt"`
-	UpdatedAt   time.Time        `json:"updatedAt"`
-	ExpiresAt   time.Time        `json:"expiresAt"`
+	// Cluster is the chain whose mint set compiled the frozen terms, so a
+	// request issued on one chain is never confirmed on another. It is empty
+	// for pre-Phase-3 requests, which is what keeps them unconfirmable.
+	Cluster   cluster.Cluster `json:"cluster,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+	ExpiresAt time.Time       `json:"expiresAt"`
 }
 
 // Live reports whether the request still holds a usable blockhash. A live

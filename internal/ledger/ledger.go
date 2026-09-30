@@ -13,6 +13,15 @@ import (
 )
 
 const (
+	// tesseraVersion is the claim schema version, not a settlement generation.
+	//
+	// It stays 1 across the addition of the cluster claim on purpose. A verifier
+	// that keyed the presence of a cluster on this number would have to reject
+	// every pre-Phase-3 receipt to stay consistent, and the design requires those
+	// to remain valid: the signing key is the security boundary, and the absence
+	// of the claim is what identifies a receipt as predating cluster awareness.
+	// The claim's presence is the signal; a version bump would be redundant at
+	// best and misleading at worst.
 	tesseraVersion = 1
 	appendAttempts = 3
 )
@@ -62,6 +71,12 @@ type SettlementRecord struct {
 	Signature       string                `json:"signature,omitempty"`
 	LedgerSequence  int64                 `json:"ledgerSequence"`
 	LedgerEntryHash string                `json:"ledgerEntryHash"`
+	// Cluster names the chain the signature settles on. It is absent for an
+	// off-chain tessera, which settles on no chain at all, and empty for a
+	// pre-Phase-3 on-chain tessera, which was issued by a build with no cluster
+	// awareness. An empty value on an on-chain tessera is therefore itself a
+	// signal, and Verify rejects it rather than reading it as "any cluster".
+	Cluster string `json:"cluster,omitempty"`
 }
 
 type TesseraClaims struct {
@@ -86,7 +101,14 @@ func tradeRecord(t domain.Trade, at time.Time) TradeRecord {
 	}
 }
 
-func (l *Ledger) Record(ctx context.Context, t domain.Trade, solanaSignature string) (domain.Receipt, error) {
+// Record issues a tessera for a settled trade. cluster names the chain the
+// on-chain settlement happened on, and is ignored for an off-chain trade.
+//
+// The claim is inside the signed payload rather than beside it, so it cannot be
+// edited after signing. A devnet tessera and a mainnet-beta tessera for the same
+// trade carry the same signature field and the same ledger sequence, and the
+// cluster is the only thing that tells them apart.
+func (l *Ledger) Record(ctx context.Context, t domain.Trade, solanaSignature, clusterName string) (domain.Receipt, error) {
 	if t.State != domain.TradeRecorded && t.State != domain.TradeSettled {
 		return domain.Receipt{}, fmt.Errorf("%w: state %s", ErrNotSettled, t.State)
 	}
@@ -128,6 +150,7 @@ func (l *Ledger) Record(ctx context.Context, t domain.Trade, solanaSignature str
 			Signature:       solanaSignature,
 			LedgerSequence:  entry.Seq,
 			LedgerEntryHash: entry.Hash,
+			Cluster:         clusterName,
 		},
 	}
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(l.signer.private)
@@ -193,3 +216,12 @@ func (l *Ledger) Verify(jws string) (*TesseraClaims, error) {
 	}
 	return claims, nil
 }
+
+// A receipt issued before Phase 3 carries no cluster claim, and the design
+// keeps it valid rather than invalidating it: the signature still proves the
+// trade settled, and the signing key is the security boundary, not the claim.
+// What the receipt cannot do is name a chain, so the absence is reported rather
+// than silently read as "anywhere".
+//
+// TesseraClaims.Cluster returns "" for such a receipt. A verifier that needs to
+// know the chain must refuse the ambiguity, not the tessera.

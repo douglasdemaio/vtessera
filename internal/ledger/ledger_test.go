@@ -53,7 +53,7 @@ func TestRecordIssuesVerifiableTessera(t *testing.T) {
 	l, _ := newLedger(t)
 	trade := completedTrade("t1")
 
-	receipt, err := l.Record(ctx, trade, "")
+	receipt, err := l.Record(ctx, trade, "", "")
 	if err != nil {
 		t.Fatalf("record: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestRecordRejectsNonCompletableState(t *testing.T) {
 	l, _ := newLedger(t)
 	trade := completedTrade("t1")
 	trade.State = domain.TradeNegotiating
-	if _, err := l.Record(ctx, trade, ""); err == nil {
+	if _, err := l.Record(ctx, trade, "", ""); err == nil {
 		t.Fatal("expected error recording a trade that is not recorded")
 	}
 }
@@ -99,10 +99,10 @@ func TestRecordIsIdempotentByTrade(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newLedger(t)
 	trade := completedTrade("t1")
-	if _, err := l.Record(ctx, trade, ""); err != nil {
+	if _, err := l.Record(ctx, trade, "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.Record(ctx, trade, ""); err == nil {
+	if _, err := l.Record(ctx, trade, "", ""); err == nil {
 		t.Fatal("expected second receipt issuance to be refused")
 	}
 	entries, err := l.Entries(ctx)
@@ -118,7 +118,7 @@ func TestLedgerChainLinksEntries(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newLedger(t)
 	for _, id := range []string{"t1", "t2", "t3"} {
-		if _, err := l.Record(ctx, completedTrade(id), ""); err != nil {
+		if _, err := l.Record(ctx, completedTrade(id), "", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -151,7 +151,7 @@ func TestLedgerChainLinksEntries(t *testing.T) {
 func TestVerifyRejectsTamperedTessera(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newLedger(t)
-	receipt, err := l.Record(ctx, completedTrade("t1"), "")
+	receipt, err := l.Record(ctx, completedTrade("t1"), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestVerifyRejectsForeignSigner(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newLedger(t)
 	other, _ := newLedger(t)
-	receipt, err := l.Record(ctx, completedTrade("t1"), "")
+	receipt, err := l.Record(ctx, completedTrade("t1"), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestOnchainTesseraCarriesSignature(t *testing.T) {
 	trade.SettlementMode = domain.SettlementOnchain
 	trade.State = domain.TradeSettled
 	const sig = "5Ujj8xkPMuQ6K9DkK9K7xkzGmZKrvUzZz2Ff5vJ6n9pLkQeZr4nR8sT7uV6wXyZ"
-	receipt, err := l.Record(ctx, trade, sig)
+	receipt, err := l.Record(ctx, trade, sig, "mainnet-beta")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestLoadOrCreateSignerPersists(t *testing.T) {
 func TestReceiptFetch(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newLedger(t)
-	if _, err := l.Record(ctx, completedTrade("t1"), ""); err != nil {
+	if _, err := l.Record(ctx, completedTrade("t1"), "", ""); err != nil {
 		t.Fatal(err)
 	}
 	got, err := l.Receipt(ctx, "t1")
@@ -411,5 +411,102 @@ func TestAppendGivesUpAfterRepeatedStaleWrites(t *testing.T) {
 	}
 	if fs.appendCalls != appendAttempts {
 		t.Errorf("appendCalls = %d, want %d", fs.appendCalls, appendAttempts)
+	}
+}
+
+// TestOnchainTesseraNamesItsCluster is the reason the claim exists. A devnet
+// tessera and a mainnet-beta tessera for the same trade carry the same signature
+// field and the same ledger sequence, so the cluster is the only thing that
+// tells a verifier which chain actually settled.
+func TestOnchainTesseraNamesItsCluster(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newLedger(t)
+	trade := completedTrade("t1")
+	trade.SettlementMode = domain.SettlementOnchain
+	trade.State = domain.TradeSettled
+
+	receipt, err := l.Record(ctx, trade, "5Ujj8xkPMuQ6K9DkK9K7xkzGmZKrvUzZz2Ff5vJ6n9pLkQeZr4nR8sT7uV6wXyZ", "devnet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := l.Verify(receipt.JWS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Settlement.Cluster != "devnet" {
+		t.Errorf("cluster = %q, want devnet", claims.Settlement.Cluster)
+	}
+}
+
+// TestOffchainTesseraNamesNoCluster keeps the claim honest: an off-chain trade
+// settled on no chain, so asserting one would be a false statement in a signed
+// artifact.
+func TestOffchainTesseraNamesNoCluster(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newLedger(t)
+	receipt, err := l.Record(ctx, completedTrade("t1"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := l.Verify(receipt.JWS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Settlement.Cluster != "" {
+		t.Errorf("cluster = %q, want empty for an off-chain tessera", claims.Settlement.Cluster)
+	}
+}
+
+// A tessera minted by a pre-Phase-3 build has no cluster claim. Its signature
+// still proves the trade settled, and the design keeps such a receipt valid
+// rather than invalidating receipts an operator already holds. What it cannot do
+// is name a chain, and the absence has to stay visible: a verifier that needs to
+// know the cluster must refuse the ambiguity, not the tessera.
+func TestAPrePhase3OnchainTesseraStaysValidButNamesNoCluster(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newLedger(t)
+	tr := completedTrade("t1")
+	tr.SettlementMode = domain.SettlementOnchain
+	tr.State = domain.TradeSettled
+
+	// An empty cluster is what a Phase 2 build recorded.
+	receipt, err := l.Record(ctx, tr, "5Ujj8xkPMuQ6K9DkK9K7xkzGmZKrvUzZz2Ff5vJ6n9pLkQeZr4nR8sT7uV6wXyZ", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := l.Verify(receipt.JWS)
+	if err != nil {
+		t.Fatalf("a pre-Phase-3 receipt must stay valid, got %v", err)
+	}
+	if claims.Settlement.Cluster != "" {
+		t.Errorf("cluster = %q, want empty: a receipt that does not name a chain must not appear to", claims.Settlement.Cluster)
+	}
+}
+
+// A receipt whose claim names a different chain than the one being verified
+// against is a different trade, and silently accepting it would let a mainnet
+// verifier vouch for a devnet settlement.
+func TestATesseraClaimingAnotherClusterIsReportedNotAccepted(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newLedger(t)
+	tr := completedTrade("t2")
+	tr.SettlementMode = domain.SettlementOnchain
+	tr.State = domain.TradeSettled
+
+	receipt, err := l.Record(ctx, tr, "5Ujj8xkPMuQ6K9DkK9K7xkzGmZKrvUzZz2Ff5vJ6n9pLkQeZr4nR8sT7uV6wXyZ", "devnet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := l.Verify(receipt.JWS)
+	if err != nil {
+		t.Fatalf("the signature is valid whatever chain it names: %v", err)
+	}
+	if claims.Settlement.Cluster != "devnet" {
+		t.Fatalf("cluster = %q, want the devnet claim to be readable", claims.Settlement.Cluster)
+	}
+	// A verifier running on mainnet-beta must be able to notice the disagreement
+	// rather than reporting the receipt as settled here.
+	if claims.Settlement.Cluster == "mainnet-beta" {
+		t.Error("a devnet receipt must not read as a mainnet-beta one")
 	}
 }

@@ -21,7 +21,21 @@ make race       # whole suite under -race
 make vet fmt
 make build      # -> bin/vtessera
 make smoke      # builds the binary and runs a process-level journey
+
+make preflight-live   # verify a real cluster without starting the service
 ```
+
+`make preflight-live` is the only thing in this list that touches the network. It
+is the §11.13 acceptance check and it is worth running after any change to a
+base58 constant:
+
+```bash
+make preflight-live CLUSTER=devnet
+make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana.publicnode.com/
+```
+
+It opens no database and creates no signing key, so it is safe to point at a host
+you are only inspecting. Never edit a pin to make it pass — see constraint 6.
 
 Validator-backed tests are behind a build tag and need a running local validator:
 
@@ -137,20 +151,33 @@ The things that matter when editing this repository:
 A Fly personal account with a token is required to deploy. Do not commit a
 token, and do not add a `.fly` config to the repository.
 
-### 6. The EURC mint defect is fixed; the rest of Phase 3 is not
-**Fixed 2026-09-28.** `internal/tokens` shipped a lookalike EURC mint that does
-not exist on-chain (`...c2iXXcyK85CNzz7iwQc`). It now ships Circle's real mint,
-`HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr`, verified against mainnet
-`getAccountInfo`: `owner Tokenkeg...`, `type mint`, `decimals 6`, initialized.
-The two addresses share a 30-character prefix and diverge at position 31, which
-is why a visual check missed it.
+### 6. Phase 3 is implemented; the constants are still untrusted
 
-That fixed the liveness bug only. Still true: the service has **no cluster
-awareness** and performs no on-chain mint verification, so do not point it at
-mainnet-beta or a live devnet expecting production behaviour. See
-`docs/specs/2026-09-27-phase3-cluster-aware-settlement-design.md` for the gates
-that remain. Re-derive on-chain constants from an RPC query rather than copying
-them from source.
+**Landed 2026-09-30.** The service is now cluster-aware. The cluster is named in
+configuration (`VTESSERA_CLUSTER`, required alongside `VTESSERA_RPC_URL`) and
+verified against the endpoint: the genesis hash, and every governed mint's
+existence, owning program, initialization, decimals and authorities, are checked
+at boot and refused on failure. The identity is re-read on every settlement
+request and every reconciler tick, so a URL repointed at runtime is caught.
+Requests and receipts both carry the cluster they belong to, and the reconciler
+withdraws a request compiled for another chain so the buyer can re-request.
+
+The lookalike EURC defect is fixed. `internal/tokens` had shipped
+`...c2iXXcyK85CNzz7iwQc`, which does not exist on-chain; it now ships Circle's
+real mint `HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr`. The two share a
+30-character prefix and diverge at position 31, which is why a visual check
+missed it. The governed table is now pinned to
+`internal/tokens/testdata/governed-mints.json`, a snapshot of what
+`make preflight-live` actually read from both public clusters, so the next
+transcription error fails a test instead of a deploy.
+
+**Still true, and the reason the constraints above stand.** The constants were
+produced by an untrusted process, and the fix protects against a repeat rather
+than certifying the originals. Re-derive on-chain constants from an RPC query or
+a second independent provider, never from these notes or from source. And do not
+edit a genesis pin or an authority pin to make a preflight failure disappear: a
+changed genesis is a provider incident or a DNS hijack, and re-pinning converts
+a detectable incident into an undetectable compromise.
 
 ## Git
 
@@ -158,9 +185,10 @@ them from source.
 `56ac399` (the whole Phase 2 settlement service), then the Phase 3 spec and
 records. **Do not commit unless explicitly asked.**
 
-Phase 3 is designed but unimplemented. When it lands, the fee default changes
-from `500000` to `1000` lamports and the bogus EURC mint is replaced — expect
-both to break existing assumptions in tests.
+Phase 3 landed on 2026-09-30, uncommitted. The fee default is now `1000`
+lamports, the bogus EURC mint is replaced, and the governed table is
+cluster-scoped — all three break assumptions in tests that predate them, which
+is why the fee and mint tests assert the new values rather than the old.
 
 ## Documentation
 

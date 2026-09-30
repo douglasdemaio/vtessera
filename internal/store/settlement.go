@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 )
 
@@ -29,11 +30,11 @@ func (s *Store) CreateSettlementRequest(ctx context.Context, r domain.Settlement
 			return mapErr(err)
 		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO settlement_requests (id, trade_id, unsigned_tx, blockhash, last_valid, buyer_ata, seller_ata, created_ata, fee_lamports, fee_wallet, status, signature, created_at, updated_at, expires_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO settlement_requests (id, trade_id, unsigned_tx, blockhash, last_valid, buyer_ata, seller_ata, created_ata, fee_lamports, fee_wallet, status, signature, created_at, updated_at, expires_at, cluster)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			r.ID, r.TradeID, r.UnsignedTx, r.Blockhash, r.LastValid, r.BuyerATA, r.SellerATA,
 			boolInt(r.CreatedATA), r.FeeLamports, r.FeeWallet, string(r.Status), nullString(r.Signature),
-			nanos(r.CreatedAt), nanos(r.UpdatedAt), nanos(r.ExpiresAt))
+			nanos(r.CreatedAt), nanos(r.UpdatedAt), nanos(r.ExpiresAt), requestCluster(r.Cluster))
 		return mapErr(err)
 	})
 	return r, err
@@ -138,6 +139,32 @@ func (s *Store) ExpireSettlementRequests(ctx context.Context, tradeID string, at
 	})
 }
 
+// ExpireSettlementRequestsForCluster retires the live requests for a trade that
+// were compiled on a different cluster.
+//
+// It exists because a mismatched issued request holds the per-trade partial
+// unique index, so leaving it in place would wedge the trade permanently: no
+// replacement request could ever be issued, and the trade could never settle or
+// be cancelled. Expiring it leaves the trade pending, which is the existing
+// behaviour for any unfillable request, and lets an operator re-request on the
+// correct cluster. Skipping it instead of expiring it would look like the
+// gentler option and would actually be a permanent outage.
+func (s *Store) ExpireSettlementRequestsForCluster(ctx context.Context, tradeID string, running cluster.Cluster, at time.Time) (int64, error) {
+	var expired int64
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE settlement_requests SET status = ?, updated_at = ?
+			 WHERE trade_id = ? AND status = ? AND cluster <> ?`,
+			string(domain.SettlementExpired), nanos(at), tradeID, string(domain.SettlementIssued), string(running))
+		if err != nil {
+			return mapErr(err)
+		}
+		expired, err = res.RowsAffected()
+		return err
+	})
+	return expired, err
+}
+
 // TradesInState returns every trade in a state, used by the reconciliation
 // worker to re-poll signatures for trades stuck in settlement_pending.
 func (s *Store) TradesInState(ctx context.Context, state domain.TradeState) ([]domain.Trade, error) {
@@ -157,12 +184,13 @@ func (s *Store) TradesInState(ctx context.Context, state domain.TradeState) ([]d
 	return out, rows.Err()
 }
 
-const settlementSelect = `SELECT id, trade_id, unsigned_tx, blockhash, last_valid, buyer_ata, seller_ata, created_ata, fee_lamports, fee_wallet, status, signature, created_at, updated_at, expires_at FROM settlement_requests`
+const settlementSelect = `SELECT id, trade_id, unsigned_tx, blockhash, last_valid, buyer_ata, seller_ata, created_ata, fee_lamports, fee_wallet, status, signature, created_at, updated_at, expires_at, cluster FROM settlement_requests`
 
 func scanSettlementRequest(row rowScanner) (domain.SettlementRequest, error) {
 	var (
 		r          domain.SettlementRequest
 		status     string
+		stored     string
 		signature  sql.NullString
 		created    int64
 		updated    int64
@@ -171,7 +199,7 @@ func scanSettlementRequest(row rowScanner) (domain.SettlementRequest, error) {
 	)
 	if err := row.Scan(&r.ID, &r.TradeID, &r.UnsignedTx, &r.Blockhash, &r.LastValid, &r.BuyerATA,
 		&r.SellerATA, &createdAta, &r.FeeLamports, &r.FeeWallet, &status, &signature,
-		&created, &updated, &expires); err != nil {
+		&created, &updated, &expires, &stored); err != nil {
 		return domain.SettlementRequest{}, mapErr(err)
 	}
 	r.Status = domain.SettlementStatus(status)
@@ -180,6 +208,19 @@ func scanSettlementRequest(row rowScanner) (domain.SettlementRequest, error) {
 	r.CreatedAt = fromNanos(created)
 	r.UpdatedAt = fromNanos(updated)
 	r.ExpiresAt = fromNanos(expires)
+	// The sentinel is not a cluster, and parsing it must not fail: it says the
+	// request predates cluster-awareness, which is a fact about the row rather
+	// than a malformed value. Treating it as a Cluster would make the stored
+	// value able to satisfy a mismatch check it was never meant to.
+	parsed, err := cluster.Parse(stored)
+	switch {
+	case err == nil:
+		r.Cluster = parsed
+	case stored == domain.PrePhase3Cluster:
+		r.Cluster = ""
+	default:
+		return domain.SettlementRequest{}, fmt.Errorf("settlement request %s records cluster %q: %w", r.ID, stored, err)
+	}
 	return r, nil
 }
 
@@ -188,4 +229,15 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// requestCluster is the stored form of a request's cluster. An unset cluster is
+// written as the pre-Phase-3 sentinel rather than as an empty string, so a row
+// that never declared one is distinguishable from a row that declared nothing
+// by accident.
+func requestCluster(c cluster.Cluster) string {
+	if c == "" {
+		return domain.PrePhase3Cluster
+	}
+	return string(c)
 }
