@@ -2,12 +2,14 @@ package config
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/fees"
+	"github.com/douglasdemaio/vtessera/internal/tokens"
 )
 
 const goodSecret = "0123456789abcdef0123456789abcdef"
@@ -268,5 +270,124 @@ func TestLocalnetMintsAreRefusedOffLocalnet(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("err = nil, want localnet mints refused on devnet")
+	}
+}
+
+func TestLocalnetMintsParseSuccessfullyOnLocalnet(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-session-secret", strings.Repeat("a", 40),
+		"-rpc-url", "http://127.0.0.1:8899",
+		"-cluster", "localnet",
+		"-localnet-mints", "11111111111111111111111111111111:TUSD:6",
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want a valid localnet mint to parse", err)
+	}
+	if len(cfg.Solana.LocalnetMints) != 1 || cfg.Solana.LocalnetMints[0].Symbol != "TUSD" {
+		t.Errorf("LocalnetMints = %+v, want one TUSD entry", cfg.Solana.LocalnetMints)
+	}
+}
+
+func TestLocalnetMintsRejectsAMalformedEntryViaParse(t *testing.T) {
+	_, err := Parse([]string{
+		"-session-secret", strings.Repeat("a", 40),
+		"-rpc-url", "http://127.0.0.1:8899",
+		"-cluster", "localnet",
+		"-localnet-mints", "11111111111111111111111111111111:TUSD:not-a-number",
+	})
+	if err == nil {
+		t.Fatal("err = nil, want a malformed localnet mint entry rejected")
+	}
+}
+
+func TestParseLocalnetMintsAcceptsAddressSymbolDecimals(t *testing.T) {
+	mints, err := parseLocalnetMints("11111111111111111111111111111111:TUSD:6")
+	if err != nil {
+		t.Fatalf("err = %v, want a valid mint to parse", err)
+	}
+	want := []tokens.Token{{
+		Address:  "11111111111111111111111111111111",
+		Symbol:   "TUSD",
+		Decimals: 6,
+		Enabled:  true,
+	}}
+	if !reflect.DeepEqual(mints, want) {
+		t.Errorf("mints = %+v, want %+v", mints, want)
+	}
+}
+
+func TestParseLocalnetMintsAcceptsAnOptionalMintAuthority(t *testing.T) {
+	mints, err := parseLocalnetMints("11111111111111111111111111111111:TUSD:6:11111111111111111111111111111111")
+	if err != nil {
+		t.Fatalf("err = %v, want a mint with an authority to parse", err)
+	}
+	if len(mints) != 1 || mints[0].MintAuthority != "11111111111111111111111111111111" {
+		t.Errorf("mints = %+v, want a mint authority recorded", mints)
+	}
+}
+
+func TestParseLocalnetMintsAcceptsMultipleCommaSeparatedEntries(t *testing.T) {
+	mints, err := parseLocalnetMints("11111111111111111111111111111111:TUSD:6, So11111111111111111111111111111111111111112:TSOL:9")
+	if err != nil {
+		t.Fatalf("err = %v, want two valid mints to parse", err)
+	}
+	if len(mints) != 2 {
+		t.Fatalf("len(mints) = %d, want 2", len(mints))
+	}
+}
+
+func TestParseLocalnetMintsOnBlankInputReturnsNoEntries(t *testing.T) {
+	mints, err := parseLocalnetMints("   ")
+	if err != nil {
+		t.Fatalf("err = %v, want a blank value to parse cleanly", err)
+	}
+	if len(mints) != 0 {
+		t.Errorf("mints = %+v, want no entries", mints)
+	}
+}
+
+func TestParseLocalnetMintsRejectsTheWrongFieldCount(t *testing.T) {
+	for _, raw := range []string{
+		"11111111111111111111111111111111:TUSD",
+		"11111111111111111111111111111111:TUSD:6:authority:extra",
+	} {
+		if _, err := parseLocalnetMints(raw); err == nil {
+			t.Errorf("parseLocalnetMints(%q) err = nil, want a field-count error", raw)
+		}
+	}
+}
+
+func TestParseLocalnetMintsRejectsNonNumericDecimals(t *testing.T) {
+	if _, err := parseLocalnetMints("11111111111111111111111111111111:TUSD:six"); err == nil {
+		t.Error("err = nil, want non-numeric decimals rejected")
+	}
+}
+
+func TestParseLocalnetMintsRejectsAnInvalidAddress(t *testing.T) {
+	if _, err := parseLocalnetMints("not-a-real-address:TUSD:6"); err == nil {
+		t.Error("err = nil, want an unparseable address rejected")
+	}
+}
+
+func TestSplitList(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty", "", nil},
+		{"whitespace only", "   ", nil},
+		{"single value", "a", []string{"a"}},
+		{"trims surrounding whitespace", "  a  ", []string{"a"}},
+		{"splits and trims multiple values", "a, b ,  c", []string{"a", "b", "c"}},
+		{"drops empty fields between commas", "a,,b", []string{"a", "b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitList(tc.in)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("splitList(%q) = %#v, want %#v", tc.in, got, tc.want)
+			}
+		})
 	}
 }
