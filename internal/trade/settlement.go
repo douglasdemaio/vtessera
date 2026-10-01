@@ -332,8 +332,6 @@ func (s *Service) ConfirmSettlement(ctx context.Context, actorID, tradeID, signa
 	default:
 		return domain.Trade{}, domain.Receipt{}, fmt.Errorf("%w: cannot confirm settlement in state %s", ErrIllegalState, tr.State)
 	}
-	// Record the signature first so a crash between here and the verdict still
-	// leaves evidence for the reconciliation worker to re-poll.
 	requests, err := s.settlement.Store.ListSettlementRequests(ctx, tradeID)
 	if err != nil {
 		return domain.Trade{}, domain.Receipt{}, err
