@@ -124,6 +124,9 @@ type RouteEntry struct {
 	AgentID      string                  `json:"agent_id,omitempty"`
 	Direction    string                  `json:"direction,omitempty"`
 	Announcement *CapabilityAnnouncement `json:"announcement,omitempty"`
+
+	parsedCost    money.Amount
+	hasParsedCost bool
 }
 
 type RouteResult struct {
@@ -242,15 +245,11 @@ func (t Table) Route(intent Intent) (RouteResult, error) {
 }
 
 func lessCost(a, b RouteEntry) bool {
-	if a.CostAmount != "" && b.CostAmount != "" {
-		am, errA := money.Parse(a.CostAmount)
-		bm, errB := money.Parse(b.CostAmount)
-		if errA == nil && errB == nil {
-			if cmp := am.Cmp(bm); cmp != 0 {
-				return cmp < 0
-			}
-			return a.Path < b.Path
+	if a.hasParsedCost && b.hasParsedCost {
+		if cmp := a.parsedCost.Cmp(b.parsedCost); cmp != 0 {
+			return cmp < 0
 		}
+		return a.Path < b.Path
 	}
 	if a.Cost != b.Cost {
 		return a.Cost < b.Cost

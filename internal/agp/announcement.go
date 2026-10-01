@@ -77,7 +77,7 @@ func EntryFor(a CapabilityAnnouncement) (RouteEntry, error) {
 		policy = map[string]any{}
 	}
 	announcement := a
-	return RouteEntry{
+	entry := RouteEntry{
 		Path:         a.SquadPath,
 		Cost:         cost,
 		Policy:       policy,
@@ -87,7 +87,14 @@ func EntryFor(a CapabilityAnnouncement) (RouteEntry, error) {
 		AgentID:      a.AgentID,
 		Direction:    directionOf(policy),
 		Announcement: &announcement,
-	}, nil
+	}
+	if a.CostAmount != "" {
+		if parsed, err := money.Parse(a.CostAmount); err == nil {
+			entry.parsedCost = parsed
+			entry.hasParsedCost = true
+		}
+	}
+	return entry, nil
 }
 
 func SquadPath(agentID, offerID string) string {
