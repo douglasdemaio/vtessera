@@ -262,6 +262,17 @@ unrelated to this project and is not expected to maintain this site.
 - ~~Guard against entries advertising endpoints that no longer answer.~~ Done.
   A health check probes every advertised endpoint and the build withholds any
   that a fresh report found dead. See "Endpoint health" in the site README.
+  Corrected 2026-10-01: the mechanism existed but never ran. The workflow decided
+  whether to commit by parsing JSON with `python3` inside the workflow YAML, and
+  `python3 -c` rejects an indented block, so every scheduled run died with
+  `IndentationError` and `content/health.json` froze at 2026-09-29. Nothing
+  caught it because the decision lived in the one part of the pipeline with no
+  test. The decision is now `-commit-plan` in the site's Go program, sharing the
+  same `RefreshAfter` and `StaleAfter` constants the staleness rule uses. The
+  lesson is the spec's own posture applied to the build: a job that decides
+  whether to publish needs the same treatment as a job that publishes, and a
+  scheduled workflow that goes red on every run is indistinguishable from one
+  nobody reads.
 - Usage metrics are specified in
   `2026-09-27-agent-ai-tool-usage-metrics-design.md`. Their dependency,
   `GET /v1/metrics`, exists and is public and unauthenticated; the site consumes
