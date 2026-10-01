@@ -216,7 +216,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 - `POST /v1/trades/{id}/cancel`, `POST /v1/trades/{id}/dispute` — off-ramps with a reason.
 - `GET /v1/tesseras/{tradeID}` — the signed tessera, its verification key, and its decoded claims.
 
-**Phase 2 additions:** `POST /v1/trades/{id}/settlement`, `POST /v1/trades/{id}/confirm`, `GET /v1/tokens`, and the A2A `tasks/*` JSON-RPC lifecycle.
+**Phase 2 additions:** `POST /v1/trades/{id}/settlement`, `GET /v1/trades/{id}/settlement` (re-fetch an issued settlement request — lets a buyer whose client restarted see whether the unsigned transaction it holds is still live), `POST /v1/trades/{id}/confirm`, `GET /v1/tokens`, and the A2A `tasks/*` JSON-RPC lifecycle.
 
 ## 9. Security
 
