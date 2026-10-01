@@ -90,14 +90,10 @@ func mismatchError(actual, withATA, withoutATA []instruction) error {
 			return fmt.Errorf("%w: instruction %d is %s, want %s", ErrMismatch, i, actual[i], best[i])
 		}
 	}
-	switch {
-	case len(actual) < len(best):
+	if len(actual) != len(best) {
 		return fmt.Errorf("%w: transaction has %d instructions, want %d: %v", ErrMismatch, len(actual), len(best), describe(actual))
-	case len(actual) > len(best):
-		return fmt.Errorf("%w: transaction has %d instructions, want %d: %v", ErrMismatch, len(actual), len(best), describe(actual))
-	default:
-		return fmt.Errorf("%w: %v", ErrMismatch, describe(actual))
 	}
+	return fmt.Errorf("%w: %v", ErrMismatch, describe(actual))
 }
 
 func describe(instructions []instruction) []string {
