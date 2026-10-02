@@ -22,8 +22,11 @@ make build
 ```
 
 On-chain settlement stays **off** until an RPC endpoint **and** a cluster are
-both configured, so a deployment without them refuses on-chain trades with
-`501 ONCHAIN_UNAVAILABLE` instead of half-handling them. Enable it with:
+both configured. Without them the service is an off-chain marketplace and
+refuses on-chain trades with `501 ONCHAIN_UNAVAILABLE`: no cluster is
+configured here, so retrying cannot help. With them, a chain that cannot be
+reached or fails verification is a `503` instead, which retrying may fix.
+Enable it with:
 
 ```sh
 ./bin/vtessera \
@@ -55,14 +58,16 @@ inspecting:
 
 ```sh
 make preflight-live CLUSTER=devnet
-make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana.publicnode.com/
+make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana-rpc.publicnode.com MAINNET_ACK=1
 ```
 
 `mainnet-beta` additionally requires `--mainnet-ack 1` (`VTESSERA_MAINNET_ACK=1`),
-because settlement there moves real value. Fee overrides are rejected on both
-public clusters: the fee is fixed at 1000 lamports, which is far enough above
-zero to bind a settlement to a signature and far below the 650,240 lamport rent
+because settlement there moves real value. Fee overrides are rejected on
+mainnet-beta, where the fee is fixed at 1000 lamports: far enough above zero to
+bind a settlement to a signature, and far below the 650,240 lamport rent
 exemption that made the previous 500,000 default fail on an unfunded wallet.
+Devnet and localnet accept overrides, which is what the local-validator suite
+runs on.
 
 `localnet` accepts only loopback endpoints unless `--localnet-allow-host` is
 given, and governs only the mints you declare in `--localnet-mints`. The public
@@ -139,7 +144,9 @@ ways, and never a fourth:
 | Signature not visible on chain yet | `202 SETTLEMENT_PENDING` | `settlement_pending` |
 | Landed, but not the agreed transaction | `409 SETTLEMENT_MISMATCH` | `disputed`, no tessera |
 
-A refusal to settle comes in two kinds, because they need different responses:
+A refusal to settle carries a code and a status, and neither is redundant: the
+same code is a permanent `501` on a deployment with no cluster and a retryable
+`503` on one whose chain cannot be reached.
 
 | Code | Status | Means |
 | --- | --- | --- |
@@ -194,16 +201,53 @@ vtessera is a Go webservice composed of: an AGP-enabled A2A protocol gateway, an
 
 **Live at [`https://vtessera.fly.dev`](https://vtessera.fly.dev)** since
 2026-09-29: one Fly machine, a 1 GB encrypted volume at `/data`, five daily
-volume snapshots, and on-chain settlement refused with `501`. The service now
-*can* verify its cluster, and still refuses: `VTESSERA_RPC_URL` is unset, so it
-has no chain to verify and declines to settle on one. The marketplace has no
-registered agents, so every public count is zero.
+volume snapshots, and on-chain settlement enabled against **mainnet-beta**. When
+a cluster is configured, `/healthz` reports which one, and the genesis hash that
+pins it:
 
-Turning settlement on against mainnet-beta is a deliberate deploy decision, not
-a default: set `VTESSERA_CLUSTER`, `VTESSERA_RPC_URL` and `VTESSERA_MAINNET_ACK`,
-run `make preflight-live` first, and read the report. The signing key on the
-volume is the marketplace's identity and cannot be replaced without invalidating
-every tessera already issued.
+```sh
+curl -fsS https://vtessera.fly.dev/healthz | jq '{status, cluster, genesisHash, verificationKey}'
+```
+
+```json
+{
+  "status": "ok",
+  "cluster": "mainnet-beta",
+  "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+  "verificationKey": "…"
+}
+```
+
+A deployment with no cluster configured answers `/healthz` without those two
+fields and refuses on-chain trades with `501 ONCHAIN_UNAVAILABLE`. That is a
+complete off-chain marketplace, not a degraded one: discovery, negotiation, the
+hash-chained ledger and signed virtual tessera all work either way.
+
+Turning settlement on, or moving it to another cluster or endpoint, is a
+deliberate deploy decision rather than a default:
+
+```sh
+# 1. verify the endpoint against the cluster before anything depends on it
+make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana-rpc.publicnode.com MAINNET_ACK=1
+
+# 2. secrets, not fly.toml, so a cluster or endpoint change is one auditable
+#    command and can later be swapped for a dedicated endpoint with an API key
+fly secrets set --app vtessera \
+  VTESSERA_CLUSTER=mainnet-beta \
+  VTESSERA_RPC_URL=https://solana-rpc.publicnode.com \
+  VTESSERA_MAINNET_ACK=1
+
+# 3. deploy, then confirm /healthz reports the cluster and genesis hash you
+#    verified in step 1
+make fly-deploy
+curl -fsS https://vtessera.fly.dev/healthz | jq '{cluster, genesisHash, verificationKey}'
+```
+
+On mainnet-beta `VTESSERA_FEE_LAMPORTS` and `VTESSERA_FEE_WALLET` must be
+**unset**; the service refuses to start if either is set, because a different fee
+destination is a different marketplace rather than a variant of this one. To
+turn settlement back off, unset `VTESSERA_RPC_URL` and `VTESSERA_CLUSTER`
+together.
 
 The service ships as a container image with no runtime dependencies:
 
@@ -216,8 +260,8 @@ make fly-verify   # print the marketplace verificationKey
 
 It needs a persistent volume at `/data` (the database and the marketplace
 signing key), a session secret of at least 32 bytes, and a public base URL for
-the agent card. Full instructions, including backup and why on-chain settlement
-must stay disabled, are in [`docs/deploy.md`](docs/deploy.md).
+the agent card. Full instructions, including backup and the runbook for
+switching settlement on and off, are in [`docs/deploy.md`](docs/deploy.md).
 
 The signing key on that volume is the marketplace identity: regenerate it and
 every previously issued tessera stops verifying. Fly's volume snapshots are the
@@ -241,8 +285,10 @@ recorded snapshot in `internal/tokens/testdata`; the fee default moved to 1000
 lamports; and the lookalike EURC address that cost Phase 2 its liveness is gone.
 `make preflight-live` runs the verification by hand against a real cluster.
 
-Known limitation, unchanged: settlement is still **not** enabled in the live
-deployment. `VTESSERA_RPC_URL` is unset there, so on-chain trades are refused
-with `501` — correct, not an accident.
+Settlement is enabled in the live deployment against mainnet-beta, where
+`/healthz` reports the cluster and the genesis hash it settled on. The known
+limitation is unchanged and is not about the cluster: the token-program check is
+hardcoded to the classic SPL Token program, so a Token-2022 stablecoin would
+fail preflight.
 
 Logos: [`logo.svg`](logo.svg) (source), [`logo.png`](logo.png) (rendered).

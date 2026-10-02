@@ -69,8 +69,9 @@ Use a systemd unit with `Restart=on-failure` and the secret in
 `fly.toml` is checked in: one machine, one volume mounted at `/data`, and the
 `/healthz` check. It is deliberately a single instance — two machines would be
 two marketplaces with two signing keys, and a tessera issued by one would not
-verify against the other. Do not scale it out before Phase 3 provides a shared
-store.
+verify against the other. Phase 3 does not change that: it made the chain a
+verified value, not the store a shared one, so the Postgres workstream remains
+deferred and multi-instance deployment stays out of scope.
 
 The image is built by Fly from the same `Containerfile` used locally, so what
 ships is what was tested.
@@ -122,34 +123,90 @@ copying the `.db` alone is not enough), or snapshot the volume with
 `fly volumes snapshots`. The signing key is the part that cannot be recreated —
 consider retrieving it once and storing it somewhere other than the volume.
 
-## Settlement: leave the cluster and RPC endpoint unset
+## Settlement: on when a cluster is configured, off otherwise
 
-Do **not** set `VTESSERA_RPC_URL` or `VTESSERA_CLUSTER` for this deployment, and
-note that the service refuses to start with only one of the two. Settlement needs
-both, and it needs both named: a service that inferred its cluster from the URL
-would have nothing to check that URL against.
+Settlement is switched by configuration and by nothing else. This deployment
+has been enabled against **mainnet-beta** since 2026-10-01; the same binary
+serves the disabled state without any other change.
 
-On-chain settlement is refused with `501 ONCHAIN_UNAVAILABLE` while off-chain
-settlement — the hash-chained ledger and signed virtual tessera — works fully.
-That is the correct state for the live app, not a degraded one: the marketplace
-has no registered agents, so there is nothing to settle.
+**Enabled** — `VTESSERA_CLUSTER` and `VTESSERA_RPC_URL` both set, plus
+`VTESSERA_MAINNET_ACK=1` on mainnet-beta. `/healthz` reports `cluster` and
+`genesisHash`, on-chain trades are accepted, and a boot that cannot verify the
+cluster it was told to expect refuses to serve.
 
-Phase 3 is implemented, and the service now verifies the chain it is pointed at:
-the genesis hash and every governed mint are checked at boot, on every settlement
-request and on every reconciler tick, and a mismatch refuses to serve. What
-prevents enabling it here is not a missing capability but a missing decision.
-Turning it on is a deliberate act, and the sequence is:
+**Disabled** — neither set. `/healthz` omits `cluster` and `genesisHash`
+entirely rather than reporting them empty, and on-chain trades are refused with
+`501 ONCHAIN_UNAVAILABLE`: no cluster is configured there, so retrying cannot
+help. Discovery, negotiation, the hash-chained ledger and signed virtual tessera
+are all unaffected, which makes that state a complete off-chain marketplace
+rather than a degraded one. An endpoint set without a cluster, or the reverse,
+is a startup error rather than either state.
 
-1. `make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana.publicnode.com/`.
+The live deployment's three settings are Fly secrets, not `fly.toml`:
+
+```
+VTESSERA_CLUSTER=mainnet-beta
+VTESSERA_RPC_URL=https://solana-rpc.publicnode.com
+VTESSERA_MAINNET_ACK=1
+```
+
+Settlement needs the cluster named as well as the endpoint: a service that
+inferred its cluster from the URL would have nothing to check that URL against.
+
+Phase 3 is implemented, and the service verifies the chain it is pointed at:
+the genesis hash and every governed mint are checked at boot, on every
+settlement request and on every reconciler tick. A boot that verifies logs
+`preflight passed` followed by `on-chain settlement enabled`. A boot that does
+not verify exits before it opens the database or creates the signing key, so a
+misconfigured deploy never half-serves; once running, a chain that drifts later
+is reported as `503 ONCHAIN_UNAVAILABLE` and confirmations are halted for that
+tick.
+
+The last recorded boot verified both governed mints, genesis
+`5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`, and a fee wallet holding
+39,724,828 lamports against a 650,240 rent minimum. The fee is 1,000 lamports
+per settlement, paid by the buyer to `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`.
+That wallet had no transaction history on mainnet-beta as of this writing, which
+is expected: no settlement had been driven through to completion.
+
+Turning settlement on, or changing cluster or endpoint, is a deliberate act:
+
+1. `make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana-rpc.publicnode.com MAINNET_ACK=1`.
    Read the report. Every mint must say `verified`, the genesis hash must be
    `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`, and the fee wallet must hold
    more than the reported rent minimum. This step creates no database and no
    signing key, so it is safe to run against a host you are only inspecting.
 2. Set `VTESSERA_CLUSTER=mainnet-beta`, `VTESSERA_RPC_URL`, and
-   `VTESSERA_MAINNET_ACK=1`. The acknowledgement is required because settlement
-   there moves real value.
+   `VTESSERA_MAINNET_ACK=1` with one `fly secrets set`, not in `fly.toml`. The
+   acknowledgement is required because settlement there moves real value, and
+   keeping them out of the image means a cluster or endpoint change is an
+   auditable secret change rather than a rebuild — which is also what lets the
+   public endpoint be replaced later by a dedicated one carrying an API key.
 3. Deploy, then confirm `curl /healthz` reports the cluster and genesis hash you
-   verified in step 1.
+   verified in step 1, and that `verificationKey` is unchanged.
+
+```bash
+fly secrets set --app vtessera \
+  VTESSERA_CLUSTER=mainnet-beta \
+  VTESSERA_RPC_URL=https://solana-rpc.publicnode.com \
+  VTESSERA_MAINNET_ACK=1
+make fly-deploy
+curl -fsS https://vtessera.fly.dev/healthz
+```
+
+If the machine will not boot or `/healthz` does not report the cluster you
+verified, roll the switch back — `fly secrets unset --app vtessera
+VTESSERA_CLUSTER VTESSERA_RPC_URL VTESSERA_MAINNET_ACK`, then `make fly-deploy`
+— and read `fly logs --app vtessera` before trying again. That leaves the
+disabled state described above, which is a working marketplace.
+
+On mainnet-beta `VTESSERA_FEE_LAMPORTS` and `VTESSERA_FEE_WALLET` must be
+**unset**; the service refuses to start if either is set, because a different fee
+destination is a different marketplace rather than a variant of this one.
+
+To turn settlement back off, unset `VTESSERA_RPC_URL` and `VTESSERA_CLUSTER`
+together and redeploy. That is the correct state for a deployment with no trades
+to settle.
 
 **Do not edit the genesis pin to make a mismatch disappear.** A changed genesis
 hash is either a provider incident or a DNS hijack, and updating the pin converts
@@ -177,7 +234,9 @@ failure — stop, restart, confirm the key is unchanged.
 When settlement is enabled, `/healthz` also carries `cluster` and `genesisHash`.
 Those are the chain this deployment settled on, and a tessera is only meaningful
 relative to one. They are absent rather than empty when settlement is
-unconfigured, which is the live app's current state.
+unconfigured, which is how a caller tells the two states apart without guessing
+from the status code alone. The live app currently reports `mainnet-beta` and
+`5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`.
 
 A second check that the volume is real, not just present:
 
@@ -274,8 +333,12 @@ and the health check probes it like one.
 
 `https://vtessera.fly.dev` — one `shared-cpu-1x` machine at 256 MB in `fra`, a
 1 GB encrypted volume at `/data`, Fly keeping five daily volume snapshots, and
-`VTESSERA_RPC_URL` unset so on-chain settlement stays refused. The marketplace
-has no registered agents yet, so every public count is genuinely zero.
+on-chain settlement enabled against `mainnet-beta` through Fly secrets.
+`verificationKey` is `5LRpM9wpvPfRYuQAC7oNdyaQa6sakpMcnZeR9FS5CgjB`.
+
+The registry is not empty: the write path has been exercised, so there are
+registered agents and at least one open offer priced in USDC, and the public
+agent list at `GET /v1/agents` is the honest source for the current counts.
 
 A custom domain is the only piece of the original plan still outstanding:
 `vtessera.com` does not resolve, so nothing has been claimed that would be

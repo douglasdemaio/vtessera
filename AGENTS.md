@@ -31,7 +31,7 @@ base58 constant:
 
 ```bash
 make preflight-live CLUSTER=devnet
-make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana.publicnode.com/
+make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana-rpc.publicnode.com MAINNET_ACK=1
 ```
 
 It opens no database and creates no signing key, so it is safe to point at a host
@@ -105,17 +105,45 @@ skips its own PID.
 Delete the ledger when finished if disk matters: it is disposable, and
 `--reset` rebuilds it from genesis on the next run.
 
-### 4. The chain is never mainnet, by default
+### 4. The live deployment settles on mainnet-beta
 
-Phase 3 (cluster awareness, endpoint pinning, on-chain mint verification) is
-**designed but not implemented**. Until it lands, this service has no concept of
-which cluster it is connected to. Do not point it at mainnet-beta or at a live
-devnet expecting production behaviour. `VTESSERA_RPC_URL` unset is the correct
-state: settlement stays off and returns `501 ONCHAIN_UNAVAILABLE`.
+**Changed 2026-10-01.** This used to say the opposite. Phase 3 (cluster
+awareness, endpoint pinning, on-chain mint verification) is implemented, the
+live app at `https://vtessera.fly.dev` now settles against **mainnet-beta**, and
+`/healthz` reports `cluster` and `genesisHash`. On-chain settlement is on and
+real value can move.
 
-The documented mainnet-beta RPC endpoint for the future is
-`https://solana.publicnode.com/`, pinned by genesis hash
-`5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`.
+The endpoint is `https://solana-rpc.publicnode.com`, pinned by genesis hash
+`5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`, and it was verified against the
+live chain before being enabled. The three variables are secrets — not in
+`fly.toml` — so a cluster or endpoint change is one auditable `fly secrets set`
+rather than an image rebuild, and so the public endpoint can later be swapped for
+a dedicated one carrying an API key:
+
+```
+VTESSERA_CLUSTER=mainnet-beta
+VTESSERA_RPC_URL=https://solana-rpc.publicnode.com
+VTESSERA_MAINNET_ACK=1
+```
+
+What has not changed, and is why constraint 6 still governs:
+
+- The constants came from an untrusted process. Phase 3 protects against a
+  repeat, it does not certify the originals.
+- **Never edit a genesis or authority pin to clear a failure.** That converts a
+  detectable incident into an undetectable compromise.
+- `VTESSERA_MAINNET_ACK=1` is required on mainnet-beta and rejected off it. It is
+  the acknowledgement that settlement moves real value.
+- `VTESSERA_FEE_LAMPORTS` and `VTESSERA_FEE_WALLET` must stay unset on
+  mainnet-beta; the service refuses to start otherwise.
+
+Run `make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana-rpc.publicnode.com MAINNET_ACK=1`
+before changing any of this. `docs/deploy.md` is the runbook.
+
+Turning it back off is unsetting `VTESSERA_RPC_URL` and `VTESSERA_CLUSTER`
+together, which leaves a working off-chain marketplace: `/healthz` stops
+reporting `cluster` and `genesisHash`, and on-chain trades are refused with
+`501 ONCHAIN_UNAVAILABLE`.
 
 ### 5. `vtessera` is deployed at `https://vtessera.fly.dev`
 
@@ -124,8 +152,10 @@ a 1 GB volume mounted at `/data`, and both kept warm. `fly.toml` and a verified
 `Containerfile` are in the repository; the runbook is
 [`docs/deploy.md`](docs/deploy.md).
 
-Deployed with `VTESSERA_RPC_URL` unset, so on-chain settlement is still refused
-with 501. That is required, not incidental — see constraints 4 and 6.
+Settlement was enabled against mainnet-beta on 2026-10-01 and has been serving
+since — see constraint 4. The live `verificationKey` is
+`5LRpM9wpvPfRYuQAC7oNdyaQa6sakpMcnZeR9FS5CgjB`, and that is the identity to
+protect across any deploy that touches settlement.
 
 The things that matter when editing this repository:
 
@@ -181,11 +211,12 @@ a detectable incident into an undetectable compromise.
 
 ## Git
 
-`main` history is deliberately short: `1ca720e Initial commit` (scaffold),
-`56ac399` (the whole Phase 2 settlement service), then the Phase 3 spec and
+`main` history is deliberately short: `d6fda1f Initial commit` (scaffold),
+`20edf8f` (the whole Phase 2 settlement service), `440aebc` (Phase 3: cluster
+awareness, endpoint pinning, on-chain mint verification), then the Phase 3
 records. **Do not commit unless explicitly asked.**
 
-Phase 3 landed on 2026-09-30, uncommitted. The fee default is now `1000`
+Phase 3 landed on 2026-09-30 in `440aebc`. The fee default is now `1000`
 lamports, the bogus EURC mint is replaced, and the governed table is
 cluster-scoped — all three break assumptions in tests that predate them, which
 is why the fee and mint tests assert the new values rather than the old.

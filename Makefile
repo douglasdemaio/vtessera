@@ -41,13 +41,13 @@ validator-off:
 test-solana:
 	$(GO) test -tags solana -timeout 30m ./internal/e2e/
 
-# Checks a cluster for real without starting the service. The service has no
-# cluster awareness of its own until it has verified one, so this is the only way
-# to find out whether an endpoint is the cluster it claims to be before a deploy
-# depends on it. Override any of the four settings:
+# Checks a cluster for real without starting the service. It runs the same
+# verification the service performs at boot, so it is the only way to find out
+# whether an endpoint is the cluster it claims to be before a deploy depends on
+# it. Override any of the four settings:
 #
 #   make preflight-live CLUSTER=devnet RPC_URL=https://api.devnet.solana.com
-#   make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana.publicnode.com/ MAINNET_ACK=1
+#   make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana-rpc.publicnode.com MAINNET_ACK=1
 #
 # mainnet-beta requires MAINNET_ACK=1 because settlement there moves real value.
 preflight-live: build

@@ -4,7 +4,9 @@
 # its Ed25519 marketplace signing key on local disk, so scaling this out would
 # produce two marketplaces with two different identities — every tessera issued
 # by one would fail to verify against the other. This is a single-instance
-# service until Phase 3 gives it a shared store; do not add machines.
+# service by design, not until some later phase: Phase 3 made the chain a
+# verified value, not the store a shared one, and Postgres is still a planned
+# target. Do not add machines.
 
 app = "vtessera"
 
@@ -26,8 +28,22 @@ primary_region = "fra"
   VTESSERA_ADDR = ":8080"
   VTESSERA_DB = "/data/vtessera.db"
   VTESSERA_SIGNER_KEY = "/data/signer.key"
-  # VTESSERA_RPC_URL is deliberately absent. Unset is what disables on-chain
-  # settlement, which is required until Phase 3 lands.
+  # On-chain settlement is enabled, against mainnet-beta. The three variables
+  # that turn it on are secrets, not here:
+  #   fly secrets set VTESSERA_CLUSTER=mainnet-beta \
+  #                 VTESSERA_RPC_URL=https://solana-rpc.publicnode.com \
+  #                 VTESSERA_MAINNET_ACK=1
+  # They are secrets so that a cluster and endpoint change is one auditable
+  # `fly secrets set`, not an image rebuild, and so the public endpoint can
+  # later be replaced by a dedicated one carrying an API key. Read
+  # docs/deploy.md before changing any of them: the genesis pin is not to be
+  # edited to clear a preflight failure, and the fee policy is fixed on
+  # mainnet-beta.
+  #
+  # Unsetting VTESSERA_RPC_URL and VTESSERA_CLUSTER turns settlement back off,
+  # which is the correct state for a deployment with nothing to settle:
+  # on-chain trades are then refused with 501 ONCHAIN_UNAVAILABLE and the
+  # off-chain ledger path is unaffected.
 
 # This volume is the marketplace identity. The signing key is created here on
 # first boot and cannot be regenerated — a new key is a new marketplace, and
