@@ -162,10 +162,17 @@ misconfigured deploy never half-serves; once running, a chain that drifts later
 is reported as `503 ONCHAIN_UNAVAILABLE` and confirmations are halted for that
 tick.
 
-The last recorded boot verified both governed mints, genesis
+The endpoint now configured was last checked from the operator side on
+2026-10-02, with
+`make preflight-live CLUSTER=mainnet-beta RPC_URL=https://solana-rpc.publicnode.com MAINNET_ACK=1`:
+both governed mints `verified`, genesis
 `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`, and a fee wallet holding
-39,724,828 lamports against a 650,240 rent minimum. The fee is 1,000 lamports
-per settlement, paid by the buyer to `J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`.
+39,724,828 lamports against a 650,240 rent minimum. The 2026-10-01 boot that
+first enabled settlement read the same numbers through the older endpoint name
+`https://solana.publicnode.com/`, which reported that same genesis hash and both
+mints — the genesis pin, not the hostname, is what says two endpoints are the
+same chain. The fee is 1,000 lamports per settlement, paid by the buyer to
+`J59EPyPHf9wtoLjf8rG4f9cARnLnUPKCdNwZX241rakh`.
 That wallet had no transaction history on mainnet-beta as of this writing, which
 is expected: no settlement had been driven through to completion.
 
@@ -336,9 +343,14 @@ and the health check probes it like one.
 on-chain settlement enabled against `mainnet-beta` through Fly secrets.
 `verificationKey` is `5LRpM9wpvPfRYuQAC7oNdyaQa6sakpMcnZeR9FS5CgjB`.
 
-The registry is not empty: the write path has been exercised, so there are
-registered agents and at least one open offer priced in USDC, and the public
-agent list at `GET /v1/agents` is the honest source for the current counts.
+The registry is not empty, but it is not a population either. The write path was
+verified with three throwaway probe registrations — `opencode-probe-agent` and
+two `probe-offer-body` cards — and one open USDC offer priced by one of them.
+`GET /v1/agents` is the honest source for the current counts. There is no way to
+remove them over HTTP: no `DELETE` route, and no admin surface over
+`SetAgentStatus`. The runtime image carries no `sqlite3`, so editing
+`/data/vtessera.db` on the machine is not a supported operation either. Getting
+rid of them is a deliberate migration, not a cleanup command.
 
 A custom domain is the only piece of the original plan still outstanding:
 `vtessera.com` does not resolve, so nothing has been claimed that would be
