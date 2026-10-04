@@ -102,8 +102,21 @@ Three rules to understand before changing any of it:
   budget back, so an agent that opens a negotiation it does not want should
   cancel it.
 
-Two known limits, both bounded and both worth stating to an operator rather
-than discovering in an incident:
+An **accepted** trade is no longer cancellable on request: acceptance is a
+commitment, and letting either party walk away from it the moment they regret it
+would leave the counterparty no way to plan. Instead it carries a deadline,
+`--trade-accept-ttl` (default `24h`), after which either party may cancel it and
+a sweep (`--trade-expiry-sweep-interval`, default `5m`) cancels it whether or not
+anyone asks. The sweep is what makes the daily cap mean what it says: without it
+an accepted trade that is never committed holds its buyer's budget forever, and
+a budget that never comes back is a queue rather than a cap.
+
+The deadline is also what lets the cap be enforced at the off-chain commit. That
+refusal would otherwise strand the buyer, so the service refuses to boot without
+a deadline rather than run with a weaker cap than the one it was configured with.
+
+One known limit remains, bounded and worth stating to an operator rather than
+discovering in an incident:
 
 - **A cap is per agent identity, and identities are free.** The cost of an
   agent is one Ed25519 key, so a buyer that runs out of budget can register
@@ -111,13 +124,6 @@ than discovering in an incident:
   itself to; it is not a KYC limit and it does not know about the person behind
   the key. Rate limits and deposit requirements are the controls for that, and
   neither is in place.
-- **A trade opened with budget to spare and committed later can overshoot by
-  one window.** The reservation is anchored on the later of opening and first
-  commitment, so a trade opened yesterday and committed today is charged to
-  today — and nothing re-checks it at the off-chain commit, because a trade in
-  `accepted` cannot be cancelled and refusing there would strand the buyer. The
-  overshoot is bounded by what was reserved when the window rolled. Closing it
-  properly means expiring accepted trades, which is dispute-lifecycle work.
 
 Set `--sandbox` on a deployment where no real value moves. It reports
 `sandbox: true` on `/healthz` and refuses to start alongside an RPC endpoint,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -85,6 +86,70 @@ func (s *Store) AddTradeAcceptance(ctx context.Context, tradeID, agentID string,
 		return nil
 	})
 	return inserted, err
+}
+
+// TradeAcceptance returns when the trade was accepted, which is the anchor for
+// its expiry. A trade that was never accepted has no acceptance and therefore no
+// deadline: false, not an error, because "not yet accepted" is a state and not a
+// fault.
+func (s *Store) TradeAcceptance(ctx context.Context, tradeID string) (time.Time, bool, error) {
+	var at int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT MIN(created_at) FROM trade_acceptances WHERE trade_id = ?`, tradeID).Scan(&at)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return time.Time{}, false, nil
+	case err != nil:
+		return time.Time{}, false, fmt.Errorf("trade acceptance: %w", err)
+	case at == 0:
+		return time.Time{}, false, nil
+	}
+	return fromNanos(at), true, nil
+}
+
+// AcceptedBefore returns accepted trades whose acceptance deadline falls before
+// the given instant, oldest first. It is the sweeper's query, so it is bounded:
+// a sweep that tried to expire every stale trade in one pass would hold a write
+// lock for as long as the backlog and the reservations would not be released
+// incrementally for the buyers waiting on them.
+func (s *Store) AcceptedBefore(ctx context.Context, deadline time.Time, limit int) ([]domain.Trade, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT t.id FROM trades t
+		 WHERE t.state = ?
+		   AND EXISTS (SELECT 1 FROM trade_acceptances a WHERE a.trade_id = t.id)
+		   AND (SELECT MIN(a.created_at) FROM trade_acceptances a WHERE a.trade_id = t.id) <= ?
+		 ORDER BY t.updated_at ASC
+		 LIMIT ?`,
+		string(domain.TradeAccepted), nanos(deadline), limit)
+	if err != nil {
+		return nil, fmt.Errorf("expiring accepted trades: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("expiring accepted trades scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("expiring accepted trades rows: %w", err)
+	}
+	// The state predicate above is the index-friendly filter; the rows are read
+	// through GetTrade so a caller sees the same shape it gets everywhere else.
+	out := make([]domain.Trade, 0, len(ids))
+	for _, id := range ids {
+		tr, err := s.GetTrade(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tr)
+	}
+	return out, nil
 }
 
 func (s *Store) SetTradeState(ctx context.Context, tradeID string, from, to domain.TradeState, at time.Time) (bool, error) {

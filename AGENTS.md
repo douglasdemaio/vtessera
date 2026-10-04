@@ -229,11 +229,16 @@ negotiable without a design discussion:
   KYC, and anyone can mint another identity. Do not describe it as a spend limit
   on a person or an organisation.
 
-Two bounds are documented rather than fixed, in `docs/deploy.md`: an off-chain
-trade committed after its window rolled can overshoot by one window (nothing
-re-checks at commit, because `accepted` cannot be cancelled), and the whole
-mechanism is bypassable by registering a new agent. Closing the first means
-expiring accepted trades, which is Task 3.
+An accepted trade carries a deadline (`--trade-accept-ttl`, default `24h`) and can
+be cancelled only once it passes. This is what lets the off-chain commit re-check
+the cap: without somewhere to go, a refused commit would strand the buyer holding
+a trade they can neither complete nor abandon. A sweep cancels expired trades so
+their reserved budget comes back. The service refuses to boot without a deadline,
+because running with a cap that cannot be enforced at the commit is a weaker cap
+than the one the operator configured, reached by a setting they never touched.
+
+What is left is bypassable by registering a new agent, and documented in
+`docs/deploy.md`. Closing that means identity attestation or a deposit.
 
 `make test-devnet` completes a full off-chain trade against the public devnet
 cluster and asserts the cap refusals there. It is the only test besides
