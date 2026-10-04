@@ -330,6 +330,7 @@ const (
 	EventSettled           TradeEventType = "settled"
 	EventCancelled         TradeEventType = "cancelled"
 	EventDisputed          TradeEventType = "disputed"
+	EventExpired           TradeEventType = "expired"
 )
 
 // SettlementStatus is the lifecycle of a single issued settlement request. A

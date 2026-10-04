@@ -40,6 +40,11 @@ var (
 	// into by default and can change only by asking, so it is a conflict with
 	// server state rather than a malformed request.
 	ErrSpendCapExceeded = errors.New("trade exceeds this agent's spending cap")
+	// ErrNotExpiredYet means a party tried to cancel an accepted trade before its
+	// deadline. Acceptance is a commitment, so it holds until the deadline rather
+	// than until one side changes its mind: an accepted trade that could be walked
+	// away from at will would leave the counterparty with no way to plan.
+	ErrNotExpiredYet = errors.New("this accepted trade has not expired yet")
 	// ErrMintUnpriced means the trade is denominated in a mint this deployment
 	// has no USD rate for, so the cap cannot be evaluated against it. It is
 	// refused rather than allowed uncapped: an agent that could pick an unpriced
@@ -52,6 +57,11 @@ type Store interface {
 	GetTrade(ctx context.Context, id string) (domain.Trade, error)
 	GetTradeByIdempotencyKey(ctx context.Context, key string) (domain.Trade, error)
 	AddTradeAcceptance(ctx context.Context, tradeID, agentID string, at time.Time) (bool, error)
+	// TradeAcceptance returns when the trade was accepted. False means it has not
+	// been, which is a state rather than a fault.
+	TradeAcceptance(ctx context.Context, tradeID string) (time.Time, bool, error)
+	// AcceptedBefore returns accepted trades whose deadline has passed, bounded.
+	AcceptedBefore(ctx context.Context, deadline time.Time, limit int) ([]domain.Trade, error)
 	SetTradeState(ctx context.Context, tradeID string, from, to domain.TradeState, at time.Time) (bool, error)
 	AppendTradeEvent(ctx context.Context, e domain.TradeEvent) (int64, error)
 	ListTradeEvents(ctx context.Context, tradeID string) ([]domain.TradeEvent, error)
@@ -99,6 +109,12 @@ type Service struct {
 	limitsStore LimitStore
 	now         func() time.Time
 
+	// acceptTTL is how long an accepted trade may sit uncommitted before it can be
+	// cancelled. It exists so that refusing a commit is never a dead end: see
+	// Record. Zero means no deadline, which is the safe direction for an operator
+	// who has not chosen one.
+	acceptTTL time.Duration
+
 	// reserveMu serialises the read-a-cap-then-reserve-a-cap sequence in
 	// Create. Checking a daily cap and then inserting the reservation that
 	// discharges it are two statements, and without a lock between them two
@@ -135,6 +151,27 @@ func (s *Service) WithLimits(policy limits.Policy, store LimitStore) *Service {
 	s.limitsStore = store
 	return s
 }
+
+// WithClock replaces the service's clock. It exists because a deadline cannot be
+// tested any other way: waiting out a real hour proves nothing that a fixed clock
+// does not prove instantly and repeatably.
+func (s *Service) WithClock(now func() time.Time) *Service {
+	if now != nil {
+		s.now = now
+	}
+	return s
+}
+
+// WithAcceptanceTTL bounds how long an accepted trade may wait to be committed.
+// Without it an accepted trade cannot be cancelled at all, which is what forces
+// Record to go unchecked rather than enforcing the cap.
+func (s *Service) WithAcceptanceTTL(ttl time.Duration) *Service {
+	s.acceptTTL = ttl
+	return s
+}
+
+// AcceptanceTTL reports the configured deadline length, zero when there is none.
+func (s *Service) AcceptanceTTL() time.Duration { return s.acceptTTL }
 
 // Limits returns the active cap policy, or false when caps are not in force.
 func (s *Service) Limits() (limits.Policy, bool) {
@@ -186,20 +223,121 @@ func (s *Service) RaiseLimits(ctx context.Context, agentID string, perTrade, per
 	return policy.Effective(ctx, agentID), nil
 }
 
+// acceptanceDeadline is when an accepted trade stops being a commitment. It is
+// anchored on the acceptance rather than on creation, because what the deadline
+// bounds is how long after both parties said yes the buyer has to move.
+//
+// A trade that was never accepted has no deadline, and a service with no
+// configured TTL has no deadline either. Both answer zero, which every caller
+// reads as "there is nothing to wait for".
+func (s *Service) acceptanceDeadline(ctx context.Context, tr domain.Trade) (time.Time, error) {
+	if s.acceptTTL <= 0 || tr.State != domain.TradeAccepted {
+		return time.Time{}, nil
+	}
+	acceptedAt, found, err := s.store.TradeAcceptance(ctx, tr.ID)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !found {
+		return time.Time{}, nil
+	}
+	return acceptedAt.UTC().Add(s.acceptTTL), nil
+}
+
+// Expired reports whether an accepted trade is past its deadline and can therefore
+// be cancelled. A trade in any other state is never expired: it has its own
+// transitions, and reporting otherwise would let a recorded trade be cancelled.
+func (s *Service) Expired(ctx context.Context, tr domain.Trade) (bool, error) {
+	deadline, err := s.acceptanceDeadline(ctx, tr)
+	if err != nil {
+		return false, err
+	}
+	if deadline.IsZero() {
+		return false, nil
+	}
+	return !s.now().UTC().Before(deadline), nil
+}
+
+// ExpireAccepted cancels accepted trades whose deadline has passed, so that a
+// trade neither party acts on stops reserving a buyer's budget and stops being
+// listed as live. It is safe to run repeatedly and safe to run concurrently with
+// agents: the state change is conditional on the trade still being accepted, so a
+// buyer who commits a trade at the same moment loses the race in the direction
+// that keeps their money.
+//
+// The cap on the batch is what makes this a background job rather than a startup
+// cost. A large backlog is swept over several ticks, and each trade releases its
+// reservation as it is cancelled.
+func (s *Service) ExpireAccepted(ctx context.Context, limit int) (int, error) {
+	if s.acceptTTL <= 0 {
+		return 0, nil
+	}
+	deadline := s.now().UTC()
+	trades, err := s.store.AcceptedBefore(ctx, deadline, limit)
+	if err != nil {
+		return 0, err
+	}
+	expired := 0
+	for _, tr := range trades {
+		// Re-checked per trade rather than trusted from the query: the deadline and
+		// the state can both have moved while the batch was being read, and
+		// cancelling a trade a buyer just committed is not recoverable from here.
+		past, err := s.Expired(ctx, tr)
+		if err != nil {
+			return expired, err
+		}
+		if !past || tr.State != domain.TradeAccepted {
+			continue
+		}
+		detail := reasonDetail("the acceptance deadline passed before this trade was committed")
+		if _, err := s.applyAs(ctx, tr, "", domain.TradeCancelled, detail, domain.EventExpired); err != nil {
+			if errors.Is(err, ErrIllegalState) {
+				continue
+			}
+			return expired, err
+		}
+		expired++
+	}
+	return expired, nil
+}
+
+// RunExpirySweeper cancels expired accepted trades until the context is done. It
+// is deliberately a plain loop on an interval: an expired trade is not urgent, it
+// is a budget that ought to come back.
+func (s *Service) RunExpirySweeper(ctx context.Context, every time.Duration, limit int) {
+	if s.acceptTTL <= 0 || every <= 0 {
+		return
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// A failed sweep is retried on the next tick rather than propagated:
+			// there is nothing to escalate to and the next tick still frees the
+			// budget. Silent by design, not by oversight; the deadline bounds how
+			// long a stuck sweep can delay anything.
+			_, _ = s.ExpireAccepted(ctx, limit)
+		}
+	}
+}
+
 // checkSpend refuses a trade that would take its buyer past a cap.
 //
-// It is called at the two points where refusing is still free. The first is
+// It is called at every point where money can actually move. The first is
 // creation, before either party has committed, and a trade reserves its amount
 // against the cap from that moment: a buyer cannot open a fifth negotiation it
 // has no budget for and decide later whether to take it. The second is when an
 // on-chain settlement is compiled, the last moment before the buyer holds a
-// signable transaction, because a trade can sit in accepted across a window
-// rolling over.
+// signable transaction. The third is the off-chain commit, which is only safe
+// because an accepted trade expires: a refused commit leaves a trade the buyer
+// can cancel rather than one they are stuck holding.
 //
-// There is deliberately no check at the off-chain commit. Refusing there would be
-// worse than the problem it solves: the trade is already accepted, and an
-// accepted trade cannot be cancelled, so the buyer would hold a trade it can
-// neither complete nor walk away from.
+// All three are needed rather than one, because a trade can sit in accepted
+// across a window rolling over. Whichever check it passes, the others may be the
+// ones that saw the budget spent.
 // excludeTradeID names a trade the caller is accounting for itself, so it is
 // not counted twice: see store.CommittedSpendSince.
 func (s *Service) checkSpend(ctx context.Context, buyerAgentID string, amount money.Amount, mint string, excludeTradeID string) error {
@@ -291,10 +429,14 @@ var transitions = map[domain.TradeState]map[domain.TradeState]domain.TradeEventT
 		domain.TradeAccepted:  domain.EventAccepted,
 		domain.TradeCancelled: domain.EventCancelled,
 	},
+	// An accepted trade can be cancelled, but only once its deadline has passed.
+	// The map says the transition is legal and Service.Cancel says when: a legal
+	// transition that depends on a clock cannot be expressed as a constant.
 	domain.TradeAccepted: {
 		domain.TradeSettlementPending: domain.EventSettlementPending,
 		domain.TradeRecorded:          domain.EventRecorded,
 		domain.TradeDisputed:          domain.EventDisputed,
+		domain.TradeCancelled:         domain.EventCancelled,
 	},
 	domain.TradeSettlementPending: {
 		domain.TradeSettled:   domain.EventSettled,
@@ -416,6 +558,28 @@ func (s *Service) Cancel(ctx context.Context, actorID, tradeID, reason string) (
 	} else if live {
 		return domain.Trade{}, ErrSettlementLive
 	}
+	// Acceptance is a commitment and it holds until the deadline rather than until
+	// one side changes its mind. After the deadline the trade is dead and either
+	// party may walk away, which is what makes it safe for Record to refuse a
+	// commit: there is somewhere to go.
+	if tr.State == domain.TradeAccepted {
+		deadline, err := s.acceptanceDeadline(ctx, tr)
+		if err != nil {
+			return domain.Trade{}, err
+		}
+		// With no deadline there is no point at which the commitment lapses, so
+		// the transition stays closed. Refusing is the direction that does not
+		// quietly widen who may cancel, and configuration refuses to boot in this
+		// state anyway.
+		if deadline.IsZero() {
+			return domain.Trade{}, fmt.Errorf("%w: %s is accepted with no deadline to cancel it after",
+				ErrIllegalState, tr.ID)
+		}
+		if s.now().UTC().Before(deadline) {
+			return domain.Trade{}, fmt.Errorf("%w: %s is accepted until %s",
+				ErrNotExpiredYet, tr.ID, deadline.Format(time.RFC3339))
+		}
+	}
 	detail := reasonDetail(reason)
 	return s.apply(ctx, tr, actorID, domain.TradeCancelled, detail)
 }
@@ -469,6 +633,19 @@ func (s *Service) Record(ctx context.Context, actorID, tradeID string) (domain.T
 		receipt, err := s.ledger.Receipt(ctx, tradeID)
 		return tr, receipt, err
 	}
+	// Checked here as well as at creation, because this is the only place an
+	// off-chain trade can be refused and the check is cheap. It used to be absent
+	// for a reason that is no longer true: refusing at the commit used to strand
+	// the buyer in accepted, which has no route out. With a deadline there is a
+	// route out, so the cap can be enforced at the moment the commitment is made
+	// rather than a window earlier.
+	//
+	// The trade being committed is excluded from its own total for the same
+	// reason the on-chain build excludes it: the reservation query already counts
+	// it, and counting it twice would refuse a trade inside its cap.
+	if err := s.checkSpend(ctx, tr.BuyerAgentID, tr.Amount, tr.Mint, tr.ID); err != nil {
+		return domain.Trade{}, domain.Receipt{}, err
+	}
 	recorded, err := s.apply(ctx, tr, actorID, domain.TradeRecorded, nil)
 	if err != nil {
 		return domain.Trade{}, domain.Receipt{}, err
@@ -521,7 +698,15 @@ func (s *Service) transition(ctx context.Context, actorID, tradeID string, from,
 }
 
 func (s *Service) apply(ctx context.Context, tr domain.Trade, actorID string, to domain.TradeState, detail json.RawMessage) (domain.Trade, error) {
-	event, ok := canTransition(tr.State, to)
+	return s.applyAs(ctx, tr, actorID, to, detail, "")
+}
+
+// applyAs is apply with the option to record a different event than the
+// transition implies. The expiry sweep cancels an accepted trade through the
+// cancelled transition but is not a cancellation anybody asked for, and the event
+// log is what an auditor reads to tell those two apart.
+func (s *Service) applyAs(ctx context.Context, tr domain.Trade, actorID string, to domain.TradeState, detail json.RawMessage, event domain.TradeEventType) (domain.Trade, error) {
+	kind, ok := canTransition(tr.State, to)
 	if !ok {
 		return domain.Trade{}, fmt.Errorf("%w: %s cannot move from %s to %s", ErrIllegalState, tr.ID, tr.State, to)
 	}
@@ -533,7 +718,10 @@ func (s *Service) apply(ctx context.Context, tr domain.Trade, actorID string, to
 	if !changed {
 		return s.store.GetTrade(ctx, tr.ID)
 	}
-	if err := s.appendEvent(ctx, tr.ID, actorID, event, tr.State, to, detail); err != nil {
+	if event != "" {
+		kind = event
+	}
+	if err := s.appendEvent(ctx, tr.ID, actorID, kind, tr.State, to, detail); err != nil {
 		return domain.Trade{}, err
 	}
 	return s.store.GetTrade(ctx, tr.ID)

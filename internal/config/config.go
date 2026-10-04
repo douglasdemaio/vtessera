@@ -38,6 +38,15 @@ type Config struct {
 	// safety control, so it is configured at the top level rather than under
 	// Solana: it applies to off-chain trades too, where no cluster exists.
 	Spend Spend
+	// AcceptTTL is how long an accepted trade may wait to be committed before it
+	// can be cancelled. Zero means no deadline, which leaves the spending cap
+	// unenforceable at the off-chain commit and is therefore only safe when caps
+	// are off.
+	AcceptTTL time.Duration
+	// ExpirySweepEvery is how often expired accepted trades are swept.
+	ExpirySweepEvery time.Duration
+	// ExpirySweepBatch bounds one sweep.
+	ExpirySweepBatch int
 	// Sandbox marks this deployment as one where no real value moves. It is a
 	// behavioural switch, not a label: on-chain settlement is refused outright,
 	// so an agent cannot mistake it for the real thing.
@@ -137,6 +146,9 @@ func Parse(args []string) (Config, error) {
 		spendCeilDay   = fs.String("spend-cap-max-per-day", os.Getenv("VTESSERA_SPEND_CAP_MAX_PER_DAY"), "most any one agent may raise its daily cap to; unset forbids raising it")
 		spendWindow    = fs.String("spend-cap-window", env("VTESSERA_SPEND_CAP_WINDOW", "24h"), "rolling window the daily cap is measured over")
 		spendRates     = fs.String("spend-rates", os.Getenv("VTESSERA_SPEND_RATES"), "extra USD rates as a comma-separated list of mint=usd@decimals; the governed stablecoins are built in at par")
+		acceptTTL      = fs.String("trade-accept-ttl", env("VTESSERA_TRADE_ACCEPT_TTL", "24h"), "how long an accepted trade may wait to be committed before either party may cancel it")
+		sweepEvery     = fs.String("trade-expiry-sweep-interval", env("VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL", "5m"), "how often to sweep expired accepted trades")
+		sweepBatch     = fs.Int("trade-expiry-sweep-batch", 100, "how many expired accepted trades one sweep may cancel")
 		sandbox        = fs.Bool("sandbox", env("VTESSERA_SANDBOX", "") == "1", "refuse on-chain settlement and advertise this deployment as a sandbox where no real value moves")
 	)
 	fs.Usage = func() {
@@ -189,21 +201,35 @@ func Parse(args []string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	acceptTTLDur, err := time.ParseDuration(unset(*acceptTTL))
+	if err != nil {
+		return Config{}, fmt.Errorf("trade-accept-ttl %q is not a duration: %w", *acceptTTL, err)
+	}
+	sweepEveryDur, err := time.ParseDuration(unset(*sweepEvery))
+	if err != nil {
+		return Config{}, fmt.Errorf("trade-expiry-sweep-interval %q is not a duration: %w", *sweepEvery, err)
+	}
+	if *sweepBatch <= 0 {
+		return Config{}, fmt.Errorf("trade-expiry-sweep-batch must be positive, got %d", *sweepBatch)
+	}
 	cfg := Config{
-		Addr:           *addr,
-		DatabaseURL:    *dbURL,
-		SignerKeyPath:  *signerKey,
-		SessionSecret:  decoded,
-		ChallengeTTL:   *challenge,
-		SessionTTL:     *session,
-		RequestTimeout: *timeout,
-		ShutdownGrace:  *grace,
-		PublicBaseURL:  strings.TrimRight(*baseURL, "/"),
-		Version:        *version,
-		PreflightOnly:  *preflightOnly,
-		Spend:          spendCfg,
-		Sandbox:        *sandbox,
-		Solana:         solanaCfg,
+		AcceptTTL:        acceptTTLDur,
+		ExpirySweepEvery: sweepEveryDur,
+		ExpirySweepBatch: *sweepBatch,
+		Addr:             *addr,
+		DatabaseURL:      *dbURL,
+		SignerKeyPath:    *signerKey,
+		SessionSecret:    decoded,
+		ChallengeTTL:     *challenge,
+		SessionTTL:       *session,
+		RequestTimeout:   *timeout,
+		ShutdownGrace:    *grace,
+		PublicBaseURL:    strings.TrimRight(*baseURL, "/"),
+		Version:          *version,
+		PreflightOnly:    *preflightOnly,
+		Spend:            spendCfg,
+		Sandbox:          *sandbox,
+		Solana:           solanaCfg,
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -482,6 +508,21 @@ func (c Config) Validate() error {
 	// settlement for a reason nothing in the output said.
 	if c.Sandbox && c.SettlementEnabled() {
 		return errors.New("sandbox mode refuses on-chain settlement, but an rpc-url and cluster are set: unset VTESSERA_RPC_URL and VTESSERA_CLUSTER together, or unset VTESSERA_SANDBOX")
+	}
+	// Caps are always on, so a missing acceptance deadline would silently leave
+	// the daily cap unenforced at the off-chain commit. That is a weaker cap than
+	// the one the operator configured, reached by a setting they never touched, so
+	// it is a startup error rather than a note in a log.
+	if c.AcceptTTL <= 0 {
+		return errors.New("trade-accept-ttl must be positive: an accepted trade with no deadline cannot be cancelled, and a trade that cannot be cancelled means the daily spending cap cannot be enforced when the buyer commits")
+	}
+	// Zero would disable the sweep, which leaves an accepted trade that nobody
+	// acts on holding its buyer's budget until someone notices. That is a weaker
+	// guarantee than the operator configured, reached by setting an interval to
+	// nothing, so it is refused rather than treated as a request to turn the sweep
+	// off.
+	if c.ExpirySweepEvery <= 0 {
+		return errors.New("trade-expiry-sweep-interval must be positive: a sweep that never runs leaves an expired trade holding its buyer's budget")
 	}
 	if c.RequestTimeout <= 0 {
 		return errors.New("request-timeout must be positive")

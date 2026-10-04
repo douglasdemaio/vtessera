@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/agp"
 	"github.com/douglasdemaio/vtessera/internal/auth"
@@ -84,6 +85,8 @@ type serverBuild struct {
 	unconfigured  bool
 	policy        *limits.Policy
 	sandbox       bool
+	acceptTTL     time.Duration
+	clock         func() time.Time
 }
 
 func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Ledger) {
@@ -130,6 +133,12 @@ func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Led
 	trades := trade.New(db, db, db, led)
 	if policy != nil {
 		trades = trades.WithLimits(*policy, db)
+	}
+	if build.acceptTTL > 0 {
+		trades = trades.WithAcceptanceTTL(build.acceptTTL)
+	}
+	if build.clock != nil {
+		trades = trades.WithClock(build.clock)
 	}
 	opts.Trades = trades
 	opts.Auth = authSvc
@@ -1007,5 +1016,88 @@ func TestPublishedOfferShapeMatchesWhatTheServiceAccepts(t *testing.T) {
 	// A ticker is not a mint. Identity is the base58 address alone.
 	if err := domain.ValidateMint("USDC"); err == nil {
 		t.Error(`priceMint "USDC" was accepted; the directory publishes an address`)
+	}
+}
+
+// expiryServer builds a harness whose accepted trades expire, with a clock the
+// test drives. The HTTP surface is where a buyer learns whether a trade can be
+// walked away from, so the refusal has to be a status and a code rather than
+// something only the Go API can express.
+func expiryServer(t *testing.T) (*httptest.Server, *time.Time) {
+	t.Helper()
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	server, _ := buildServer(t, serverBuild{
+		acceptTTL: 24 * time.Hour,
+		clock:     func() time.Time { return now },
+	})
+	return server, &now
+}
+
+// acceptOverHTTP takes a trade from published to accepted and returns its ID.
+func acceptOverHTTP(t *testing.T, buyer, seller *agentClient, amount string) string {
+	t.Helper()
+	offer := seller.publishOffer(amount, usdc)
+	var tr domain.Trade
+	decodeInto(t, buyer.do(http.MethodPost, "/v1/trades", map[string]any{
+		"offerId":        offer.ID,
+		"settlementMode": string(domain.SettlementOffchain),
+		"idempotencyKey": "trade-" + amount,
+	}, true), &tr)
+	if tr.State != domain.TradeProposed {
+		t.Fatalf("state = %s, want proposed", tr.State)
+	}
+	buyer.do(http.MethodPost, "/v1/trades/"+tr.ID+"/negotiate", map[string]any{}, true)
+	seller.do(http.MethodPost, "/v1/trades/"+tr.ID+"/accept", map[string]any{}, true)
+	decodeInto(t, buyer.do(http.MethodPost, "/v1/trades/"+tr.ID+"/accept", map[string]any{}, true), &tr)
+	if tr.State != domain.TradeAccepted {
+		t.Fatalf("state = %s, want accepted", tr.State)
+	}
+	return tr.ID
+}
+
+func TestCancellingAnAcceptedTradeTooEarlyIsRefused(t *testing.T) {
+	server, _ := expiryServer(t)
+	seller := newAgent(t, server)
+	buyer := newAgent(t, server)
+	id := acceptOverHTTP(t, buyer, seller, "10.00")
+
+	status, resp := buyer.raw(http.MethodPost, "/v1/trades/"+id+"/cancel", map[string]any{}, true)
+	if status != http.StatusConflict {
+		t.Errorf("cancel before the deadline = %d, want 409 (%s)", status, resp)
+	}
+	var refused struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	decodeInto(t, resp, &refused)
+	if refused.Code != "TRADE_NOT_EXPIRED" {
+		t.Errorf("code = %s, want TRADE_NOT_EXPIRED", refused.Code)
+	}
+	// The message has to carry the deadline, or an agent that hit this has no way
+	// to learn when it may try again.
+	if !strings.Contains(refused.Error, "accepted until") {
+		t.Errorf("message %q does not say when the trade can be cancelled", refused.Error)
+	}
+
+	// Still accepted: a refusal that left it cancelled would be a race, not a
+	// refusal.
+	var got domain.Trade
+	decodeInto(t, buyer.do(http.MethodGet, "/v1/trades/"+id, nil, true), &got)
+	if got.State != domain.TradeAccepted {
+		t.Errorf("state = %s, want the refusal to leave it accepted", got.State)
+	}
+}
+
+func TestCancellingAnExpiredAcceptedTradeSucceeds(t *testing.T) {
+	server, now := expiryServer(t)
+	seller := newAgent(t, server)
+	buyer := newAgent(t, server)
+	id := acceptOverHTTP(t, buyer, seller, "10.00")
+
+	*now = now.Add(24*time.Hour + time.Second)
+	var cancelled domain.Trade
+	decodeInto(t, buyer.do(http.MethodPost, "/v1/trades/"+id+"/cancel", map[string]any{}, true), &cancelled)
+	if cancelled.State != domain.TradeCancelled {
+		t.Errorf("state = %s, want cancelled", cancelled.State)
 	}
 }

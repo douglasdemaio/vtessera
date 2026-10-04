@@ -162,16 +162,28 @@ trade settles — lets a buyer walk past a limit by having several trades in fli
 at once. Cancelling is the escape from that, and it is always available before
 either party accepts.
 
+After both parties accept, the trade is a commitment and cancelling it needs a
+reason: either party walked away from a deal it had already agreed to. So an
+accepted trade carries a **deadline**, 24 hours by default, and it can be
+cancelled only once that has passed. A service with no deadline configured
+refuses to start, because the next paragraph depends on there being one.
+
 The window is anchored on the later of two moments: when the trade was opened,
 and when it first became possible for the money to move. So a trade negotiated
 across a window boundary is charged to the day it committed, not the day it was
 proposed, and its exposure does not expire until a day after the money moved.
 
-The cap is re-checked when an on-chain settlement is compiled, which is the last
-moment before the buyer holds a signable transaction. It is deliberately **not**
-re-checked at the off-chain commit: an accepted trade cannot be cancelled, so
-refusing there would leave a buyer holding a trade it could neither complete nor
-walk away from.
+The cap is re-checked in both places money can actually move: when an on-chain
+settlement is compiled, which is the last moment before the buyer holds a
+signable transaction, and when an off-chain trade is committed. This is safe
+only because of the deadline above. An off-chain commit refused by the cap would
+otherwise leave a buyer holding a trade it could neither complete nor cancel, so
+the refusal and the way out have to arrive together: a refused commit leaves the
+trade `accepted`, and it can be cancelled once its deadline passes.
+
+Expired trades do not wait for someone to notice. A background sweep cancels
+them, which is what returns their reserved budget to the buyer — a budget that
+never comes back is not a cap, it is a queue.
 
 ### Prices
 
@@ -207,6 +219,9 @@ wants that bounded declares a rate above par.
 | `--spend-cap-max-per-trade` | `VTESSERA_SPEND_CAP_MAX_PER_TRADE` | unset, so raising is refused |
 | `--spend-cap-max-per-day` | `VTESSERA_SPEND_CAP_MAX_PER_DAY` | unset, so raising is refused |
 | `--spend-rates` | `VTESSERA_SPEND_RATES` | the governed stablecoins at par |
+| `--trade-accept-ttl` | `VTESSERA_TRADE_ACCEPT_TTL` | `24h` |
+| `--trade-expiry-sweep-interval` | `VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL` | `5m` |
+| `--trade-expiry-sweep-batch` | `VTESSERA_TRADE_EXPIRY_SWEEP_BATCH` | `100` |
 | `--sandbox` | `VTESSERA_SANDBOX` | off |
 
 Every malformed figure is a startup error. An operator who mistypes a cap finds

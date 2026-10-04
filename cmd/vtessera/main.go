@@ -99,7 +99,7 @@ func run(args []string) error {
 	spendPolicy := cfg.Spend.Policy()
 	registrySvc := registry.New(db, mints, registry.WithPricer(spendPolicy))
 	led := ledger.New(db, signer)
-	trades := trade.New(db, db, db, led).WithLimits(spendPolicy, db)
+	trades := trade.New(db, db, db, led).WithLimits(spendPolicy, db).WithAcceptanceTTL(cfg.AcceptTTL)
 	logger.Info("spending caps active",
 		"perTradeUsd", cfg.Spend.PerTradeUSD.String(),
 		"perDayUsd", cfg.Spend.PerDayUSD.String(),
@@ -182,6 +182,19 @@ func run(args []string) error {
 	} else {
 		logger.Warn("on-chain settlement disabled: no cluster or RPC endpoint, on-chain trades are refused")
 	}
+
+	// An accepted trade that is never committed holds its buyer's reservation
+	// indefinitely. The sweep is what makes the daily cap mean what it says: a
+	// budget that never comes back is not a cap, it is a queue.
+	go func() {
+		trades.RunExpirySweeper(ctx, cfg.ExpirySweepEvery, cfg.ExpirySweepBatch)
+		logger.Info("trade expiry sweeper stopped")
+	}()
+	logger.Info("accepted trades expire",
+		"ttl", cfg.AcceptTTL.String(),
+		"sweepEvery", cfg.ExpirySweepEvery.String(),
+		"sweepBatch", cfg.ExpirySweepBatch,
+	)
 
 	if cfg.PublicBaseURL == "" {
 		logger.Warn("no public base URL configured: the agent card omits its url, so agents cannot discover where to reach this gateway")

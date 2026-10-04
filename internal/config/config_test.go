@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -389,5 +390,51 @@ func TestSplitList(t *testing.T) {
 				t.Errorf("splitList(%q) = %#v, want %#v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAnAcceptanceDeadlineIsRequired(t *testing.T) {
+	// Caps are always on, so a service with no acceptance deadline could not
+	// refuse a buyer at the off-chain commit and would enforce the daily cap a
+	// window early instead. That is a weaker cap than the operator configured,
+	// reached by a setting they never touched, so it has to stop the boot.
+	dir := t.TempDir()
+	t.Setenv("VTESSERA_TRADE_ACCEPT_TTL", "0")
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err == nil {
+		t.Fatalf("Load with no acceptance deadline = %+v, want an error", cfg)
+	}
+	if !strings.Contains(err.Error(), "trade-accept-ttl") {
+		t.Errorf("error = %v, want it to name trade-accept-ttl", err)
+	}
+}
+
+func TestAnAcceptanceDeadlineDefaultsToADay(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("VTESSERA_TRADE_ACCEPT_TTL", "")
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AcceptTTL != 24*time.Hour {
+		t.Errorf("AcceptTTL = %s, want 24h", cfg.AcceptTTL)
+	}
+	if cfg.ExpirySweepEvery != 5*time.Minute {
+		t.Errorf("ExpirySweepEvery = %s, want 5m", cfg.ExpirySweepEvery)
+	}
+	if cfg.ExpirySweepBatch != 100 {
+		t.Errorf("ExpirySweepBatch = %d, want 100", cfg.ExpirySweepBatch)
+	}
+}
+
+func TestTheExpirySweepMustRun(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL", "0")
+	_, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err == nil {
+		t.Fatal("Parse with a sweep interval of zero = no error, want one")
+	}
+	if !strings.Contains(err.Error(), "trade-expiry-sweep-interval") {
+		t.Errorf("error = %v, want it to name trade-expiry-sweep-interval", err)
 	}
 }

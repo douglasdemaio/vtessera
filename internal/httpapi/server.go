@@ -758,6 +758,9 @@ var statusByError = []struct {
 	{agp.ErrPolicyViolation, http.StatusUnprocessableEntity, "INVALID_REQUEST"},
 	{agp.ErrTableStale, http.StatusConflict, "INVALID_REQUEST"},
 	{trade.ErrSpendCapExceeded, http.StatusConflict, "SPEND_CAP_EXCEEDED"},
+	// 409, and not 400: the request is well formed and the deadline is a fact
+	// about the trade, so retrying unchanged will keep failing until time passes.
+	{trade.ErrNotExpiredYet, http.StatusConflict, "TRADE_NOT_EXPIRED"},
 	{trade.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
 	{registry.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
 	{ledger.ErrNotSettled, http.StatusConflict, "INVALID_REQUEST"},

@@ -105,18 +105,19 @@ commits to. It is not KYC, not a spend limit on a person or an organisation, and
 must never be described as one. Closing this means identity attestation or a
 deposit, which is a different product.
 
-**An off-chain trade can overshoot the daily cap by one window.** A trade opened
-while budget was available and committed after the rolling window moved is not
-re-checked at the off-chain commit, because a trade in `accepted` cannot be
-cancelled and refusing there would strand the buyer holding a trade they can
-neither complete nor abandon. The overshoot is bounded by what was reserved when
-the window rolled. The on-chain path does re-check, at the last point before the
-buyer holds a signable transaction.
-
 **The marketplace signing key is a single point of failure with no rotation
 path.** It is on the Fly volume, was created on first boot, and cannot be
 regenerated without invalidating every previously issued tessera. Compromise is
 catastrophic and unrecoverable.
+
+**A trade reserves its budget until it is cancelled or it settles, and acceptance
+is not a cancellation.** The off-chain commit re-checks the cap now that accepted
+trades expire, so the daily cap holds at the moment money moves. What remains is
+the shape of the reservation: a buyer who opens an accepted trade and never
+commits it holds that budget until the deadline passes and a sweep collects it.
+That is bounded and self-releasing, and it is a liveness cost rather than a way
+around the cap — the amount is one trade inside a cap the buyer has already
+passed.
 
 **Rate limiting is absent.** Every route is unauthenticated-capable reads and
 unauthenticated writes are cheap to attempt. The service is behind a TLS
