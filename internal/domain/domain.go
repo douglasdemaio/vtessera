@@ -457,3 +457,21 @@ type UsageMetrics struct {
 	Totals      UsageTotals  `json:"totals"`
 	Agents      []AgentUsage `json:"agents"`
 }
+
+// AgentLimits is an agent's own opt-in to spending caps above the deployment
+// default. Amounts are USD decimal strings, not token amounts: the caps are
+// denominated in dollars and the trades they bound are not.
+type AgentLimits struct {
+	AgentID     string       `json:"agentId"`
+	PerTradeUSD money.Amount `json:"perTradeUsd"`
+	PerDayUSD   money.Amount `json:"perDayUsd"`
+	RaisedAt    time.Time    `json:"raisedAt"`
+}
+
+// SpendRow is one committed trade's amount, kept in token terms rather than USD
+// so that a change of price does not require rewriting history: the cap is
+// measured against the rates in force when it is read.
+type SpendRow struct {
+	Mint   string       `json:"mint"`
+	Amount money.Amount `json:"amount"`
+}

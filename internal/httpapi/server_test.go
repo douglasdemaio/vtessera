@@ -21,6 +21,7 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/httpapi"
 	"github.com/douglasdemaio/vtessera/internal/ledger"
+	"github.com/douglasdemaio/vtessera/internal/limits"
 	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/store"
@@ -61,6 +62,38 @@ type unconfigured struct{}
 
 func setupServerAt(t *testing.T, publicBaseURL string, unconfigured ...unconfigured) (*httptest.Server, *ledger.Ledger) {
 	t.Helper()
+	return buildServer(t, serverBuild{publicBaseURL: publicBaseURL, unconfigured: len(unconfigured) > 0})
+}
+
+// setupServerWithCaps builds the same harness with spending caps wired, so a test
+// exercises the cap routes on the real service rather than on a stub.
+func setupServerWithCaps(t *testing.T, policy limits.Policy) (*httptest.Server, *ledger.Ledger) {
+	t.Helper()
+	return buildServer(t, serverBuild{policy: &policy})
+}
+
+// setupSandboxServer builds the harness with the sandbox flag set, which is what
+// an operator gets with no cluster and no endpoint and --sandbox.
+func setupSandboxServer(t *testing.T) (*httptest.Server, *ledger.Ledger) {
+	t.Helper()
+	return buildServer(t, serverBuild{sandbox: true})
+}
+
+type serverBuild struct {
+	publicBaseURL string
+	unconfigured  bool
+	policy        *limits.Policy
+	sandbox       bool
+}
+
+func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Ledger) {
+	t.Helper()
+	publicBaseURL, unconfigured, policy := build.publicBaseURL, build.unconfigured, build.policy
+	if build.sandbox {
+		// Configuration refuses to start a sandbox with a chain, so the harness
+		// must not build one either.
+		unconfigured = true
+	}
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := store.Open(ctx, filepath.Join(dir, "api.db"))
@@ -82,20 +115,29 @@ func setupServerAt(t *testing.T, publicBaseURL string, unconfigured ...unconfigu
 	// A test that needs the settlement-unconfigured routes asks for it explicitly.
 	var mints tokens.Registry
 	opts := httpapi.Options{}
-	if len(unconfigured) == 0 {
+	if !unconfigured {
 		var err error
 		if mints, err = tokens.ForCluster(cluster.MainnetBeta); err != nil {
 			t.Fatalf("governed mints: %v", err)
 		}
 		opts.Cluster = cluster.MainnetBeta
 	}
-	opts.Registry = registry.New(db, mints)
-	opts.Trades = trade.New(db, db, db, led)
+	if policy != nil {
+		opts.Registry = registry.New(db, mints, registry.WithPricer(*policy))
+	} else {
+		opts.Registry = registry.New(db, mints)
+	}
+	trades := trade.New(db, db, db, led)
+	if policy != nil {
+		trades = trades.WithLimits(*policy, db)
+	}
+	opts.Trades = trades
 	opts.Auth = authSvc
 	opts.Ledger = led
 	opts.Tokens = mints
 	opts.Version = "0.1.0-test"
 	opts.PublicBaseURL = publicBaseURL
+	opts.Sandbox = build.sandbox
 	api := httpapi.New(opts)
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)
@@ -228,6 +270,27 @@ func (c *agentClient) raw(method, path string, payload any, authed bool) (int, [
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, body
+}
+
+// rawBody sends a body as written, for the cases where the point is what the
+// bytes are rather than what they mean.
+func (c *agentClient) rawBody(method, path, body string, authed bool) (int, []byte) {
+	c.t.Helper()
+	req, err := http.NewRequest(method, c.base+path, strings.NewReader(body))
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	req.Header.Set("content-type", "application/json")
+	if authed {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, out
 }
 
 func decodeInto(t *testing.T, body []byte, dst any) {

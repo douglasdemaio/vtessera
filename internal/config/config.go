@@ -13,6 +13,8 @@ import (
 
 	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/fees"
+	"github.com/douglasdemaio/vtessera/internal/limits"
+	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/settlement"
 	"github.com/douglasdemaio/vtessera/internal/tokens"
 )
@@ -32,10 +34,38 @@ type Config struct {
 	// so an operator can ask "is this endpoint actually the cluster I declared"
 	// without a listener bound, a port claimed, or a signing key created.
 	PreflightOnly bool
+	// Spend bounds what one agent can commit through this marketplace. It is a
+	// safety control, so it is configured at the top level rather than under
+	// Solana: it applies to off-chain trades too, where no cluster exists.
+	Spend Spend
+	// Sandbox marks this deployment as one where no real value moves. It is a
+	// behavioural switch, not a label: on-chain settlement is refused outright,
+	// so an agent cannot mistake it for the real thing.
+	Sandbox bool
 	// Solana holds the on-chain settlement configuration. An empty RPCURL leaves
 	// on-chain settlement unconfigured, and the service then refuses on-chain
 	// trades outright rather than half-handling them.
 	Solana Solana
+}
+
+// Spend holds the spending caps and the prices they are measured against.
+type Spend struct {
+	// PerTradeUSD and PerDayUSD are the caps an agent gets without asking. They
+	// are USD decimal strings, not base units, because a cap is a figure an
+	// operator reads and an agent argues with.
+	PerTradeUSD money.Amount
+	PerDayUSD   money.Amount
+	// CeilingPerTradeUSD and CeilingPerDayUSD are the most any single agent may
+	// raise its caps to. Unset means an agent cannot raise anything at all,
+	// which is the safe direction: an opt-in with no ceiling is not a cap.
+	CeilingPerTradeUSD money.Amount
+	CeilingPerDayUSD   money.Amount
+	// DailyWindow is the rolling period the daily cap is measured over.
+	DailyWindow time.Duration
+	// Rates are the declared prices, keyed by mint address. A governed mint
+	// missing from this table makes the deployment refuse to start, because a cap
+	// that cannot be priced is not a cap.
+	Rates limits.Rates
 }
 
 // Solana configures non-custodial on-chain settlement.
@@ -100,6 +130,14 @@ func Parse(args []string) (Config, error) {
 		localnetMints = fs.String("localnet-mints", os.Getenv("VTESSERA_LOCALNET_MINTS"), "localnet only: comma-separated address:symbol:decimals[:mintAuthority]")
 		localnetHosts = fs.String("localnet-allow-host", os.Getenv("VTESSERA_LOCALNET_ALLOW_HOST"), "localnet only: comma-separated hosts exempt from the loopback rule")
 		preflightOnly = fs.Bool("preflight-only", false, "run the settlement preflight, print the report, and exit without serving")
+
+		spendPerTrade  = fs.String("spend-cap-per-trade", env("VTESSERA_SPEND_CAP_PER_TRADE", "5.00"), "USD cap a single trade may commit without an opt-in")
+		spendPerDay    = fs.String("spend-cap-per-day", env("VTESSERA_SPEND_CAP_PER_DAY", "20.00"), "USD cap one agent may commit per rolling day without an opt-in")
+		spendCeilTrade = fs.String("spend-cap-max-per-trade", os.Getenv("VTESSERA_SPEND_CAP_MAX_PER_TRADE"), "most any one agent may raise its per-trade cap to; unset forbids raising it")
+		spendCeilDay   = fs.String("spend-cap-max-per-day", os.Getenv("VTESSERA_SPEND_CAP_MAX_PER_DAY"), "most any one agent may raise its daily cap to; unset forbids raising it")
+		spendWindow    = fs.String("spend-cap-window", env("VTESSERA_SPEND_CAP_WINDOW", "24h"), "rolling window the daily cap is measured over")
+		spendRates     = fs.String("spend-rates", os.Getenv("VTESSERA_SPEND_RATES"), "extra USD rates as a comma-separated list of mint=usd@decimals; the governed stablecoins are built in at par")
+		sandbox        = fs.Bool("sandbox", env("VTESSERA_SANDBOX", "") == "1", "refuse on-chain settlement and advertise this deployment as a sandbox where no real value moves")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "vtessera: A2A marketplace gateway with AGP routing and virtual tessera receipts\n\n")
@@ -147,6 +185,10 @@ func Parse(args []string) (Config, error) {
 	if *preflightOnly && strings.TrimSpace(*rpcURL) == "" {
 		return Config{}, fmt.Errorf("--preflight-only needs --rpc-url: there is no chain to check")
 	}
+	spendCfg, err := parseSpend(*spendPerTrade, *spendPerDay, *spendCeilTrade, *spendCeilDay, *spendRates, *spendWindow)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		Addr:           *addr,
 		DatabaseURL:    *dbURL,
@@ -159,6 +201,8 @@ func Parse(args []string) (Config, error) {
 		PublicBaseURL:  strings.TrimRight(*baseURL, "/"),
 		Version:        *version,
 		PreflightOnly:  *preflightOnly,
+		Spend:          spendCfg,
+		Sandbox:        *sandbox,
 		Solana:         solanaCfg,
 	}
 	if err := cfg.Validate(); err != nil {
@@ -253,6 +297,101 @@ func parseSolana(rpcURL, clusterName, mainnetAck, rawLamports, rawWallet string,
 	return cfg, nil
 }
 
+// parseSpend resolves the cap configuration. Every malformed figure is a startup
+// error rather than a default: a cap that silently measures the wrong amount is
+// worse than no cap, because it reads as a limit that is being enforced.
+func parseSpend(rawPerTrade, rawPerDay, rawCeilTrade, rawCeilDay, rawRates, rawWindow string) (Spend, error) {
+	window, err := time.ParseDuration(unset(rawWindow))
+	if err != nil {
+		return Spend{}, fmt.Errorf("spend-cap-window %q is not a duration: %w", rawWindow, err)
+	}
+	out := Spend{DailyWindow: window, Rates: limits.DefaultRates()}
+
+	perTrade, err := parseCap("spend-cap-per-trade", rawPerTrade)
+	if err != nil {
+		return Spend{}, err
+	}
+	out.PerTradeUSD = perTrade
+
+	perDay, err := parseCap("spend-cap-per-day", rawPerDay)
+	if err != nil {
+		return Spend{}, err
+	}
+	out.PerDayUSD = perDay
+
+	// The ceilings use os.Getenv upstream, so an unset variable is genuinely
+	// unset here. That distinction is load-bearing: unset means an agent cannot
+	// raise its caps at all.
+	if raw := unset(rawCeilTrade); raw != "" {
+		parsed, err := parseCap("spend-cap-max-per-trade", raw)
+		if err != nil {
+			return Spend{}, err
+		}
+		out.CeilingPerTradeUSD = parsed
+	}
+	if raw := unset(rawCeilDay); raw != "" {
+		parsed, err := parseCap("spend-cap-max-per-day", raw)
+		if err != nil {
+			return Spend{}, err
+		}
+		out.CeilingPerDayUSD = parsed
+	}
+	if window <= 0 {
+		return Spend{}, fmt.Errorf("spend-cap-window %q must be positive", window)
+	}
+
+	for _, entry := range splitList(rawRates) {
+		mint, rest, ok := strings.Cut(entry, "=")
+		if !ok {
+			return Spend{}, fmt.Errorf("spend-rates entry %q is not mint=usd@decimals", entry)
+		}
+		usd, decimals, ok := strings.Cut(rest, "@")
+		if !ok {
+			return Spend{}, fmt.Errorf("spend-rates entry %q is missing @decimals", entry)
+		}
+		parsed, err := parseCap("spend-rates", usd)
+		if err != nil {
+			return Spend{}, err
+		}
+		dp, err := strconv.ParseUint(unset(decimals), 10, 8)
+		if err != nil {
+			return Spend{}, fmt.Errorf("spend-rates entry %q: decimals %q is not a whole number", entry, decimals)
+		}
+		if err := out.Rates.Add(mint, limits.Rate{Decimals: uint8(dp), USD: parsed}); err != nil {
+			return Spend{}, fmt.Errorf("spend-rates entry %q: %w", entry, err)
+		}
+	}
+	return out, nil
+}
+
+// parseCap reads one USD cap. A zero cap is refused rather than accepted,
+// because an agent whose cap is zero cannot trade at all, which is a different
+// thing from an agent that is bounded.
+func parseCap(name, raw string) (money.Amount, error) {
+	trimmed := unset(raw)
+	if trimmed == "" {
+		return money.Amount{}, fmt.Errorf("%s is empty: a cap is a figure, not a blank", name)
+	}
+	amount, err := money.Parse(trimmed)
+	if err != nil {
+		return money.Amount{}, fmt.Errorf("%s %q is not a decimal amount: %w", name, raw, err)
+	}
+	if amount.IsZero() {
+		return money.Amount{}, fmt.Errorf("%s %q: %w", name, raw, limits.ErrCapNotPositive)
+	}
+	return amount, nil
+}
+
+// Policy builds the cap policy this configuration describes. The per-agent
+// opt-in is supplied by the caller because the values live in the store.
+func (s Spend) Policy() limits.Policy {
+	p := limits.DefaultPolicy(s.Rates).
+		WithWindow(s.DailyWindow).
+		WithCeilings(s.CeilingPerTradeUSD, s.CeilingPerDayUSD)
+	p.PerTrade, p.PerDay = s.PerTradeUSD, s.PerDayUSD
+	return p
+}
+
 func resolveFeePolicy(rawLamports, rawWallet string) (fees.Policy, error) {
 	if rawLamports == "" && rawWallet == "" {
 		return fees.Default(), nil
@@ -333,6 +472,16 @@ func (c Config) Validate() error {
 	}
 	if c.ChallengeTTL <= 0 || c.SessionTTL <= 0 {
 		return errors.New("challenge-ttl and session-ttl must be positive")
+	}
+	if err := c.Spend.Policy().Validate(); err != nil {
+		return fmt.Errorf("spending caps: %w", err)
+	}
+	// Sandbox and an on-chain endpoint contradict each other, and silently
+	// dropping the endpoint would be the worst way to resolve it: an operator who
+	// set both would get a deployment that looked configured and refused every
+	// settlement for a reason nothing in the output said.
+	if c.Sandbox && c.SettlementEnabled() {
+		return errors.New("sandbox mode refuses on-chain settlement, but an rpc-url and cluster are set: unset VTESSERA_RPC_URL and VTESSERA_CLUSTER together, or unset VTESSERA_SANDBOX")
 	}
 	if c.RequestTimeout <= 0 {
 		return errors.New("request-timeout must be positive")

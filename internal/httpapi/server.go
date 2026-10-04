@@ -36,6 +36,7 @@ type Server struct {
 	mux           *http.ServeMux
 	version       string
 	publicBaseURL string
+	sandbox       bool
 	agentCardBody map[string]any
 	// cluster and genesis are the chain this deployment settles on, reported by
 	// /healthz. Both are empty when settlement is unconfigured, which is the
@@ -65,7 +66,16 @@ type Options struct {
 	// empty the card omits the field rather than claiming an address that is not
 	// this service.
 	PublicBaseURL string
+	// Sandbox marks a deployment where no real value moves. It is carried into
+	// /healthz and /v1/tokens so an agent can tell before it commits to
+	// something that cannot be unwound.
+	Sandbox bool
 }
+
+// SettlementTier is the maturity label reported wherever on-chain settlement is
+// advertised. It is deliberately a constant rather than configuration: the
+// service does not get to declare itself out of beta.
+const SettlementTier = "beta"
 
 func New(opts Options) *Server {
 	s := &Server{
@@ -79,6 +89,7 @@ func New(opts Options) *Server {
 		cluster:       opts.Cluster,
 		genesis:       opts.GenesisHash,
 		publicBaseURL: strings.TrimRight(opts.PublicBaseURL, "/"),
+		sandbox:       opts.Sandbox,
 		mux:           http.NewServeMux(),
 	}
 	s.agentCardBody = s.buildAgentCard()
@@ -112,6 +123,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/trades/{id}/settlement", s.authed(s.handleBuildSettlement))
 	s.mux.HandleFunc("GET /v1/trades/{id}/settlement", s.authed(s.handleSettlementRequest))
 	s.mux.HandleFunc("POST /v1/trades/{id}/confirm", s.authed(s.handleConfirmSettlement))
+	s.mux.HandleFunc("GET /v1/limits", s.authed(s.handleGetLimits))
+	s.mux.HandleFunc("PUT /v1/limits", s.authed(s.handlePutLimits))
 	s.mux.HandleFunc("GET /v1/tokens", s.handleListTokens)
 	s.mux.HandleFunc("GET /v1/tesseras/{tradeID}", s.authed(s.handleTessera))
 	s.mux.HandleFunc("GET /v1/ledger", s.handleLedger)
@@ -203,6 +216,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.genesis != "" {
 		body["genesisHash"] = s.genesis
 	}
+	if s.cluster != "" {
+		// Advertised wherever a chain is configured, on the same condition as the
+		// cluster itself. An agent reading healthz has to be able to tell that
+		// on-chain settlement exists here and how mature it is, without having to
+		// infer it from whether a settlement attempt succeeds.
+		body["settlementTier"] = SettlementTier
+	}
+	if s.sandbox {
+		body["sandbox"] = true
+	}
 	writeJSON(w, http.StatusOK, body)
 }
 
@@ -224,12 +247,43 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, agent)
 }
 
+// requireOwnAgent refuses a write that names an agent in the path other than the
+// one that authenticated.
+//
+// An agent ID is an Ed25519 public key and a session proves control of it, so an
+// agent cannot authenticate as somebody else. It could still name somebody else
+// in the path, and on the two routes that write to a named agent that was enough
+// to rewrite the card an agent is listed under, including the URL it is listed
+// with, and to publish offers that appear in searches as that agent's.
+//
+// The path value is not ignored and the write is not redirected to the caller.
+// Both would leave a caller believing it had changed something it had not, which
+// on a card is worse than a refusal: the listing would change and the agent would
+// never know.
+func requireOwnAgent(w http.ResponseWriter, r *http.Request) (string, bool) {
+	caller := agentFrom(r)
+	if named := r.PathValue("id"); named != caller {
+		writeErrorStatus(w, http.StatusForbidden, "FORBIDDEN",
+			"this session is "+caller+" and cannot write to "+named)
+		return "", false
+	}
+	return caller, true
+}
+
 func (s *Server) handlePutCard(w http.ResponseWriter, r *http.Request) {
+	agentID, ok := requireOwnAgent(w, r)
+	if !ok {
+		return
+	}
 	var card domain.AgentCard
 	if !decode(w, r, &card) {
 		return
 	}
-	agent, _, err := s.registry.Register(r.Context(), r.PathValue("id"), card)
+	// The session, not the path, decides who is being written. requireOwnAgent
+	// has already refused a mismatch, so these are the same value; passing the
+	// session means a future caller that forgets the check writes to itself
+	// rather than to somebody else.
+	agent, _, err := s.registry.Register(r.Context(), agentID, card)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -290,11 +344,15 @@ type publishOfferRequest struct {
 }
 
 func (s *Server) handlePublishOffer(w http.ResponseWriter, r *http.Request) {
+	agentID, ok := requireOwnAgent(w, r)
+	if !ok {
+		return
+	}
 	var req publishOfferRequest
 	if !decode(w, r, &req) {
 		return
 	}
-	offer, created, err := s.registry.PublishOffer(r.Context(), r.PathValue("id"), registry.NewOffer{
+	offer, created, err := s.registry.PublishOffer(r.Context(), agentID, registry.NewOffer{
 		Direction:       domain.OfferDirection(req.Direction),
 		Description:     req.Description,
 		Capabilities:    req.Capabilities,
@@ -699,6 +757,9 @@ var statusByError = []struct {
 	{agp.ErrRouteNotFound, http.StatusNotFound, "INVALID_REQUEST"},
 	{agp.ErrPolicyViolation, http.StatusUnprocessableEntity, "INVALID_REQUEST"},
 	{agp.ErrTableStale, http.StatusConflict, "INVALID_REQUEST"},
+	{trade.ErrSpendCapExceeded, http.StatusConflict, "SPEND_CAP_EXCEEDED"},
+	{trade.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
+	{registry.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
 	{ledger.ErrNotSettled, http.StatusConflict, "INVALID_REQUEST"},
 	{ledger.ErrAlreadyIssued, http.StatusConflict, "ALREADY_ISSUED"},
 }

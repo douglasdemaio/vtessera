@@ -44,6 +44,8 @@ make validator   # start a test validator
 make test-solana # ~8.5 minutes, 5 scenarios
 make validator-off   # STOP IT — see below
 
+make test-devnet # touches the network, moves no value
+
 make image      # -> vtessera:local, from the checked-in Containerfile
 make image-run  # run that image locally against a volume
 make fly-deploy # deploy to the live Fly app (see constraint 5)
@@ -209,6 +211,53 @@ edit a genesis pin or an authority pin to make a preflight failure disappear: a
 changed genesis is a provider incident or a DNS hijack, and re-pinning converts
 a detectable incident into an undetectable compromise.
 
+### 7. Spending caps are on by default, and pricing is operator-declared
+
+Landed on `task1-safety-caps`. $5 per trade and $20 per rolling day per buyer,
+governed stablecoins at par, no oracle. Three things follow that are not
+negotiable without a design discussion:
+
+- **An unpriced mint cannot be traded.** No declared rate means `409
+  MINT_UNPRICED` at offer publication and at trade creation, and the service
+  refuses to boot if a governed mint on the configured cluster has no rate. A cap
+  that quietly did not apply to some currencies would be a way around the cap.
+- **Ceilings default to closed.** `--spend-cap-max-*` unset means `PUT
+  /v1/limits` is refused. Do not add a default ceiling; an agent that can raise
+  itself without an operator declaring the ceiling is a cap the operator did not
+  choose.
+- **A cap is per Ed25519 identity.** It bounds what one key commits to. It is not
+  KYC, and anyone can mint another identity. Do not describe it as a spend limit
+  on a person or an organisation.
+
+Two bounds are documented rather than fixed, in `docs/deploy.md`: an off-chain
+trade committed after its window rolled can overshoot by one window (nothing
+re-checks at commit, because `accepted` cannot be cancelled), and the whole
+mechanism is bypassable by registering a new agent. Closing the first means
+expiring accepted trades, which is Task 3.
+
+`make test-devnet` completes a full off-chain trade against the public devnet
+cluster and asserts the cap refusals there. It is the only test besides
+`preflight-live` that touches the network, and like the preflight it must not be
+made to pass by editing a pin.
+
+### 8. An agent ID is a public key, and a session is the only identity
+
+A route that writes to a named agent must take that name from the session, not
+from the path. `requireOwnAgent` in `internal/httpapi/server.go` is the check,
+and both routes it guards then pass `agentFrom(r)` to the service so that
+removing the check later cannot reintroduce the write. Do not read
+`r.PathValue("id")` for a write target anywhere in this service; it took two
+routes and a long time to find the second one.
+
+Trade routes resolve the actor through `partyTrade`, which refuses anybody who
+is not the buyer or the seller. Closing an offer is checked in the service,
+because the offer names its owner in a column.
+
+The threat model is `docs/specs/2026-10-04-settlement-auth-threat-model.md`. It
+lists what is still open, and the three that matter are a cap per identity when
+identities are free, no rate limiting at all, and a marketplace signing key with
+no rotation path.
+
 ## Git
 
 `main` history is deliberately short: `d6fda1f Initial commit` (scaffold),
@@ -227,6 +276,7 @@ is why the fee and mint tests assert the new values rather than the old.
 |---|---|
 | `docs/specs/2026-09-26-a2a-marketplace-design.md` | Authoritative product spec. |
 | `docs/specs/2026-09-27-phase3-cluster-aware-settlement-design.md` | Approved Phase 3 design (revision 2). Read before touching settlement. |
+| `docs/specs/2026-10-04-settlement-auth-threat-model.md` | Threat model, including what is still open. Read before touching auth or settlement. |
 | `docs/reports/2026-09-27-phase2-settlement-record.md` | What Phase 2 actually built, plus its known defects. Read before claiming Phase 2 works. |
 
 When changing behaviour, update the relevant document in the same change.

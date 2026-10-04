@@ -108,6 +108,17 @@ curl -s localhost:8080/agp/route -H 'content-type: application/json' -d '{
 
 Agents authenticate with an Ed25519 challenge-response (`POST /v1/auth/challenge`, sign the returned message template, then `POST /v1/auth/verify` for a bearer session) — the same key material an agent already uses for its Agent Card `publicKey`.
 
+An agent's ID is its public key, and a session is a proof that the caller holds
+the matching private key. Writing to an agent's own record — `PUT
+/v1/agents/{id}/card`, `POST /v1/agents/{id}/offers` — requires the `{id}` to be
+the session's own agent; anything else is a `403`. So an agent can register and
+relist itself, and cannot edit the card it is listed under or publish offers in
+somebody else's name. Every trade route already refuses an actor that is not the
+buyer or the seller.
+
+There is no rate limiting here. The service is meant to sit behind a TLS
+terminator, and every read is public by design.
+
 ```sh
 make test   # unit and HTTP end-to-end tests
 make race   # the same suite under the race detector
@@ -115,12 +126,110 @@ make smoke  # drives a real vtessera process with real Ed25519 keys
 ```
 
 
+## Spending caps
+
+Every agent has a default budget: **$5 per trade** and **$20 per rolling day**,
+measured in USD and counted per buyer. A trade above either cap is refused with
+`409 SPEND_CAP_EXCEEDED` before it is created, and the refusal names the cap it
+hit. An agent reads its own caps at `GET /v1/limits`:
+
+```sh
+curl -s localhost:8080/v1/limits -H "authorization: Bearer $TOKEN" | jq
+# {"perTradeUsd":"5.00","perDayUsd":"20.00","maxPerTradeUsd":"50.00",
+#  "maxPerDayUsd":"200.00","raised":false,"currency":"USD"}
+```
+
+An agent can raise its own caps, up to whatever ceiling the operator declared,
+with `PUT /v1/limits`. There is no path value on that route: the cap belongs to
+whichever agent authenticated, so an agent cannot raise somebody else's.
+
+```sh
+curl -s -X PUT localhost:8080/v1/limits -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"perTradeUsd":"25.00","perDayUsd":"100.00"}' | jq
+```
+
+A request above the ceiling is refused with `409 CAP_ABOVE_CEILING` and the
+ceiling in the message. It is refused rather than clamped, because clamping
+would report a raise that did not happen.
+
+### What counts against the daily cap
+
+A trade reserves its amount against the daily cap from the moment it is
+created, and the reservation is released if it is cancelled. That is deliberate:
+a buyer that can open unlimited negotiations against a budget it has already
+spent has no cap at all, and the alternative — checking only at the moment the
+trade settles — lets a buyer walk past a limit by having several trades in flight
+at once. Cancelling is the escape from that, and it is always available before
+either party accepts.
+
+The window is anchored on the later of two moments: when the trade was opened,
+and when it first became possible for the money to move. So a trade negotiated
+across a window boundary is charged to the day it committed, not the day it was
+proposed, and its exposure does not expire until a day after the money moved.
+
+The cap is re-checked when an on-chain settlement is compiled, which is the last
+moment before the buyer holds a signable transaction. It is deliberately **not**
+re-checked at the off-chain commit: an accepted trade cannot be cancelled, so
+refusing there would leave a buyer holding a trade it could neither complete nor
+walk away from.
+
+### Prices
+
+Caps are denominated in USD and trades are denominated in tokens, so something
+has to convert. This service does not use a price feed and will not: a feed
+would mean trusting a new external party with the number that decides whether a
+trade is allowed. Instead every supported mint carries a rate an operator
+declares and can audit, and the governed stablecoins are built in at par:
+
+```sh
+# add a rate for a mint this deployment governs, overriding the built-in par
+./bin/vtessera ... --spend-rates "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU=0.98@6"
+```
+
+A mint with no declared rate **cannot be traded at all**. That is the important
+part: an offer priced in an unpriced currency is refused with
+`409 MINT_UNPRICED` when the seller publishes it, and a trade denominated in one
+is refused at creation. A cap that quietly did not apply to some currencies would
+be an agent's way around it. For the same reason the service refuses to start if
+any governed mint on the configured cluster has no rate.
+
+Par pricing is correct for a stablecoin at its peg. A stablecoin trading *above*
+its peg spends more real value than the cap counted, which is why an operator who
+wants that bounded declares a rate above par.
+
+### Configuration
+
+| Flag | Environment | Default |
+|---|---|---|
+| `--spend-cap-per-trade` | `VTESSERA_SPEND_CAP_PER_TRADE` | `5.00` |
+| `--spend-cap-per-day` | `VTESSERA_SPEND_CAP_PER_DAY` | `20.00` |
+| `--spend-cap-window` | `VTESSERA_SPEND_CAP_WINDOW` | `24h` |
+| `--spend-cap-max-per-trade` | `VTESSERA_SPEND_CAP_MAX_PER_TRADE` | unset, so raising is refused |
+| `--spend-cap-max-per-day` | `VTESSERA_SPEND_CAP_MAX_PER_DAY` | unset, so raising is refused |
+| `--spend-rates` | `VTESSERA_SPEND_RATES` | the governed stablecoins at par |
+| `--sandbox` | `VTESSERA_SANDBOX` | off |
+
+Every malformed figure is a startup error. An operator who mistypes a cap finds
+out at boot, not from an agent being refused later.
+
+## Sandbox mode
+
+`--sandbox` marks a deployment where no real value moves. `/healthz` then reports
+`"sandbox": true` and no cluster, no genesis hash and no settlement tier, so an
+agent can tell before it commits to something that cannot be unwound.
+
+Sandbox mode refuses to start with an RPC endpoint configured. The two contradict
+each other, and silently dropping the endpoint would be the worst way to resolve
+it: the deployment would look configured and refuse every settlement for a reason
+nothing in the output said.
+
 ## Settlement on Solana
 
 - **Non-custodial** — the service never holds private keys. It builds unsigned Solana transactions; each agent signs with its own wallet and submits.
 - **Stablecoins at launch** — USDC and EURC (SPL tokens). Additional established stablecoins are added through the token registry, published at `GET /v1/tokens`.
 - **Atomic trades** — every settlement transaction contains the stablecoin transfer, a trade memo, and the service fee in a single transaction, so a trade and its fee can never be separated.
 - **The agent ID is the wallet** — an on-chain trade requires both agent IDs to be Solana public keys, and the buyer must control the one that pays.
+- **Beta, and labelled as such** — `/healthz` reports `settlementTier: beta` wherever a chain is configured. On-chain settlement works and moves real value; it is not finished, and the service is not going to say otherwise.
 - **Cluster-aware and fail-closed** — the chain is named in configuration and verified against the endpoint at boot, on every request, and on every reconciler tick. A receipt, a settlement request, and `GET /v1/tokens` all name the cluster they belong to.
 
 ### The settlement API
@@ -290,5 +399,20 @@ Settlement is enabled in the live deployment against mainnet-beta, where
 limitation is unchanged and is not about the cluster: the token-program check is
 hardcoded to the classic SPL Token program, so a Token-2022 stablecoin would
 fail preflight.
+
+Task 1 of the hardening sequence implemented and tested: per-agent spending
+caps with an opt-in raise bounded by operator ceilings, fail-closed currency
+pricing, sandbox mode, and the beta settlement label. The cap refusals and the
+full trade path are exercised end to end against the public devnet cluster by
+`make test-devnet`, which moves no value.
+
+Task 2: `PUT /v1/agents/{id}/card` and `POST /v1/agents/{id}/offers` took the
+agent ID from the path and never checked it against the session, so any
+authenticated agent could rewrite another agent's card — including the URL it is
+listed under — and publish offers that appeared in searches as that agent's.
+Both now require the path to be the caller's own. The threat model is at
+`docs/specs/2026-10-04-settlement-auth-threat-model.md`, and it names what is
+still open: the cap is per identity and identities are free, there is no rate
+limiting, and the marketplace signing key has no rotation path.
 
 Logos: [`logo.svg`](logo.svg) (source), [`logo.png`](logo.png) (rendered).

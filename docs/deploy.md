@@ -64,6 +64,66 @@ VTESSERA_SESSION_SECRET=... VTESSERA_PUBLIC_BASE_URL=https://<host> \
 Use a systemd unit with `Restart=on-failure` and the secret in
 `LoadCredential=` or an `EnvironmentFile=` that is mode 0600 and outside git.
 
+## Spending caps
+
+Caps are on by default: $5 per trade and $20 per rolling day per buyer, with the
+governed stablecoins priced at par. Nothing has to be configured for them to
+apply, and an operator who wants them off has to say so — a deployment that
+silently placed no cap on anything would be the more dangerous default.
+
+```bash
+# the tightest thing that is still usable
+./bin/vtessera ... \
+  --spend-cap-per-trade 2.00 \
+  --spend-cap-per-day 8.00
+
+# let an agent raise itself, but not past this
+./bin/vtessera ... \
+  --spend-cap-max-per-trade 50.00 \
+  --spend-cap-max-per-day 200.00
+
+# price a mint this deployment governs. The format is <mint>=<usd per token>@6.
+./bin/vtessera ... --spend-rates "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU=0.98@6"
+```
+
+Three rules to understand before changing any of it:
+
+- **An unpriced currency cannot be traded at all.** A mint with no declared rate
+  is refused when an offer is published and when a trade would use it, so it is
+  not a way around the cap. For the same reason the service refuses to start if
+  any governed mint on the configured cluster has no rate — a deployment that
+  cannot price its own stablecoins is misconfigured, not permissive.
+- **Ceilings are opt-in and default to closed.** With no
+  `--spend-cap-max-per-trade` or `--spend-cap-max-per-day`, `PUT /v1/limits`
+  is refused with `409 CAP_ABOVE_CEILING`. An agent cannot raise its own cap
+  until an operator has declared how far it may go.
+- **Cancellation is the release valve.** A trade reserves its amount from
+  creation until it is cancelled or it settles. There is no other way to take
+  budget back, so an agent that opens a negotiation it does not want should
+  cancel it.
+
+Two known limits, both bounded and both worth stating to an operator rather
+than discovering in an incident:
+
+- **A cap is per agent identity, and identities are free.** The cost of an
+  agent is one Ed25519 key, so a buyer that runs out of budget can register
+  another agent and start again. A cap bounds what one identity can commit
+  itself to; it is not a KYC limit and it does not know about the person behind
+  the key. Rate limits and deposit requirements are the controls for that, and
+  neither is in place.
+- **A trade opened with budget to spare and committed later can overshoot by
+  one window.** The reservation is anchored on the later of opening and first
+  commitment, so a trade opened yesterday and committed today is charged to
+  today — and nothing re-checks it at the off-chain commit, because a trade in
+  `accepted` cannot be cancelled and refusing there would strand the buyer. The
+  overshoot is bounded by what was reserved when the window rolled. Closing it
+  properly means expiring accepted trades, which is dispute-lifecycle work.
+
+Set `--sandbox` on a deployment where no real value moves. It reports
+`sandbox: true` on `/healthz` and refuses to start alongside an RPC endpoint,
+rather than dropping the endpoint silently and failing every settlement for a
+reason nothing in the logs would explain.
+
 ## Fly.io
 
 `fly.toml` is checked in: one machine, one volume mounted at `/data`, and the

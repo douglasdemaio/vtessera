@@ -258,6 +258,14 @@ func (s *Service) BuildSettlement(ctx context.Context, actorID, tradeID string) 
 	default:
 		return domain.SettlementRequest{}, fmt.Errorf("%w: cannot build settlement in state %s", ErrIllegalState, tr.State)
 	}
+	// Re-checked here, not only when the trade was created: this is the last
+	// point at which the service can refuse before the buyer holds a signable
+	// transaction, and a trade can wait in accepted across a cap window rolling
+	// over or an opt-in being withdrawn. The trade being compiled is excluded
+	// from its own committed total, because this call is what accounts for it.
+	if err := s.checkSpend(ctx, tr.BuyerAgentID, tr.Amount, tr.Mint, tr.ID); err != nil {
+		return domain.SettlementRequest{}, err
+	}
 	terms, err := settlement.NewTerms(tr, s.settlement.Registry, s.settlement.Policy)
 	if err != nil {
 		return domain.SettlementRequest{}, err

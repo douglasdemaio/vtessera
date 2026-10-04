@@ -104,6 +104,16 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 	if s.genesis != "" {
 		payload["genesisHash"] = s.genesis
 	}
+	// The maturity label and the sandbox flag ride with the list of what can
+	// actually be traded. This is the document an agent reads to decide what it
+	// can buy, so a deployment that settles on a chain and one that does not must
+	// be distinguishable here, not only at /healthz.
+	if c := s.tokens.Cluster(); c != "" {
+		payload["settlementTier"] = SettlementTier
+	}
+	if s.sandbox {
+		payload["sandbox"] = true
+	}
 	if fee, ok := s.trades.SettlementFee(); ok {
 		payload["settlementFee"] = map[string]any{
 			"lamports":    fee.Lamports(),

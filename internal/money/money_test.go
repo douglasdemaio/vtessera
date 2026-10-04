@@ -3,6 +3,7 @@ package money
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -149,6 +150,69 @@ func TestBaseUnitsRejectsOutOfRangeDecimals(t *testing.T) {
 	for _, decimals := range []int{-1, MaxFractionDigits + 1} {
 		if _, err := MustParse("1").BaseUnits(decimals); !errors.Is(err, ErrNonCanonical) {
 			t.Errorf("BaseUnits(%d) err = %v, want %v", decimals, err, ErrNonCanonical)
+		}
+	}
+}
+
+func TestNewFromBaseUnitsRoundTripsThroughBaseUnits(t *testing.T) {
+	for _, tc := range []struct {
+		units    uint64
+		decimals int
+		want     string
+	}{
+		{0, 6, "0.000000"},
+		{1, 6, "0.000001"},
+		{1000000, 6, "1.000000"},
+		{4500000000, 6, "4500.000000"},
+		{999, 2, "9.99"},
+	} {
+		amount, err := NewFromBaseUnits(tc.units, tc.decimals)
+		if err != nil {
+			t.Fatalf("NewFromBaseUnits(%d, %d): %v", tc.units, tc.decimals, err)
+		}
+		if amount.String() != tc.want {
+			t.Errorf("NewFromBaseUnits(%d, %d) = %s, want %s", tc.units, tc.decimals, amount, tc.want)
+		}
+		back, err := amount.BaseUnits(tc.decimals)
+		if err != nil {
+			t.Fatalf("BaseUnits(%d) on %s: %v", tc.decimals, amount, err)
+		}
+		if back != tc.units {
+			t.Errorf("%s read back as %d units, want %d", amount, back, tc.units)
+		}
+	}
+}
+
+func TestNewFromBaseUnitsRefusesWhatItCannotRepresent(t *testing.T) {
+	// An unrepresentable scale or magnitude must be an error rather than an
+	// Amount that reads as empty: this type exists so a figure cannot quietly
+	// stop being the figure it was.
+	if _, err := NewFromBaseUnits(1, MaxFractionDigits+1); !errors.Is(err, ErrBadScale) {
+		t.Errorf("NewFromBaseUnits with too many decimals err = %v, want %v", err, ErrBadScale)
+	}
+	if _, err := NewFromBaseUnits(1, 0); !errors.Is(err, ErrBadScale) {
+		t.Errorf("NewFromBaseUnits with no decimals err = %v, want %v", err, ErrBadScale)
+	}
+
+	// The largest count there is still renders, at every acceptable scale, and
+	// comes back to the same units. This is the boundary the overflow guard above
+	// exists to defend, and the reason the package cannot be given a scale that
+	// makes a uint64 unrepresentable without this failing.
+	largest := uint64(math.MaxUint64)
+	for decimals := 1; decimals <= MaxFractionDigits; decimals++ {
+		amount, err := NewFromBaseUnits(largest, decimals)
+		if err != nil {
+			t.Fatalf("NewFromBaseUnits(MaxUint64, %d): %v", decimals, err)
+		}
+		back, err := amount.BaseUnits(decimals)
+		if err != nil {
+			t.Fatalf("BaseUnits(%d) on %s: %v", decimals, amount, err)
+		}
+		if back != largest {
+			t.Errorf("MaxUint64 at %d decimals came back as %d", decimals, back)
+		}
+		if _, err := Parse(amount.String()); err != nil {
+			t.Errorf("%s is not canonical: %v", amount, err)
 		}
 	}
 }
