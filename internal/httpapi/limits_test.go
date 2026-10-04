@@ -39,11 +39,11 @@ func TestAnAgentCanReadItsOwnCaps(t *testing.T) {
 
 	body := agent.do(http.MethodGet, "/v1/limits", nil, true)
 	got := decode(t, body)
-	if got["perTradeUsd"] != "5.00" {
-		t.Errorf("perTradeUsd = %v, want 5.00", got["perTradeUsd"])
+	if got["perTradeUsd"] != "10.00" {
+		t.Errorf("perTradeUsd = %v, want 10.00", got["perTradeUsd"])
 	}
-	if got["perDayUsd"] != "20.00" {
-		t.Errorf("perDayUsd = %v, want 20.00", got["perDayUsd"])
+	if got["perDayUsd"] != "10.00" {
+		t.Errorf("perDayUsd = %v, want 10.00", got["perDayUsd"])
 	}
 	if got["currency"] != "USD" {
 		t.Errorf("currency = %v, want USD: an agent has to know what the caps are denominated in", got["currency"])
@@ -94,7 +94,7 @@ func TestRaisingCapsAppliesToTheCallerOnly(t *testing.T) {
 	// Somebody else's agent is unaffected.
 	other := newAgent(t, server)
 	got = decode(t, other.do(http.MethodGet, "/v1/limits", nil, true))
-	if got["perTradeUsd"] != "5.00" || got["raised"] != false {
+	if got["perTradeUsd"] != "10.00" || got["raised"] != false {
 		t.Errorf("a second agent reads %v raised=%v, want the deployment default", got["perTradeUsd"], got["raised"])
 	}
 }
@@ -119,8 +119,8 @@ func TestRaisingAboveTheCeilingIsRefusedWithTheCeilingNamed(t *testing.T) {
 
 	// Refused, not clamped: the agent's caps are still the defaults.
 	got = decode(t, agent.do(http.MethodGet, "/v1/limits", nil, true))
-	if got["perTradeUsd"] != "5.00" {
-		t.Errorf("perTradeUsd after a refused raise = %v, want the unchanged 5.00", got["perTradeUsd"])
+	if got["perTradeUsd"] != "10.00" {
+		t.Errorf("perTradeUsd after a refused raise = %v, want the unchanged 10.00", got["perTradeUsd"])
 	}
 }
 
@@ -160,8 +160,8 @@ func TestARaiseWithAMisspelledFieldIsRefusedRatherThanIgnored(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("GET /v1/limits = %d %s", status, body)
 	}
-	if after := decode(t, body); after["perTradeUsd"] != "5.00" {
-		t.Errorf("perTradeUsd = %v after a refused raise, want the 5.00 default", after["perTradeUsd"])
+	if after := decode(t, body); after["perTradeUsd"] != "10.00" {
+		t.Errorf("perTradeUsd = %v after a refused raise, want the 10.00 default", after["perTradeUsd"])
 	}
 }
 
@@ -173,8 +173,8 @@ func TestTwoJSONDocumentsInOneRaiseAreRefused(t *testing.T) {
 		t.Fatalf("PUT /v1/limits with two documents = %d %s, want 400", status, body)
 	}
 	status, body = agent.raw(http.MethodGet, "/v1/limits", nil, true)
-	if after := decode(t, body); after["perTradeUsd"] != "5.00" {
-		t.Errorf("perTradeUsd = %v after a two-document raise, want the 5.00 default", after["perTradeUsd"])
+	if after := decode(t, body); after["perTradeUsd"] != "10.00" {
+		t.Errorf("perTradeUsd = %v after a two-document raise, want the 10.00 default", after["perTradeUsd"])
 	}
 }
 

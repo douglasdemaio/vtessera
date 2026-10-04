@@ -109,16 +109,16 @@ func TestATradeAboveThePerTradeCapIsRejected(t *testing.T) {
 	ctx := context.Background()
 	h := capSetup(t, nil)
 
-	// The default cap is five dollars and USDC is priced at par, so anything above
-	// five USDC must be refused before the trade row exists.
-	overCap := offerFor(t, h, "5.01")
+	// The default cap is ten dollars and USDC is priced at par, so anything above
+	// ten USDC must be refused before the trade row exists.
+	overCap := offerFor(t, h, "10.01")
 	if _, _, err := h.svc.Create(ctx, buyerKey, overCap, domain.SettlementOffchain, ""); !errors.Is(err, trade.ErrSpendCapExceeded) {
-		t.Fatalf("Create at 5.01 against a 5.00 cap = %v, want ErrSpendCapExceeded", err)
+		t.Fatalf("Create at 10.01 against a 10.00 cap = %v, want ErrSpendCapExceeded", err)
 	}
 
 	// Exactly at the cap is allowed. A cap that refuses its own boundary is an
 	// off-by-one dressed as a limit.
-	atCap := offerFor(t, h, "5.00")
+	atCap := offerFor(t, h, "10.00")
 	if _, isNew, err := h.svc.Create(ctx, buyerKey, atCap, domain.SettlementOffchain, ""); err != nil || !isNew {
 		t.Fatalf("Create at exactly the cap = %v, %v", isNew, err)
 	}
@@ -128,14 +128,14 @@ func TestATradeAboveTheDailyCapIsRejected(t *testing.T) {
 	ctx := context.Background()
 	h := capSetup(t, nil)
 
-	// Four five-dollar trades is exactly twenty dollars. The fifth, at any
-	// amount, has to be refused.
+	// Two five-dollar trades is exactly ten dollars. The third, at any amount,
+	// has to be refused.
 	offerID := offerFor(t, h, "5.00")
-	ids := make([]string, 0, 4)
-	for i := 0; i < 4; i++ {
+	ids := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
 		tr, _, err := h.svc.Create(ctx, buyerKey, offerID, domain.SettlementOffchain, "")
 		if err != nil {
-			t.Fatalf("trade %d of 4 against the daily cap: %v", i+1, err)
+			t.Fatalf("trade %d of 2 against the daily cap: %v", i+1, err)
 		}
 		ids = append(ids, tr.ID)
 	}
@@ -146,9 +146,9 @@ func TestATradeAboveTheDailyCapIsRejected(t *testing.T) {
 	oneCent := offerFor(t, h, "0.01")
 	_, _, err := h.svc.Create(ctx, buyerKey, oneCent, domain.SettlementOffchain, "")
 	if !errors.Is(err, trade.ErrSpendCapExceeded) {
-		t.Fatalf("Create with 20.00 already committed = %v, want ErrSpendCapExceeded", err)
+		t.Fatalf("Create with 10.00 already committed = %v, want ErrSpendCapExceeded", err)
 	}
-	if !strings.Contains(err.Error(), "20.00") {
+	if !strings.Contains(err.Error(), "10.00") {
 		t.Errorf("refusal %q does not name the daily cap the buyer ran into", err)
 	}
 }
@@ -158,20 +158,20 @@ func TestAnOpenNegotiationReservesItsBudgetUntilItIsCancelled(t *testing.T) {
 	h := capSetup(t, nil)
 
 	// A proposed trade is not money that has moved, but it is exposure the buyer
-	// has taken on. Five of them exhaust twenty dollars, because a buyer that
+	// has taken on. Two of them exhaust ten dollars, because a buyer that
 	// could open unlimited negotiations against a spent budget has no cap at all.
 	offerID := offerFor(t, h, "5.00")
-	opened := make([]string, 0, 4)
-	for i := 0; i < 4; i++ {
+	opened := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
 		tr, _, err := h.svc.Create(ctx, buyerKey, offerID, domain.SettlementOffchain, "")
 		if err != nil {
 			t.Fatalf("proposed trade %d was refused: %v", i+1, err)
 		}
 		opened = append(opened, tr.ID)
 	}
-	fifth := offerFor(t, h, "5.00")
-	if _, _, err := h.svc.Create(ctx, buyerKey, fifth, domain.SettlementOffchain, ""); !errors.Is(err, trade.ErrSpendCapExceeded) {
-		t.Fatalf("a fifth open five-dollar negotiation = %v, want ErrSpendCapExceeded", err)
+	third := offerFor(t, h, "5.00")
+	if _, _, err := h.svc.Create(ctx, buyerKey, third, domain.SettlementOffchain, ""); !errors.Is(err, trade.ErrSpendCapExceeded) {
+		t.Fatalf("a third open five-dollar negotiation = %v, want ErrSpendCapExceeded", err)
 	}
 
 	// Cancelling one releases the reservation, so the buyer can start again. This
@@ -180,8 +180,8 @@ func TestAnOpenNegotiationReservesItsBudgetUntilItIsCancelled(t *testing.T) {
 	if _, err := h.svc.Cancel(ctx, buyerKey, opened[0], "not proceeding"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := h.svc.Create(ctx, buyerKey, fifth, domain.SettlementOffchain, ""); err != nil {
-		t.Fatalf("a fifth negotiation after cancelling one: %v", err)
+	if _, _, err := h.svc.Create(ctx, buyerKey, third, domain.SettlementOffchain, ""); err != nil {
+		t.Fatalf("a third negotiation after cancelling one: %v", err)
 	}
 }
 
@@ -189,7 +189,7 @@ func TestACancelledTradeReleasesItsBudget(t *testing.T) {
 	ctx := context.Background()
 	h := capSetup(t, nil)
 
-	offerID := offerFor(t, h, "5.00")
+	offerID := offerFor(t, h, "2.00")
 	for i := 0; i < 5; i++ {
 		tr, _, err := h.svc.Create(ctx, buyerKey, offerID, domain.SettlementOffchain, "")
 		if err != nil {
@@ -205,11 +205,11 @@ func TestConcurrentTradesCannotBothTakeTheSameDollar(t *testing.T) {
 	ctx := context.Background()
 	h := capSetup(t, nil)
 
-	// Five simultaneous five-dollar offers against a twenty-dollar budget. Exactly
-	// four may be created. Reading the cap and then reserving against it are two
+	// Five simultaneous four-dollar offers against a ten-dollar budget. Exactly
+	// two may be created. Reading the cap and then reserving against it are two
 	// separate statements, and without the lock between them every one of these
 	// can read a budget with room left before any of them has reserved anything.
-	offerID := offerFor(t, h, "5.00")
+	offerID := offerFor(t, h, "4.00")
 	const attempts = 5
 	var (
 		wg         sync.WaitGroup
@@ -239,8 +239,8 @@ func TestConcurrentTradesCannotBothTakeTheSameDollar(t *testing.T) {
 	if otherErr != nil {
 		t.Fatalf("a concurrent create failed for a reason other than the cap: %v", otherErr)
 	}
-	if created != 4 || refusedFor != 1 {
-		t.Fatalf("created %d and refused %d of %d simultaneous five-dollar trades, want 4 and 1",
+	if created != 2 || refusedFor != 3 {
+		t.Fatalf("created %d and refused %d of %d simultaneous four-dollar trades, want 2 and 3",
 			created, refusedFor, attempts)
 	}
 }
@@ -337,8 +337,8 @@ func TestRaisingOnlyOneCapLeavesTheOtherAlone(t *testing.T) {
 	}
 	// An omitted figure means "leave this one as it is", so a caller raising only
 	// the per-trade cap does not silently drop its daily cap to the default.
-	if raised.PerDay.String() != "20.00" {
-		t.Errorf("daily cap after raising only the per-trade cap = %s, want the 20.00 default", raised.PerDay)
+	if raised.PerDay.String() != "10.00" {
+		t.Errorf("daily cap after raising only the per-trade cap = %s, want the 10.00 default", raised.PerDay)
 	}
 }
 
@@ -483,16 +483,16 @@ func TestTheDailyCapIsEnforcedWhenTheBuyerCommits(t *testing.T) {
 
 	// ...then the window rolls, which drops the accepted trade's reservation out of
 	// the counted window, and the buyer spends that window's whole budget on other
-	// trades. Twenty dollars is exactly the cap, so all five are accepted.
+	// trades. Eight dollars is inside a ten-dollar cap, so both are accepted.
 	*now = now.Add(2 * time.Hour)
-	for range 5 {
+	for range 2 {
 		commitAmount(t, h, "4.00")
 	}
 
-	// Committing the first trade now would take the buyer to twenty-four dollars
-	// across the boundary. It is refused, which is the whole point: the old
-	// behaviour let this through, and twenty-four is inside the "one window of
-	// overshoot" that was documented as a known bound.
+	// Committing the first trade now would take the buyer to twelve dollars across
+	// the boundary. It is refused, which is the whole point: the old behaviour let
+	// this through, and twelve is inside the "one window of overshoot" that was
+	// documented as a known bound.
 	_, _, err := h.svc.Record(ctx, buyerKey, tr.ID)
 	if !errors.Is(err, trade.ErrSpendCapExceeded) {
 		t.Fatalf("Record after the window rolled = %v, want ErrSpendCapExceeded", err)
@@ -527,7 +527,7 @@ func TestATradeInsideItsCapIsStillCommittableAfterTheWindowRolls(t *testing.T) {
 	tr := acceptAt(t, h, offerFor(t, h, "4.00"))
 
 	// One trade at four dollars, an hour and a half later, is still inside a
-	// twenty-dollar cap. Re-checking the cap at the commit must not turn the cap
+	// ten-dollar cap. Re-checking the cap at the commit must not turn the cap
 	// into a rule that any elapsed time invalidates a trade both parties agreed.
 	*now = now.Add(90 * time.Minute)
 	if _, _, err := h.svc.Record(ctx, buyerKey, tr.ID); err != nil {

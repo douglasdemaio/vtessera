@@ -181,13 +181,17 @@ type Policy struct {
 	perAgentOverrides func(ctx context.Context, agentID string) (perTrade, perDay money.Amount, ok bool)
 }
 
-// DefaultPolicy is the cap set a deployment starts with: five dollars a trade
-// and twenty a day, over a rolling window, with the ceilings left unset so an
-// agent cannot raise anything until an operator says how far it may go.
+// DefaultPolicy is the cap set a deployment starts with: ten dollars a trade and
+// ten a day, over a rolling window, with the ceilings left unset so an agent
+// cannot raise anything until an operator says how far it may go.
+//
+// The two are equal on purpose. It means one agent can commit one maximum-size
+// trade per rolling day and no second one, which is a tighter daily exposure than
+// a per-trade cap below a larger daily cap would give.
 func DefaultPolicy(rates Rates) Policy {
 	return Policy{
-		PerTrade: money.MustParse("5.00"),
-		PerDay:   money.MustParse("20.00"),
+		PerTrade: money.MustParse("10.00"),
+		PerDay:   money.MustParse("10.00"),
 		Window:   24 * time.Hour,
 		rates:    rates,
 	}

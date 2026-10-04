@@ -409,15 +409,15 @@ func TestAnAcceptanceDeadlineIsRequired(t *testing.T) {
 	}
 }
 
-func TestAnAcceptanceDeadlineDefaultsToADay(t *testing.T) {
+func TestAnAcceptanceDeadlineDefaultsToThreeDays(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("VTESSERA_TRADE_ACCEPT_TTL", "")
 	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.AcceptTTL != 24*time.Hour {
-		t.Errorf("AcceptTTL = %s, want 24h", cfg.AcceptTTL)
+	if cfg.AcceptTTL != 72*time.Hour {
+		t.Errorf("AcceptTTL = %s, want 72h", cfg.AcceptTTL)
 	}
 	if cfg.ExpirySweepEvery != 5*time.Minute {
 		t.Errorf("ExpirySweepEvery = %s, want 5m", cfg.ExpirySweepEvery)

@@ -128,14 +128,16 @@ make smoke  # drives a real vtessera process with real Ed25519 keys
 
 ## Spending caps
 
-Every agent has a default budget: **$5 per trade** and **$20 per rolling day**,
-measured in USD and counted per buyer. A trade above either cap is refused with
+Every agent has a default budget: **$10 per trade** and **$10 per rolling day**,
+measured in USD and counted per buyer. The two are equal on purpose: one
+maximum-size trade exhausts the day, and a daily cap larger than the per-trade cap
+would mean a single trade could clear it on its own. A trade above either cap is refused with
 `409 SPEND_CAP_EXCEEDED` before it is created, and the refusal names the cap it
 hit. An agent reads its own caps at `GET /v1/limits`:
 
 ```sh
 curl -s localhost:8080/v1/limits -H "authorization: Bearer $TOKEN" | jq
-# {"perTradeUsd":"5.00","perDayUsd":"20.00","maxPerTradeUsd":"50.00",
+# {"perTradeUsd":"10.00","perDayUsd":"10.00","maxPerTradeUsd":"50.00",
 #  "maxPerDayUsd":"200.00","raised":false,"currency":"USD"}
 ```
 
@@ -213,13 +215,13 @@ wants that bounded declares a rate above par.
 
 | Flag | Environment | Default |
 |---|---|---|
-| `--spend-cap-per-trade` | `VTESSERA_SPEND_CAP_PER_TRADE` | `5.00` |
-| `--spend-cap-per-day` | `VTESSERA_SPEND_CAP_PER_DAY` | `20.00` |
+| `--spend-cap-per-trade` | `VTESSERA_SPEND_CAP_PER_TRADE` | `10.00` |
+| `--spend-cap-per-day` | `VTESSERA_SPEND_CAP_PER_DAY` | `10.00` |
+| `--trade-accept-ttl` | `VTESSERA_TRADE_ACCEPT_TTL` | `72h` |
 | `--spend-cap-window` | `VTESSERA_SPEND_CAP_WINDOW` | `24h` |
 | `--spend-cap-max-per-trade` | `VTESSERA_SPEND_CAP_MAX_PER_TRADE` | unset, so raising is refused |
 | `--spend-cap-max-per-day` | `VTESSERA_SPEND_CAP_MAX_PER_DAY` | unset, so raising is refused |
 | `--spend-rates` | `VTESSERA_SPEND_RATES` | the governed stablecoins at par |
-| `--trade-accept-ttl` | `VTESSERA_TRADE_ACCEPT_TTL` | `24h` |
 | `--trade-expiry-sweep-interval` | `VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL` | `5m` |
 | `--trade-expiry-sweep-batch` | `VTESSERA_TRADE_EXPIRY_SWEEP_BATCH` | `100` |
 | `--sandbox` | `VTESSERA_SANDBOX` | off |

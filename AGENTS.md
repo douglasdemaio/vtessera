@@ -213,8 +213,10 @@ a detectable incident into an undetectable compromise.
 
 ### 7. Spending caps are on by default, and pricing is operator-declared
 
-Landed on `task1-safety-caps`. $5 per trade and $20 per rolling day per buyer,
-governed stablecoins at par, no oracle. Three things follow that are not
+Landed on `task1-safety-caps`, retuned to $10/$10 by operator decision. Ten per
+trade and ten per rolling day per buyer, equal on purpose so one maximum-size
+trade exhausts the day. Governed stablecoins at par, no oracle. Three things
+follow that are not
 negotiable without a design discussion:
 
 - **An unpriced mint cannot be traded.** No declared rate means `409
@@ -229,7 +231,7 @@ negotiable without a design discussion:
   KYC, and anyone can mint another identity. Do not describe it as a spend limit
   on a person or an organisation.
 
-An accepted trade carries a deadline (`--trade-accept-ttl`, default `24h`) and can
+An accepted trade carries a deadline (`--trade-accept-ttl`, default `72h`) and can
 be cancelled only once it passes. This is what lets the off-chain commit re-check
 the cap: without somewhere to go, a refused commit would strand the buyer holding
 a trade they can neither complete nor abandon. A sweep cancels expired trades so
