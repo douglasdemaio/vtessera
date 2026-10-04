@@ -5,7 +5,7 @@ IMAGE ?= vtessera:local
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana validator validator-off vet fmt lint tidy clean smoke image image-run fly-deploy fly-verify preflight-live
+.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke image image-run fly-deploy fly-verify preflight-live
 
 all: fmt vet test build
 
@@ -40,6 +40,15 @@ validator-off:
 
 test-solana:
 	$(GO) test -tags solana -timeout 30m ./internal/e2e/
+
+# Completes a full trade against the public devnet cluster and checks the cap
+# refusals there. It touches the network but moves no value: the trade settles
+# off-chain and no key with a balance is used. `make test` stays hermetic, which
+# is why this is behind its own tag. Override the endpoint with:
+#
+#   make test-devnet RPC=https://api.devnet.solana.com
+test-devnet:
+	$(GO) test -tags devnet -timeout 15m -run Devnet ./internal/e2e/
 
 # Checks a cluster for real without starting the service. It runs the same
 # verification the service performs at boot, so it is the only way to find out

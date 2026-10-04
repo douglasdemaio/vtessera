@@ -58,6 +58,29 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		version: 2,
+		name:    "agent_limits",
+		apply: func(ctx context.Context, tx *sql.Tx) error {
+			// An agent's own opt-in to a higher spending cap. The defaults live
+			// in configuration, so an agent with no row here is on the
+			// deployment's default caps and this table stays empty until somebody
+			// asks for more.
+			//
+			// Amounts are TEXT decimal strings for the same reason trades.amount
+			// is: a cap is an exact figure an operator will read, and storing it
+			// as a float would make the stored value differ from the configured
+			// one.
+			_, err := tx.ExecContext(ctx,
+				`CREATE TABLE IF NOT EXISTS agent_limits (
+					agent_id        TEXT PRIMARY KEY REFERENCES agents (id),
+					per_trade_usd   TEXT NOT NULL,
+					per_day_usd     TEXT NOT NULL,
+					raised_at       INTEGER NOT NULL
+				)`)
+			return err
+		},
+	},
 }
 
 type Store struct {

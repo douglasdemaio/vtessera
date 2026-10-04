@@ -19,6 +19,7 @@ var (
 	ErrNegative        = errors.New("amount must not be negative")
 	ErrNonCanonical    = errors.New("amount is not in canonical form")
 	ErrNotAStringValue = errors.New("amount must be a JSON string")
+	ErrBadScale        = errors.New("decimals is not a representable scale")
 )
 
 type Amount struct {
@@ -129,6 +130,36 @@ func (a Amount) BaseUnits(decimals int) (uint64, error) {
 		return 0, fmt.Errorf("%w: %v", ErrOverflow, err)
 	}
 	return units, nil
+}
+
+// NewFromBaseUnits builds an Amount from a count of base units. It is the exact
+// inverse of BaseUnits, so parsing a rendered amount and converting it back
+// returns the same units. It exists because an aggregate computed over many
+// amounts has to be reported in the same decimal form the amounts arrived in, and
+// rendering that by dividing a float would reintroduce the imprecision this type
+// exists to remove.
+//
+// It reports an error rather than an unusable amount for a scale or a magnitude
+// it cannot represent. The callers all pass a compile-time scale, so that error
+// is unreachable in practice; a money type that answers a bad question with an
+// empty string is worse than one that says it cannot answer.
+func NewFromBaseUnits(units uint64, decimals int) (Amount, error) {
+	if decimals <= 0 || decimals > MaxFractionDigits {
+		return Amount{}, fmt.Errorf("%w: %d", ErrBadScale, decimals)
+	}
+	digits := strconv.FormatUint(units, 10)
+	// Unreachable with today's constants, and kept anyway: a uint64 is at most
+	// twenty digits and the smallest acceptable scale allows exactly twenty, so
+	// the guard only fires if one of those constants moves. It costs one
+	// comparison and it is what keeps such a change from quietly producing an
+	// amount this package would then refuse to parse.
+	if len(digits) > MaxIntegerDigits+decimals {
+		return Amount{}, fmt.Errorf("%w: %d base units at %d decimals", ErrOverflow, units, decimals)
+	}
+	if len(digits) <= decimals {
+		digits = strings.Repeat("0", decimals-len(digits)+1) + digits
+	}
+	return Amount{value: digits[:len(digits)-decimals] + "." + digits[len(digits)-decimals:]}, nil
 }
 
 func (a Amount) MarshalJSON() ([]byte, error) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/config"
 	"github.com/douglasdemaio/vtessera/internal/httpapi"
 	"github.com/douglasdemaio/vtessera/internal/ledger"
+	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/preflight"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/settlement"
@@ -94,9 +96,21 @@ func run(args []string) error {
 	// governs no mints, so it declines to check a price against a scale it does
 	// not have rather than assuming mainnet's.
 	var mints tokens.Registry
-	registrySvc := registry.New(db, mints)
+	spendPolicy := cfg.Spend.Policy()
+	registrySvc := registry.New(db, mints, registry.WithPricer(spendPolicy))
 	led := ledger.New(db, signer)
-	trades := trade.New(db, db, db, led)
+	trades := trade.New(db, db, db, led).WithLimits(spendPolicy, db)
+	logger.Info("spending caps active",
+		"perTradeUsd", cfg.Spend.PerTradeUSD.String(),
+		"perDayUsd", cfg.Spend.PerDayUSD.String(),
+		"window", cfg.Spend.DailyWindow.String(),
+		"maxPerTradeUsd", capCeiling(cfg.Spend.CeilingPerTradeUSD),
+		"maxPerDayUsd", capCeiling(cfg.Spend.CeilingPerDayUSD),
+		"pricedMints", len(cfg.Spend.Rates),
+	)
+	if cfg.Sandbox {
+		logger.Info("sandbox mode: on-chain settlement is refused, no real value moves here")
+	}
 
 	// On-chain settlement is only wired when a cluster and an endpoint are both
 	// configured, and only after preflight has confirmed the endpoint is the
@@ -111,9 +125,16 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		// A governed mint with no USD rate would make the cap unmeasurable for
+		// that currency, and a cap that cannot be measured is not a cap. Refusing
+		// to start says so once, loudly, instead of letting an agent discover it
+		// as a refused trade.
+		if unpriced := spendPolicy.Rates().Missing(governedAddresses(mints)); len(unpriced) > 0 {
+			return fmt.Errorf("these governed mints have no USD rate, so spending caps cannot be measured in them: %s (declare them with --spend-rates mint=usd@decimals)", strings.Join(unpriced, ", "))
+		}
 		// The registry governs the same set preflight checks, so an agent can
 		// never advertise a currency the service would refuse to settle in.
-		registrySvc = registry.New(db, mints)
+		registrySvc = registry.New(db, mints, registry.WithPricer(spendPolicy))
 
 		client := settlement.NewRPCClient(cfg.Solana.RPCURL)
 		logger.Info("preflight passed",
@@ -176,6 +197,7 @@ func run(args []string) error {
 		PublicBaseURL: cfg.PublicBaseURL,
 		Cluster:       cfg.Solana.Cluster,
 		GenesisHash:   preflightGenesis,
+		Sandbox:       cfg.Sandbox,
 	})
 	server := &http.Server{
 		Addr:              cfg.Addr,
@@ -265,4 +287,26 @@ func printPreflight(report preflight.Report) {
 	fmt.Printf("  fee wallet   %s\n", report.FeeWallet)
 	fmt.Printf("  fee balance  %d lamports\n", report.FeeBalance)
 	fmt.Printf("  rent minimum %d lamports\n", report.RentMinimum)
+}
+
+// governedAddresses lists the mints this deployment governs, for the boot check
+// that every one of them can be priced.
+func governedAddresses(mints tokens.Registry) []string {
+	if mints == nil {
+		return nil
+	}
+	out := make([]string, 0, len(mints.List()))
+	for _, t := range mints.List() {
+		out = append(out, t.Address)
+	}
+	return out
+}
+
+// capCeiling renders an optional ceiling for a log line, where unset must read as
+// unset rather than as zero.
+func capCeiling(v money.Amount) string {
+	if v.IsZero() {
+		return "unset"
+	}
+	return v.String()
 }

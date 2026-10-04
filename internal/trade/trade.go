@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/domain"
+	"github.com/douglasdemaio/vtessera/internal/limits"
+	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/google/uuid"
 )
 
@@ -32,6 +35,16 @@ var (
 	// seller's choice and the buyer cannot correct it, so it is a conflict with
 	// server state and not a malformed request.
 	ErrMintUngoverned = errors.New("offer price mint is not governed on this cluster")
+	// ErrSpendCapExceeded means the trade would take an agent past a spending cap
+	// it has not raised. It is a 409: the cap is server policy the buyer opted
+	// into by default and can change only by asking, so it is a conflict with
+	// server state rather than a malformed request.
+	ErrSpendCapExceeded = errors.New("trade exceeds this agent's spending cap")
+	// ErrMintUnpriced means the trade is denominated in a mint this deployment
+	// has no USD rate for, so the cap cannot be evaluated against it. It is
+	// refused rather than allowed uncapped: an agent that could pick an unpriced
+	// currency would have a way around the cap entirely.
+	ErrMintUnpriced = errors.New("no USD rate is declared for this mint")
 )
 
 type Store interface {
@@ -54,22 +67,210 @@ type AgentStore interface {
 	GetAgent(ctx context.Context, id string) (domain.Agent, error)
 }
 
+// LimitStore is the optional dependency spending caps need. It is separate from
+// Store because caps are a policy layer over trades rather than part of the
+// trade lifecycle: a service without it trades exactly as it did before caps
+// existed, which is the same way settlement is optional here.
+type LimitStore interface {
+	// GetAgentLimits returns ErrNotFound-equivalent for an agent that has not
+	// opted in to anything above the deployment default.
+	GetAgentLimits(ctx context.Context, agentID string) (domain.AgentLimits, error)
+	// SetAgentLimits records an opt-in. Both halves are required: a cap that
+	// cannot be read is a cap that cannot be enforced, and a cap that cannot be
+	// raised is a cap the operator did not choose.
+	SetAgentLimits(ctx context.Context, l domain.AgentLimits) error
+	// CommittedSpendSince returns the amounts a buyer has committed since the
+	// cutoff, in token terms.
+	CommittedSpendSince(ctx context.Context, buyerAgentID string, since time.Time, excludeTradeID string) ([]domain.SpendRow, error)
+}
+
 type Ledger interface {
 	Record(ctx context.Context, t domain.Trade, solanaSignature, clusterName string) (domain.Receipt, error)
 	Receipt(ctx context.Context, tradeID string) (domain.Receipt, error)
 }
 
 type Service struct {
-	store      Store
-	offers     OfferStore
-	agents     AgentStore
-	ledger     Ledger
-	settlement SettlementDeps
-	now        func() time.Time
+	store       Store
+	offers      OfferStore
+	agents      AgentStore
+	ledger      Ledger
+	settlement  SettlementDeps
+	limits      *limits.Policy
+	limitsStore LimitStore
+	now         func() time.Time
+
+	// reserveMu serialises the read-a-cap-then-reserve-a-cap sequence in
+	// Create. Checking a daily cap and then inserting the reservation that
+	// discharges it are two statements, and without a lock between them two
+	// concurrent creates can both read a budget with room left and both take
+	// it. One lock for all buyers rather than one per buyer: SQLite serialises
+	// the write that follows anyway, so a second lock would add a map to keep
+	// correct in exchange for contention nobody can observe at this scale.
+	reserveMu sync.Mutex
 }
 
 func New(store Store, offers OfferStore, agents AgentStore, led Ledger) *Service {
 	return &Service{store: store, offers: offers, agents: agents, ledger: led, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// WithLimits turns spending caps on. Without it a service places no cap on
+// anything, which is why it is an explicit call rather than a default: a
+// deployment that has not been given a cap policy is making a statement about
+// what it will allow, and it should be a deliberate one.
+func (s *Service) WithLimits(policy limits.Policy, store LimitStore) *Service {
+	if store != nil {
+		policy = policy.WithAgentLimits(func(ctx context.Context, agentID string) (money.Amount, money.Amount, bool) {
+			stored, err := store.GetAgentLimits(ctx, agentID)
+			if err != nil {
+				// An unreadable opt-in falls back to the deployment default,
+				// which is the tighter of the two numbers in the case that
+				// matters: an agent whose raise cannot be read must not be
+				// trusted to have one.
+				return money.Amount{}, money.Amount{}, false
+			}
+			return stored.PerTradeUSD, stored.PerDayUSD, true
+		})
+	}
+	s.limits = &policy
+	s.limitsStore = store
+	return s
+}
+
+// Limits returns the active cap policy, or false when caps are not in force.
+func (s *Service) Limits() (limits.Policy, bool) {
+	if s.limits == nil {
+		return limits.Policy{}, false
+	}
+	return *s.limits, true
+}
+
+// EffectiveLimits resolves the caps in force for an agent. It is exported
+// through the API so a response can tell an agent what its own limits are
+// instead of leaving it to infer them from a refusal.
+func (s *Service) EffectiveLimits(ctx context.Context, agentID string) (limits.Limits, error) {
+	if s.limits == nil {
+		return limits.Limits{}, errors.New("spending caps are not configured on this deployment")
+	}
+	return s.limits.Effective(ctx, agentID), nil
+}
+
+// RaiseLimits records an agent's opt-in to caps above the deployment default.
+//
+// The ceilings are checked here rather than in the handler, because the decision
+// is a policy one and the handler has no way to know the policy. Raising is
+// deliberately not lowering: an agent sending a cap below the default gets the
+// default back, so this route cannot be used to shrink an agent's own limit into
+// a state it then trips over.
+func (s *Service) RaiseLimits(ctx context.Context, agentID string, perTrade, perDay money.Amount) (limits.Limits, error) {
+	if s.limits == nil || s.limitsStore == nil {
+		return limits.Limits{}, errors.New("spending caps are not configured on this deployment")
+	}
+	policy := *s.limits
+	if perTrade.IsZero() || perTrade.Cmp(policy.PerTrade) < 0 {
+		perTrade = policy.PerTrade
+	}
+	if perDay.IsZero() || perDay.Cmp(policy.PerDay) < 0 {
+		perDay = policy.PerDay
+	}
+	if err := policy.Check(perTrade, perDay); err != nil {
+		return limits.Limits{}, err
+	}
+	if err := s.limitsStore.SetAgentLimits(ctx, domain.AgentLimits{
+		AgentID:     agentID,
+		PerTradeUSD: perTrade,
+		PerDayUSD:   perDay,
+		RaisedAt:    s.now().UTC(),
+	}); err != nil {
+		return limits.Limits{}, err
+	}
+	return policy.Effective(ctx, agentID), nil
+}
+
+// checkSpend refuses a trade that would take its buyer past a cap.
+//
+// It is called at the two points where refusing is still free. The first is
+// creation, before either party has committed, and a trade reserves its amount
+// against the cap from that moment: a buyer cannot open a fifth negotiation it
+// has no budget for and decide later whether to take it. The second is when an
+// on-chain settlement is compiled, the last moment before the buyer holds a
+// signable transaction, because a trade can sit in accepted across a window
+// rolling over.
+//
+// There is deliberately no check at the off-chain commit. Refusing there would be
+// worse than the problem it solves: the trade is already accepted, and an
+// accepted trade cannot be cancelled, so the buyer would hold a trade it can
+// neither complete nor walk away from.
+// excludeTradeID names a trade the caller is accounting for itself, so it is
+// not counted twice: see store.CommittedSpendSince.
+func (s *Service) checkSpend(ctx context.Context, buyerAgentID string, amount money.Amount, mint string, excludeTradeID string) error {
+	if s.limits == nil {
+		return nil
+	}
+	policy := *s.limits
+	effective := policy.Effective(ctx, buyerAgentID)
+
+	value, err := policy.USDValue(amount, mint)
+	if err != nil {
+		if errors.Is(err, limits.ErrNoRate) {
+			return fmt.Errorf("%w: %s", ErrMintUnpriced, mint)
+		}
+		return fmt.Errorf("price this trade: %w", err)
+	}
+
+	perTradeCap, err := limits.CapMicro(effective.PerTrade)
+	if err != nil {
+		return fmt.Errorf("per-trade cap: %w", err)
+	}
+	if value > perTradeCap {
+		return fmt.Errorf("%w: %s is %s and this agent's per-trade cap is %s",
+			ErrSpendCapExceeded, amount, limits.FormatUSD(value), effective.PerTrade)
+	}
+
+	rows, err := s.committedSpend(ctx, buyerAgentID, policy.Window, excludeTradeID)
+	if err != nil {
+		return err
+	}
+	committed := value
+	for _, row := range rows {
+		rowValue, err := policy.USDValue(row.Amount, row.Mint)
+		if err != nil {
+			// A committed trade in a mint that has since lost its rate cannot be
+			// counted, and counting it as zero would understate the buyer's
+			// spend. Refusing is the direction that does not let more through.
+			if errors.Is(err, limits.ErrNoRate) {
+				return fmt.Errorf("%w: this agent has committed spend in %s, which has no rate",
+					ErrMintUnpriced, row.Mint)
+			}
+			return fmt.Errorf("price this agent's committed spend: %w", err)
+		}
+		committed += rowValue
+		if committed < rowValue {
+			// Saturating rather than wrapping: an overflow here would understate
+			// the total and let a trade through.
+			return fmt.Errorf("%w: this agent's committed spend exceeds the representable range",
+				ErrSpendCapExceeded)
+		}
+	}
+	perDayCap, err := limits.CapMicro(effective.PerDay)
+	if err != nil {
+		return fmt.Errorf("daily cap: %w", err)
+	}
+	if committed > perDayCap {
+		return fmt.Errorf("%w: %s in the last %s against a daily cap of %s",
+			ErrSpendCapExceeded, limits.FormatUSD(committed), policy.Window, effective.PerDay)
+	}
+	return nil
+}
+
+func (s *Service) committedSpend(ctx context.Context, buyerAgentID string, window time.Duration, excludeTradeID string) ([]domain.SpendRow, error) {
+	if s.limitsStore == nil {
+		return nil, nil
+	}
+	rows, err := s.limitsStore.CommittedSpendSince(ctx, buyerAgentID, s.now().UTC().Add(-window), excludeTradeID)
+	if err != nil {
+		return nil, fmt.Errorf("read committed spend: %w", err)
+	}
+	return rows, nil
 }
 
 func (s *Service) UsageMetrics(ctx context.Context) (domain.UsageMetrics, error) {
@@ -160,6 +361,15 @@ func (s *Service) Create(ctx context.Context, actorID, offerID string, mode doma
 	}
 	if mode == domain.SettlementOnchain {
 		if err := s.checkSettleable(buyer, seller, offer.PriceMint); err != nil {
+			return domain.Trade{}, false, err
+		}
+	}
+	// Held from the cap read to the reservation write, and released once the
+	// reservation is visible to the next reader.
+	if s.limits != nil {
+		s.reserveMu.Lock()
+		defer s.reserveMu.Unlock()
+		if err := s.checkSpend(ctx, buyer, offer.PriceAmount, offer.PriceMint, ""); err != nil {
 			return domain.Trade{}, false, err
 		}
 	}

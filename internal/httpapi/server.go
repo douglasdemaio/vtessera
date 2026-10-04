@@ -36,6 +36,7 @@ type Server struct {
 	mux           *http.ServeMux
 	version       string
 	publicBaseURL string
+	sandbox       bool
 	agentCardBody map[string]any
 	// cluster and genesis are the chain this deployment settles on, reported by
 	// /healthz. Both are empty when settlement is unconfigured, which is the
@@ -65,7 +66,16 @@ type Options struct {
 	// empty the card omits the field rather than claiming an address that is not
 	// this service.
 	PublicBaseURL string
+	// Sandbox marks a deployment where no real value moves. It is carried into
+	// /healthz and /v1/tokens so an agent can tell before it commits to
+	// something that cannot be unwound.
+	Sandbox bool
 }
+
+// SettlementTier is the maturity label reported wherever on-chain settlement is
+// advertised. It is deliberately a constant rather than configuration: the
+// service does not get to declare itself out of beta.
+const SettlementTier = "beta"
 
 func New(opts Options) *Server {
 	s := &Server{
@@ -79,6 +89,7 @@ func New(opts Options) *Server {
 		cluster:       opts.Cluster,
 		genesis:       opts.GenesisHash,
 		publicBaseURL: strings.TrimRight(opts.PublicBaseURL, "/"),
+		sandbox:       opts.Sandbox,
 		mux:           http.NewServeMux(),
 	}
 	s.agentCardBody = s.buildAgentCard()
@@ -112,6 +123,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/trades/{id}/settlement", s.authed(s.handleBuildSettlement))
 	s.mux.HandleFunc("GET /v1/trades/{id}/settlement", s.authed(s.handleSettlementRequest))
 	s.mux.HandleFunc("POST /v1/trades/{id}/confirm", s.authed(s.handleConfirmSettlement))
+	s.mux.HandleFunc("GET /v1/limits", s.authed(s.handleGetLimits))
+	s.mux.HandleFunc("PUT /v1/limits", s.authed(s.handlePutLimits))
 	s.mux.HandleFunc("GET /v1/tokens", s.handleListTokens)
 	s.mux.HandleFunc("GET /v1/tesseras/{tradeID}", s.authed(s.handleTessera))
 	s.mux.HandleFunc("GET /v1/ledger", s.handleLedger)
@@ -202,6 +215,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.genesis != "" {
 		body["genesisHash"] = s.genesis
+	}
+	if s.cluster != "" {
+		// Advertised wherever a chain is configured, on the same condition as the
+		// cluster itself. An agent reading healthz has to be able to tell that
+		// on-chain settlement exists here and how mature it is, without having to
+		// infer it from whether a settlement attempt succeeds.
+		body["settlementTier"] = SettlementTier
+	}
+	if s.sandbox {
+		body["sandbox"] = true
 	}
 	writeJSON(w, http.StatusOK, body)
 }
@@ -699,6 +722,9 @@ var statusByError = []struct {
 	{agp.ErrRouteNotFound, http.StatusNotFound, "INVALID_REQUEST"},
 	{agp.ErrPolicyViolation, http.StatusUnprocessableEntity, "INVALID_REQUEST"},
 	{agp.ErrTableStale, http.StatusConflict, "INVALID_REQUEST"},
+	{trade.ErrSpendCapExceeded, http.StatusConflict, "SPEND_CAP_EXCEEDED"},
+	{trade.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
+	{registry.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
 	{ledger.ErrNotSettled, http.StatusConflict, "INVALID_REQUEST"},
 	{ledger.ErrAlreadyIssued, http.StatusConflict, "ALREADY_ISSUED"},
 }

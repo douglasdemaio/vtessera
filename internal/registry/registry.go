@@ -18,6 +18,13 @@ var (
 	ErrOfferClosed         = errors.New("offer is not open")
 	ErrCurrencyNotAccepted = errors.New("agent card does not accept this currency")
 	ErrAmountTooPrecise    = errors.New("amount has more precision than the settlement mint supports")
+	// ErrMintUnpriced means the offer names a currency this deployment has no
+	// USD rate for. Publishing it is refused because the spending cap cannot be
+	// measured against an unpriced currency, and an offer that cannot be capped
+	// is an offer nobody should be able to trade. It belongs here, at the moment
+	// a seller chooses a currency, rather than at the moment a buyer tries to
+	// spend: the seller is the one who picked it.
+	ErrMintUnpriced = errors.New("no USD rate is declared for this currency")
 )
 
 type Store interface {
@@ -36,13 +43,27 @@ type Store interface {
 }
 
 type Service struct {
-	store Store
-	mints tokens.Registry
-	now   func() time.Time
+	store  Store
+	mints  tokens.Registry
+	priced Pricer
+	now    func() time.Time
+}
+
+// Pricer reports whether a mint has a declared USD rate. It is an interface so
+// this package does not depend on the cap policy that owns the price table: the
+// question being asked here is only whether a currency is priced.
+type Pricer interface {
+	Priced(mint string) bool
 }
 
 // Option configures the service.
 type Option func(*Service)
+
+// WithPricer refuses offers priced in a currency with no declared USD rate, so a
+// currency the spending cap cannot be measured against cannot be offered at all.
+func WithPricer(p Pricer) Option {
+	return func(s *Service) { s.priced = p }
+}
 
 // New builds the service over a governed mint registry. The registry is a
 // required argument rather than a defaulted one: a service that silently assumes
@@ -168,6 +189,9 @@ func (s *Service) PublishOffer(ctx context.Context, agentID string, in NewOffer,
 	}
 	if err := checkCurrencyAccepted(agent, offer.PriceMint); err != nil {
 		return domain.Offer{}, false, err
+	}
+	if s.priced != nil && !s.priced.Priced(offer.PriceMint) {
+		return domain.Offer{}, false, fmt.Errorf("%w: %s", ErrMintUnpriced, offer.PriceMint)
 	}
 	if offer.AcceptsMode(domain.SettlementOnchain) {
 		if err := s.checkSettleable(offer); err != nil {

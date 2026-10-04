@@ -44,6 +44,8 @@ make validator   # start a test validator
 make test-solana # ~8.5 minutes, 5 scenarios
 make validator-off   # STOP IT — see below
 
+make test-devnet # touches the network, moves no value
+
 make image      # -> vtessera:local, from the checked-in Containerfile
 make image-run  # run that image locally against a volume
 make fly-deploy # deploy to the live Fly app (see constraint 5)
@@ -208,6 +210,35 @@ a second independent provider, never from these notes or from source. And do not
 edit a genesis pin or an authority pin to make a preflight failure disappear: a
 changed genesis is a provider incident or a DNS hijack, and re-pinning converts
 a detectable incident into an undetectable compromise.
+
+### 7. Spending caps are on by default, and pricing is operator-declared
+
+Landed on `task1-safety-caps`. $5 per trade and $20 per rolling day per buyer,
+governed stablecoins at par, no oracle. Three things follow that are not
+negotiable without a design discussion:
+
+- **An unpriced mint cannot be traded.** No declared rate means `409
+  MINT_UNPRICED` at offer publication and at trade creation, and the service
+  refuses to boot if a governed mint on the configured cluster has no rate. A cap
+  that quietly did not apply to some currencies would be a way around the cap.
+- **Ceilings default to closed.** `--spend-cap-max-*` unset means `PUT
+  /v1/limits` is refused. Do not add a default ceiling; an agent that can raise
+  itself without an operator declaring the ceiling is a cap the operator did not
+  choose.
+- **A cap is per Ed25519 identity.** It bounds what one key commits to. It is not
+  KYC, and anyone can mint another identity. Do not describe it as a spend limit
+  on a person or an organisation.
+
+Two bounds are documented rather than fixed, in `docs/deploy.md`: an off-chain
+trade committed after its window rolled can overshoot by one window (nothing
+re-checks at commit, because `accepted` cannot be cancelled), and the whole
+mechanism is bypassable by registering a new agent. Closing the first means
+expiring accepted trades, which is Task 3.
+
+`make test-devnet` completes a full off-chain trade against the public devnet
+cluster and asserts the cap refusals there. It is the only test besides
+`preflight-live` that touches the network, and like the preflight it must not be
+made to pass by editing a pin.
 
 ## Git
 
