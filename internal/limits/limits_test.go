@@ -194,7 +194,7 @@ func TestEffectiveFallsBackToTheDefaultWhenAnOverrideIsMissing(t *testing.T) {
 
 	// No override source at all.
 	got := base.Effective(ctx, "agent")
-	if got.PerTrade.String() != "5.00" || got.PerDay.String() != "20.00" || got.Raised {
+	if got.PerTrade.String() != "10.00" || got.PerDay.String() != "10.00" || got.Raised {
 		t.Errorf("Effective without overrides = %s/%s raised=%v, want the deployment default",
 			got.PerTrade, got.PerDay, got.Raised)
 	}
@@ -205,7 +205,7 @@ func TestEffectiveFallsBackToTheDefaultWhenAnOverrideIsMissing(t *testing.T) {
 		return money.Amount{}, money.Amount{}, false
 	})
 	got = p.Effective(ctx, "agent")
-	if got.PerTrade.String() != "5.00" || got.Raised {
+	if got.PerTrade.String() != "10.00" || got.Raised {
 		t.Errorf("Effective with an unreadable override = %s/%s, want the default", got.PerTrade, got.PerDay)
 	}
 
@@ -226,18 +226,25 @@ func TestEffectiveFallsBackToTheDefaultWhenAnOverrideIsMissing(t *testing.T) {
 		return money.MustParse("1.00"), money.MustParse("1.00"), true
 	})
 	got = p.Effective(ctx, "agent")
-	if got.PerTrade.String() != "5.00" || got.Raised {
+	if got.PerTrade.String() != "10.00" || got.Raised {
 		t.Errorf("Effective honoured a stored value below the default: %s raised=%v", got.PerTrade, got.Raised)
 	}
 }
 
-func TestTheDefaultPolicyIsFiveAndTwenty(t *testing.T) {
+func TestTheDefaultPolicyIsTenAndTen(t *testing.T) {
 	p := limits.DefaultPolicy(limits.DefaultRates())
-	if p.PerTrade.String() != "5.00" {
-		t.Errorf("default per-trade cap = %s, want 5.00", p.PerTrade)
+	if p.PerTrade.String() != "10.00" {
+		t.Errorf("default per-trade cap = %s, want 10.00", p.PerTrade)
 	}
-	if p.PerDay.String() != "20.00" {
-		t.Errorf("default daily cap = %s, want 20.00", p.PerDay)
+	if p.PerDay.String() != "10.00" {
+		t.Errorf("default daily cap = %s, want 10.00", p.PerDay)
+	}
+	// The two are equal so that one maximum-size trade exhausts the day. If the
+	// per-trade cap were allowed to exceed the daily cap, one trade could clear
+	// the daily cap on its own and the daily cap would stop being a daily bound.
+	if p.PerDay.Cmp(p.PerTrade) != 0 {
+		t.Errorf("default daily cap %s differs from per-trade %s; the daily cap must not exceed one trade",
+			p.PerDay, p.PerTrade)
 	}
 	if p.Window != 24*time.Hour {
 		t.Errorf("default window = %s, want 24h", p.Window)

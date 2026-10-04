@@ -66,7 +66,7 @@ Use a systemd unit with `Restart=on-failure` and the secret in
 
 ## Spending caps
 
-Caps are on by default: $5 per trade and $20 per rolling day per buyer, with the
+Caps are on by default: $10 per trade and $10 per rolling day per buyer, with the
 governed stablecoins priced at par. Nothing has to be configured for them to
 apply, and an operator who wants them off has to say so — a deployment that
 silently placed no cap on anything would be the more dangerous default.

@@ -260,8 +260,8 @@ func TestAFullTradeCompletesOnDevnet(t *testing.T) {
 		Currency string `json:"currency"`
 	}
 	decodeInto(t, buyer.mustDo(http.MethodGet, "/v1/limits", nil, http.StatusOK), &caps)
-	if caps.PerTrade != "5.00" || caps.PerDay != "20.00" {
-		t.Fatalf("caps on devnet = %s/%s %s, want 5.00/20.00 USD", caps.PerTrade, caps.PerDay, caps.Currency)
+	if caps.PerTrade != "10.00" || caps.PerDay != "10.00" {
+		t.Fatalf("caps on devnet = %s/%s %s, want 10.00/10.00 USD", caps.PerTrade, caps.PerDay, caps.Currency)
 	}
 
 	// Twelve fifty is under the default cap, so the seller publishes an offer and
@@ -368,7 +368,7 @@ func TestATradeOverTheDefaultCapIsRefusedOnDevnet(t *testing.T) {
 			"direction":       "ask",
 			"description":     "priced above the default cap",
 			"capabilities":    []string{"summarize:document"},
-			"priceAmount":     "12.50",
+			"priceAmount":     "20.50",
 			"priceMint":       devnetUSDC,
 			"settlementModes": []string{"offchain"},
 			"idempotencyKey":  "devnet-over-cap",
@@ -380,7 +380,7 @@ func TestATradeOverTheDefaultCapIsRefusedOnDevnet(t *testing.T) {
 		"idempotencyKey": "devnet-over-cap",
 	})
 	if status != http.StatusConflict {
-		t.Fatalf("a 12.50 trade against a 5.00 cap = %d: %s", status, body)
+		t.Fatalf("a 20.50 trade against a 10.00 cap = %d: %s", status, body)
 	}
 	var refusal struct {
 		Code string `json:"code"`

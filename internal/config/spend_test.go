@@ -14,16 +14,22 @@ import (
 
 const devnetRPC = "https://api.devnet.solana.com"
 
-func TestSpendCapsDefaultToFiveAndTwenty(t *testing.T) {
+func TestSpendCapsDefaultToTenAndTen(t *testing.T) {
 	cfg, err := Parse([]string{"--session-secret", goodSecret})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Spend.PerTradeUSD.String() != "5.00" {
-		t.Errorf("per-trade cap = %s, want 5.00", cfg.Spend.PerTradeUSD)
+	if cfg.Spend.PerTradeUSD.String() != "10.00" {
+		t.Errorf("per-trade cap = %s, want 10.00", cfg.Spend.PerTradeUSD)
 	}
-	if cfg.Spend.PerDayUSD.String() != "20.00" {
-		t.Errorf("daily cap = %s, want 20.00", cfg.Spend.PerDayUSD)
+	if cfg.Spend.PerDayUSD.String() != "10.00" {
+		t.Errorf("daily cap = %s, want 10.00", cfg.Spend.PerDayUSD)
+	}
+	// One maximum-size trade exhausts the day. A daily cap above the per-trade cap
+	// would mean the daily cap is not what an operator reading it would assume.
+	if cfg.Spend.PerDayUSD.Cmp(cfg.Spend.PerTradeUSD) < 0 {
+		t.Errorf("daily cap %s is below the per-trade cap %s; one trade could not be refused for exceeding the day",
+			cfg.Spend.PerDayUSD, cfg.Spend.PerTradeUSD)
 	}
 	if cfg.Spend.DailyWindow != 24*time.Hour {
 		t.Errorf("window = %s, want 24h", cfg.Spend.DailyWindow)
