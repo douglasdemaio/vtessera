@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +44,10 @@ type Server struct {
 	// correct state for the live deployment rather than a missing field.
 	cluster cluster.Cluster
 	genesis string
+	// adminToken authorises the operator routes. Empty means they were never
+	// registered, which is checked at routing rather than here so a missing token
+	// cannot leave a route mounted and unguarded.
+	adminToken []byte
 }
 
 type Options struct {
@@ -66,6 +71,10 @@ type Options struct {
 	// empty the card omits the field rather than claiming an address that is not
 	// this service.
 	PublicBaseURL string
+	// AdminToken authorises the operator routes. Empty means those routes are not
+	// registered at all, so a deployment without a token has no way to retire
+	// anybody rather than a way anybody can try.
+	AdminToken []byte
 	// Sandbox marks a deployment where no real value moves. It is carried into
 	// /healthz and /v1/tokens so an agent can tell before it commits to
 	// something that cannot be unwound.
@@ -90,6 +99,7 @@ func New(opts Options) *Server {
 		genesis:       opts.GenesisHash,
 		publicBaseURL: strings.TrimRight(opts.PublicBaseURL, "/"),
 		sandbox:       opts.Sandbox,
+		adminToken:    opts.AdminToken,
 		mux:           http.NewServeMux(),
 	}
 	s.agentCardBody = s.buildAgentCard()
@@ -105,6 +115,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /.well-known/agent-card.json", s.handleAgentCard)
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	// Registered only with a token configured. Absent routes 404 rather than
+	// refusing, because a capability a deployment did not opt into should not be
+	// advertised to anybody scanning the surface.
+	if len(s.adminToken) > 0 {
+		s.mux.HandleFunc("POST /v1/admin/agents/{id}/retire", s.requireAdmin(s.handleRetireAgent))
+		s.mux.HandleFunc("POST /v1/admin/agents/{id}/restore", s.requireAdmin(s.handleRestoreAgent))
+		s.mux.HandleFunc("GET /v1/admin/agents/{id}/retirement", s.requireAdmin(s.handleGetRetirement))
+	}
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	s.mux.HandleFunc("GET /v1/agents/{id}", s.handleGetAgent)
 	s.mux.HandleFunc("PUT /v1/agents/{id}/card", s.authed(s.handlePutCard))
@@ -665,6 +683,91 @@ func (s *Server) authed(next func(http.ResponseWriter, *http.Request)) http.Hand
 	}
 }
 
+// requireAdmin authorises an operator action on somebody else's registration.
+//
+// It compares in constant time and it does not fall back to the agent session:
+// an agent that could authenticate here could retire every other agent on the
+// marketplace, which is the capability this gate exists to withhold. The token is
+// a separate credential precisely so that the two cannot be confused.
+func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if len(s.adminToken) == 0 {
+			// Unreachable through the mux, because the routes are not registered
+			// without a token. Checked anyway so that a future caller wiring one of
+			// these handlers up by hand cannot create an open route.
+			writeErrorStatus(w, http.StatusNotFound, "NOT_FOUND", "no such route")
+			return
+		}
+		presented, err := adminTokenFrom(r.Header.Get("Authorization"))
+		if err != nil || subtle.ConstantTimeCompare(presented, s.adminToken) != 1 {
+			writeErrorStatus(w, http.StatusUnauthorized, "UNAUTHORIZED", "a valid operator token is required")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func adminTokenFrom(header string) ([]byte, error) {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return nil, errors.New("admin routes take a bearer token, not an agent session")
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	if token == "" {
+		return nil, errors.New("empty admin token")
+	}
+	return []byte(token), nil
+}
+
+func (s *Server) handleRetireAgent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	agent, err := s.registry.Retire(r.Context(), id, body.Reason, adminActor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
+}
+
+func (s *Server) handleRestoreAgent(w http.ResponseWriter, r *http.Request) {
+	agent, err := s.registry.Restore(r.Context(), r.PathValue("id"), adminActor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
+}
+
+func (s *Server) handleGetRetirement(w http.ResponseWriter, r *http.Request) {
+	retirement, found, err := s.registry.Retirement(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !found {
+		writeError(w, fmt.Errorf("%w: %s", domain.ErrNotFound, r.PathValue("id")))
+		return
+	}
+	writeJSON(w, http.StatusOK, retirement)
+}
+
+// adminActor names who performed an operator action in the audit row. It is the
+// operator's own label for the deployment rather than an agent id, because
+// nobody is accountable as an Ed25519 key for a withdrawal an agent did not ask
+// for.
+func adminActor(r *http.Request) string {
+	if actor := strings.TrimSpace(r.Header.Get("X-Operator")); actor != "" {
+		return actor
+	}
+	return "operator"
+}
+
 func agentFrom(r *http.Request) string {
 	if id, ok := r.Context().Value(agentContextKey{}).(string); ok {
 		return id
@@ -763,6 +866,8 @@ var statusByError = []struct {
 	{trade.ErrNotExpiredYet, http.StatusConflict, "TRADE_NOT_EXPIRED"},
 	{trade.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
 	{registry.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
+	{registry.ErrAgentHasLiveTrades, http.StatusConflict, "AGENT_HAS_LIVE_TRADES"},
+	{registry.ErrRetirementReasonRequired, http.StatusBadRequest, "REASON_REQUIRED"},
 	{ledger.ErrNotSettled, http.StatusConflict, "INVALID_REQUEST"},
 	{ledger.ErrAlreadyIssued, http.StatusConflict, "ALREADY_ISSUED"},
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/tokens"
 	"github.com/google/uuid"
+	"strings"
 )
 
 var (
@@ -25,6 +26,18 @@ var (
 	// a seller chooses a currency, rather than at the moment a buyer tries to
 	// spend: the seller is the one who picked it.
 	ErrMintUnpriced = errors.New("no USD rate is declared for this currency")
+
+	// ErrAgentHasLiveTrades refuses a retirement while the agent is party to a
+	// trade that has not finished. Withdrawing a listing is a statement about
+	// future business; a buyer holding an open trade is existing business whose
+	// counterparty would disappear mid-negotiation.
+	ErrAgentHasLiveTrades = errors.New("agent has trades that have not reached a terminal state")
+
+	// ErrRetirementReasonRequired refuses a retirement with no stated reason. A
+	// privileged action that removes somebody's ability to sell needs to say why
+	// at the moment it happens, because the audit record is the only account of it
+	// the agent will ever get.
+	ErrRetirementReasonRequired = errors.New("a retirement needs a reason")
 )
 
 type Store interface {
@@ -40,6 +53,10 @@ type Store interface {
 	SearchOffers(ctx context.Context, q domain.OfferQuery) ([]domain.Offer, error)
 	ListOpenOffers(ctx context.Context) ([]domain.Offer, error)
 	SetOfferStatus(ctx context.Context, id string, status domain.OfferStatus, at time.Time) error
+	RetireAgent(ctx context.Context, id, reason, actor string, at time.Time) (domain.Agent, error)
+	RestoreAgent(ctx context.Context, id, actor string, at time.Time) (domain.Agent, error)
+	Retirement(ctx context.Context, id string) (domain.Retirement, bool, error)
+	LiveTradesForAgent(ctx context.Context, agentID string) ([]domain.Trade, error)
 }
 
 type Service struct {
@@ -266,4 +283,59 @@ type AnnouncementSource struct {
 
 func (s *Service) AnnouncementSource() *AnnouncementSource {
 	return &AnnouncementSource{store: s.store, mints: s, now: s.now}
+}
+
+// Retire withdraws an agent's listing at the operator's request: the
+// registration is marked retired and its open offers close. Nothing is deleted,
+// so every tessera already issued naming this agent keeps verifying.
+//
+// The reason is required and recorded against the operator's own actor string.
+// This is the only route on the service that removes a principal's ability to
+// trade without that principal asking, so it is deliberately the least automatic
+// thing in the package: it refuses while a trade is live, and it leaves a row an
+// auditor can read.
+func (s *Service) Retire(ctx context.Context, agentID, reason, actor string) (domain.Agent, error) {
+	if reason == "" {
+		return domain.Agent{}, ErrRetirementReasonRequired
+	}
+	live, err := s.store.LiveTradesForAgent(ctx, agentID)
+	if err != nil {
+		return domain.Agent{}, err
+	}
+	if len(live) > 0 {
+		return domain.Agent{}, fmt.Errorf("%w: %s still has %d (%s)",
+			ErrAgentHasLiveTrades, agentID, len(live), describeTradeStates(live))
+	}
+	return s.store.RetireAgent(ctx, agentID, reason, actor, s.now().UTC())
+}
+
+// Restore reverses a retirement. It does not reopen the offers the retirement
+// closed: restoring says the agent may trade again, not that its old offers are
+// republished on the agent's behalf.
+func (s *Service) Restore(ctx context.Context, agentID, actor string) (domain.Agent, error) {
+	if _, err := s.store.GetAgent(ctx, agentID); err != nil {
+		return domain.Agent{}, err
+	}
+	return s.store.RestoreAgent(ctx, agentID, actor, s.now().UTC())
+}
+
+// Retirement reports the recorded withdrawal for an agent, if there is one.
+func (s *Service) Retirement(ctx context.Context, agentID string) (domain.Retirement, bool, error) {
+	return s.store.Retirement(ctx, agentID)
+}
+
+func describeTradeStates(trades []domain.Trade) string {
+	counts := map[domain.TradeState]int{}
+	var order []domain.TradeState
+	for _, tr := range trades {
+		if _, seen := counts[tr.State]; !seen {
+			order = append(order, tr.State)
+		}
+		counts[tr.State]++
+	}
+	parts := make([]string, 0, len(order))
+	for _, state := range order {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[state], state))
+	}
+	return strings.Join(parts, ", ")
 }

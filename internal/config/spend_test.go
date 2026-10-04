@@ -208,3 +208,51 @@ func mustAmount(s string) money.Amount {
 	}
 	return a
 }
+
+func TestTheAdminTokenIsOptionalAndAbsentByDefault(t *testing.T) {
+	cfg, err := Parse([]string{"--session-secret", goodSecret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No default token. A deployment that has not chosen to have the capability
+	// must not have one that anybody could have guessed.
+	if len(cfg.AdminToken) != 0 {
+		t.Errorf("admin token is set by default: %q", cfg.AdminToken)
+	}
+}
+
+func TestAShortAdminTokenIsAStartupRefusal(t *testing.T) {
+	// The token is a bearer credential held by whoever operates the marketplace,
+	// so its only protection is length. A short one is a guessable one.
+	_, err := Parse([]string{"--session-secret", goodSecret, "--admin-token", "hunter2"})
+	if err == nil {
+		t.Fatal("a two-word admin token was accepted")
+	}
+	if !strings.Contains(err.Error(), "admin-token") {
+		t.Errorf("error = %v, want it to name the setting", err)
+	}
+
+	cfg, err := Parse([]string{
+		"--session-secret", goodSecret,
+		"--admin-token", strings.Repeat("a", 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.AdminToken) != 32 {
+		t.Errorf("admin token length = %d, want 32", len(cfg.AdminToken))
+	}
+}
+
+func TestTheAdminTokenCanComeFromTheEnvironment(t *testing.T) {
+	t.Setenv("VTESSERA_ADMIN_TOKEN", strings.Repeat("b", 48))
+	cfg, err := Parse([]string{"--session-secret", goodSecret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deployments set it as a secret, the same as the session secret, so it must
+	// not have to appear in the process arguments where `ps` would show it.
+	if len(cfg.AdminToken) != 48 {
+		t.Errorf("admin token length = %d, want 48", len(cfg.AdminToken))
+	}
+}

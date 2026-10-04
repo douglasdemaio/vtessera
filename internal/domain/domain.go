@@ -40,10 +40,28 @@ type AgentStatus string
 const (
 	AgentActive    AgentStatus = "active"
 	AgentSuspended AgentStatus = "suspended"
+	// AgentRetired is an operator withdrawing an agent's listing. It is
+	// deliberately not a deletion: the registration, its offers and every receipt
+	// naming it stay verifiable, because a tessera a buyer already holds has to
+	// keep verifying after the seller walks away. Retired is also not Suspended —
+	// suspension blocks an agent from publishing, retirement additionally closes
+	// what it already published and is recorded in the audit log.
+	AgentRetired AgentStatus = "retired"
 )
 
 func (s AgentStatus) Valid() bool {
-	return s == AgentActive || s == AgentSuspended
+	return s == AgentActive || s == AgentSuspended || s == AgentRetired
+}
+
+// Retirement records an operator withdrawing a listing, and the reversal if there
+// was one. It is separate from Agent.Status because status says what is true now
+// and this says what was done, to whom, and why.
+type Retirement struct {
+	AgentID    string     `json:"agentId"`
+	Reason     string     `json:"reason"`
+	Actor      string     `json:"actor"`
+	RetiredAt  time.Time  `json:"retiredAt"`
+	RestoredAt *time.Time `json:"restoredAt,omitempty"`
 }
 
 type Agent struct {

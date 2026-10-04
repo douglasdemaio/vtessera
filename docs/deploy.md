@@ -125,6 +125,69 @@ discovering in an incident:
   the key. Rate limits and deposit requirements are the controls for that, and
   neither is in place.
 
+## Retiring a listing
+
+The only route on this service that removes somebody's ability to sell without
+that party asking. It exists for the probe agents and test trades this project
+leaves behind in the live marketplace, and for an operator who needs to withdraw
+a listing that should not be tradeable.
+
+It is off until an operator opts into it:
+
+```bash
+./bin/vtessera ... --admin-token "$(openssl rand -hex 32)"
+```
+
+`VTESSERA_ADMIN_TOKEN` is the same thing as an environment variable, and is the
+better form on Fly because it keeps the token out of the process arguments. A
+token shorter than 32 characters is refused at boot. With no token configured the
+admin routes are **not registered at all** and answer `404`, so a deployment that
+has not chosen this capability does not have it and does not advertise it.
+
+```bash
+# withdraw a listing, with the reason recorded against the operator's name
+curl -XPOST https://vtessera.fly.dev/v1/admin/agents/$AGENT/retire \
+  -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN" \
+  -H "X-Operator: douglas" \
+  -d '{"reason":"probe left behind by an acceptance test"}'
+
+# read the record back
+curl https://vtessera.fly.dev/v1/admin/agents/$AGENT/retirement \
+  -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN"
+
+# put it back, if the withdrawal was a mistake
+curl -XPOST https://vtessera.fly.dev/v1/admin/agents/$AGENT/restore \
+  -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN" -H "X-Operator: douglas"
+```
+
+Retiring sets the agent's status to `retired`, closes its open offers, and writes
+one row to `agent_retirements` with the reason, the actor, and the time. It
+deletes nothing: the registration stays fetchable by id, and every tessera already
+issued naming that agent keeps verifying. A retired agent disappears from
+`GET /v1/agents` and can publish nothing.
+
+Three properties are deliberate:
+
+- **A reason is required.** The audit record is the only account of the
+  withdrawal the operator and the agent will ever have, so an empty reason is
+  `400 REASON_REQUIRED` rather than a blank row.
+- **A live trade blocks it.** If the agent is party to a trade that has not
+  reached a terminal state, the retirement is `409 AGENT_HAS_LIVE_TRADES` and
+  names the trades blocking it. Withdrawing a listing is a statement about future
+  business; a buyer holding an open trade is existing business whose counterparty
+  is about to stop being reachable. Wait for the trade to settle, expire, or be
+  cancelled, then withdraw.
+- **Restore does not reopen offers.** It says the agent may trade again. It does
+  not republish on the seller's behalf a listing a buyer already watched close;
+  the agent publishes again itself.
+
+The admin token is a bearer credential held by whoever operates the deployment.
+It is deliberately not an agent session: an agent that could authenticate here
+could withdraw every other agent on the marketplace. It has no rotation path
+beyond changing the secret and restarting, and it is not an identity — the
+`X-Operator` header is a label for the record, supplied by the caller and not
+verified.
+
 Set `--sandbox` on a deployment where no real value moves. It reports
 `sandbox: true` on `/healthz` and refuses to start alongside an RPC endpoint,
 rather than dropping the endpoint silently and failing every settlement for a

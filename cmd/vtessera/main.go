@@ -100,6 +100,12 @@ func run(args []string) error {
 	registrySvc := registry.New(db, mints, registry.WithPricer(spendPolicy))
 	led := ledger.New(db, signer)
 	trades := trade.New(db, db, db, led).WithLimits(spendPolicy, db).WithAcceptanceTTL(cfg.AcceptTTL)
+	if len(cfg.AdminToken) > 0 {
+		logger.Info("admin routes enabled: an operator token can retire and restore agent listings")
+	} else {
+		logger.Warn("no admin token configured: the retirement routes are absent, so no agent listing can be withdrawn through the API")
+	}
+
 	logger.Info("spending caps active",
 		"perTradeUsd", cfg.Spend.PerTradeUSD.String(),
 		"perDayUsd", cfg.Spend.PerDayUSD.String(),
@@ -211,6 +217,7 @@ func run(args []string) error {
 		Cluster:       cfg.Solana.Cluster,
 		GenesisHash:   preflightGenesis,
 		Sandbox:       cfg.Sandbox,
+		AdminToken:    cfg.AdminToken,
 	})
 	server := &http.Server{
 		Addr:              cfg.Addr,

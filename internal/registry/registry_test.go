@@ -451,3 +451,171 @@ func TestWithMintsGovernsOnchainPrecisionCheck(t *testing.T) {
 		t.Fatalf("PublishOffer err = %v, want ErrAmountTooPrecise for the 2-decimal test mint", err)
 	}
 }
+
+// retirementAgent registers a seller and publishes one open offer, which is the
+// state a retirement has to dismantle cleanly.
+func retirementAgent(t *testing.T, svc *registry.Service, key string) domain.Offer {
+	t.Helper()
+	ctx := context.Background()
+	if _, _, err := svc.Register(ctx, key, card("seller")); err != nil {
+		t.Fatal(err)
+	}
+	offer, _, err := svc.PublishOffer(ctx, key, registry.NewOffer{
+		Direction:       domain.DirectionAsk,
+		Description:     "withdraw me",
+		Capabilities:    []string{"summarize"},
+		PriceAmount:     "10.00",
+		PriceMint:       usdc,
+		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return offer
+}
+
+func TestRetirementClosesTheListingAndIsReversible(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	offer := retirementAgent(t, svc, aliceKey)
+
+	retired, err := svc.Retire(ctx, aliceKey, "withdrawn pending review", "ops@example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired.Status != domain.AgentRetired {
+		t.Fatalf("status = %s, want retired", retired.Status)
+	}
+
+	got, err := svc.Offer(ctx, offer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.OfferClosed {
+		t.Errorf("offer status = %s, want closed", got.Status)
+	}
+
+	// A retired agent is not in the active directory. Everything that lists
+	// sellers to buyers reads that list.
+	active, err := svc.Agents(ctx, domain.AgentActive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range active {
+		if a.ID == aliceKey {
+			t.Error("a retired agent is still listed as active")
+		}
+	}
+
+	// It is still fetchable by id, because the registration is evidence and the
+	// receipts naming it have to stay explainable.
+	if _, err := svc.Agent(ctx, aliceKey); err != nil {
+		t.Errorf("a retired agent is no longer fetchable: %v", err)
+	}
+
+	record, found, err := svc.Retirement(ctx, aliceKey)
+	if err != nil || !found {
+		t.Fatalf("retirement record found=%v err=%v, want one", found, err)
+	}
+	if record.Reason != "withdrawn pending review" || record.Actor != "ops@example" {
+		t.Errorf("record = %+v, want the reason and actor verbatim", record)
+	}
+	if record.RestoredAt != nil {
+		t.Error("restoredAt set without a restore")
+	}
+
+	restored, err := svc.Restore(ctx, aliceKey, "ops@example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != domain.AgentActive {
+		t.Errorf("status = %s, want active", restored.Status)
+	}
+
+	// The offers stay closed. Restoring says the agent may trade again; it does
+	// not republish on the seller's behalf a listing a buyer already saw close.
+	after, err := svc.Offer(ctx, offer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != domain.OfferClosed {
+		t.Errorf("offer status = %s, want still closed after restore", after.Status)
+	}
+
+	record, _, err = svc.Retirement(ctx, aliceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.RestoredAt == nil {
+		t.Error("the audit record lost the reversal")
+	}
+}
+
+func TestRetiringTwiceKeepsOneRecord(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	retirementAgent(t, svc, aliceKey)
+
+	if _, err := svc.Retire(ctx, aliceKey, "first", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Restore(ctx, aliceKey, "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Retire(ctx, aliceKey, "second", "ops"); err != nil {
+		t.Fatal(err)
+	}
+
+	// An operator who retires, restores and retires again must not have to
+	// reconcile three rows to learn what happened: the latest action is the
+	// current state of the record.
+	record, _, err := svc.Retirement(ctx, aliceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Reason != "second" {
+		t.Errorf("reason = %q, want the most recent one", record.Reason)
+	}
+	if record.RestoredAt != nil {
+		t.Error("restoredAt is set although the agent is retired")
+	}
+}
+
+func TestRetirementNeedsAReasonAndAnUnknownAgentIsNotFound(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	retirementAgent(t, svc, aliceKey)
+
+	if _, err := svc.Retire(ctx, aliceKey, "", "ops"); !errors.Is(err, registry.ErrRetirementReasonRequired) {
+		t.Errorf("retire with no reason = %v, want ErrRetirementReasonRequired", err)
+	}
+	if _, err := svc.Retire(ctx, "4Nd6mBQrHfvcTFY4QY5xL8pQ4CvJKcENDrFbfH9wqLKq", "x", "ops"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("retire an unknown agent = %v, want ErrNotFound", err)
+	}
+	if _, found, err := svc.Retirement(ctx, aliceKey); err != nil || found {
+		t.Errorf("a refused retirement left a record: found=%v err=%v", found, err)
+	}
+}
+
+func TestAReRegisteredAgentDoesNotReinstateItself(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	retirementAgent(t, svc, aliceKey)
+	if _, err := svc.Retire(ctx, aliceKey, "withdrawn", "ops"); err != nil {
+		t.Fatal(err)
+	}
+
+	// An agent updating its own card must not be a way back from a withdrawal.
+	// Otherwise retirement is revocable by the party it excludes, which would
+	// make the operator's action advisory rather than effective.
+	if _, _, err := svc.Register(ctx, aliceKey, card("alice-again")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Agent(ctx, aliceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.AgentRetired {
+		t.Errorf("status = %s after re-registering, want still retired", got.Status)
+	}
+}
