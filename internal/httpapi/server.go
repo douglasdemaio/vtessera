@@ -247,12 +247,43 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, agent)
 }
 
+// requireOwnAgent refuses a write that names an agent in the path other than the
+// one that authenticated.
+//
+// An agent ID is an Ed25519 public key and a session proves control of it, so an
+// agent cannot authenticate as somebody else. It could still name somebody else
+// in the path, and on the two routes that write to a named agent that was enough
+// to rewrite the card an agent is listed under, including the URL it is listed
+// with, and to publish offers that appear in searches as that agent's.
+//
+// The path value is not ignored and the write is not redirected to the caller.
+// Both would leave a caller believing it had changed something it had not, which
+// on a card is worse than a refusal: the listing would change and the agent would
+// never know.
+func requireOwnAgent(w http.ResponseWriter, r *http.Request) (string, bool) {
+	caller := agentFrom(r)
+	if named := r.PathValue("id"); named != caller {
+		writeErrorStatus(w, http.StatusForbidden, "FORBIDDEN",
+			"this session is "+caller+" and cannot write to "+named)
+		return "", false
+	}
+	return caller, true
+}
+
 func (s *Server) handlePutCard(w http.ResponseWriter, r *http.Request) {
+	agentID, ok := requireOwnAgent(w, r)
+	if !ok {
+		return
+	}
 	var card domain.AgentCard
 	if !decode(w, r, &card) {
 		return
 	}
-	agent, _, err := s.registry.Register(r.Context(), r.PathValue("id"), card)
+	// The session, not the path, decides who is being written. requireOwnAgent
+	// has already refused a mismatch, so these are the same value; passing the
+	// session means a future caller that forgets the check writes to itself
+	// rather than to somebody else.
+	agent, _, err := s.registry.Register(r.Context(), agentID, card)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -313,11 +344,15 @@ type publishOfferRequest struct {
 }
 
 func (s *Server) handlePublishOffer(w http.ResponseWriter, r *http.Request) {
+	agentID, ok := requireOwnAgent(w, r)
+	if !ok {
+		return
+	}
 	var req publishOfferRequest
 	if !decode(w, r, &req) {
 		return
 	}
-	offer, created, err := s.registry.PublishOffer(r.Context(), r.PathValue("id"), registry.NewOffer{
+	offer, created, err := s.registry.PublishOffer(r.Context(), agentID, registry.NewOffer{
 		Direction:       domain.OfferDirection(req.Direction),
 		Description:     req.Description,
 		Capabilities:    req.Capabilities,

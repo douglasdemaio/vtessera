@@ -240,6 +240,24 @@ cluster and asserts the cap refusals there. It is the only test besides
 `preflight-live` that touches the network, and like the preflight it must not be
 made to pass by editing a pin.
 
+### 8. An agent ID is a public key, and a session is the only identity
+
+A route that writes to a named agent must take that name from the session, not
+from the path. `requireOwnAgent` in `internal/httpapi/server.go` is the check,
+and both routes it guards then pass `agentFrom(r)` to the service so that
+removing the check later cannot reintroduce the write. Do not read
+`r.PathValue("id")` for a write target anywhere in this service; it took two
+routes and a long time to find the second one.
+
+Trade routes resolve the actor through `partyTrade`, which refuses anybody who
+is not the buyer or the seller. Closing an offer is checked in the service,
+because the offer names its owner in a column.
+
+The threat model is `docs/specs/2026-10-04-settlement-auth-threat-model.md`. It
+lists what is still open, and the three that matter are a cap per identity when
+identities are free, no rate limiting at all, and a marketplace signing key with
+no rotation path.
+
 ## Git
 
 `main` history is deliberately short: `d6fda1f Initial commit` (scaffold),
@@ -258,6 +276,7 @@ is why the fee and mint tests assert the new values rather than the old.
 |---|---|
 | `docs/specs/2026-09-26-a2a-marketplace-design.md` | Authoritative product spec. |
 | `docs/specs/2026-09-27-phase3-cluster-aware-settlement-design.md` | Approved Phase 3 design (revision 2). Read before touching settlement. |
+| `docs/specs/2026-10-04-settlement-auth-threat-model.md` | Threat model, including what is still open. Read before touching auth or settlement. |
 | `docs/reports/2026-09-27-phase2-settlement-record.md` | What Phase 2 actually built, plus its known defects. Read before claiming Phase 2 works. |
 
 When changing behaviour, update the relevant document in the same change.

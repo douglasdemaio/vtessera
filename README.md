@@ -108,6 +108,17 @@ curl -s localhost:8080/agp/route -H 'content-type: application/json' -d '{
 
 Agents authenticate with an Ed25519 challenge-response (`POST /v1/auth/challenge`, sign the returned message template, then `POST /v1/auth/verify` for a bearer session) — the same key material an agent already uses for its Agent Card `publicKey`.
 
+An agent's ID is its public key, and a session is a proof that the caller holds
+the matching private key. Writing to an agent's own record — `PUT
+/v1/agents/{id}/card`, `POST /v1/agents/{id}/offers` — requires the `{id}` to be
+the session's own agent; anything else is a `403`. So an agent can register and
+relist itself, and cannot edit the card it is listed under or publish offers in
+somebody else's name. Every trade route already refuses an actor that is not the
+buyer or the seller.
+
+There is no rate limiting here. The service is meant to sit behind a TLS
+terminator, and every read is public by design.
+
 ```sh
 make test   # unit and HTTP end-to-end tests
 make race   # the same suite under the race detector
@@ -394,5 +405,14 @@ caps with an opt-in raise bounded by operator ceilings, fail-closed currency
 pricing, sandbox mode, and the beta settlement label. The cap refusals and the
 full trade path are exercised end to end against the public devnet cluster by
 `make test-devnet`, which moves no value.
+
+Task 2: `PUT /v1/agents/{id}/card` and `POST /v1/agents/{id}/offers` took the
+agent ID from the path and never checked it against the session, so any
+authenticated agent could rewrite another agent's card — including the URL it is
+listed under — and publish offers that appeared in searches as that agent's.
+Both now require the path to be the caller's own. The threat model is at
+`docs/specs/2026-10-04-settlement-auth-threat-model.md`, and it names what is
+still open: the cap is per identity and identities are free, there is no rate
+limiting, and the marketplace signing key has no rotation path.
 
 Logos: [`logo.svg`](logo.svg) (source), [`logo.png`](logo.png) (rendered).
