@@ -251,3 +251,46 @@ func nonNilBytes(b []byte) []byte {
 	}
 	return b
 }
+
+// LiveTradesForAgent returns a party's trades that have not reached a terminal
+// state, so a retirement can be refused while one is in flight.
+//
+// The trade table is not deleted on retirement and its rows keep referencing the
+// agent, so this is the same query the cap reservation logic uses. It exists for
+// the operator rather than the agent: withdrawing a listing is a statement about
+// future business, and a buyer holding an open trade against that seller is
+// existing business with a counterparty who will not be there to finish it.
+func (s *Store) LiveTradesForAgent(ctx context.Context, agentID string) ([]domain.Trade, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM trades
+		 WHERE (buyer_agent_id = ? OR seller_agent_id = ?)
+		   AND state NOT IN (?, ?, ?, ?)
+		 ORDER BY created_at ASC`,
+		agentID, agentID,
+		string(domain.TradeRecorded), string(domain.TradeSettled),
+		string(domain.TradeDisputed), string(domain.TradeCancelled))
+	if err != nil {
+		return nil, fmt.Errorf("live trades for %s: %w", agentID, err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("live trades scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("live trades rows: %w", err)
+	}
+	out := make([]domain.Trade, 0, len(ids))
+	for _, id := range ids {
+		tr, err := s.GetTrade(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tr)
+	}
+	return out, nil
+}

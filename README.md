@@ -229,6 +229,23 @@ wants that bounded declares a rate above par.
 Every malformed figure is a startup error. An operator who mistypes a cap finds
 out at boot, not from an agent being refused later.
 
+## Retiring a listing
+
+An operator can withdraw an agent listing with
+`POST /v1/admin/agents/{id}/retire`, given a reason. The status becomes `retired`,
+its open offers close, and it disappears from `GET /v1/agents` — but nothing is
+deleted, so the tessera a buyer already holds keeps verifying and
+`POST /v1/admin/agents/{id}/restore` reverses it.
+
+The routes only exist when `--admin-token` (or `VTESSERA_ADMIN_TOKEN`) is set, and
+they require that token rather than an agent session: an agent that could
+authenticate there could withdraw every other agent on the marketplace. Without a
+token they answer `404`, so a deployment that has not opted in does not have the
+capability. A retirement is refused while the agent has a trade that has not
+reached a terminal state, because a buyer holding an open trade against that
+seller is existing business, not future business. See
+[`docs/deploy.md`](docs/deploy.md#retiring-a-listing).
+
 ## Sandbox mode
 
 `--sandbox` marks a deployment where no real value moves. `/healthz` then reports

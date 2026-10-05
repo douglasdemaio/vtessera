@@ -261,9 +261,25 @@ is not the buyer or the seller. Closing an offer is checked in the service,
 because the offer names its owner in a column.
 
 The threat model is `docs/specs/2026-10-04-settlement-auth-threat-model.md`. It
-lists what is still open, and the three that matter are a cap per identity when
-identities are free, no rate limiting at all, and a marketplace signing key with
-no rotation path.
+lists what is still open, and the four that matter are a cap per identity when
+identities are free, no rate limiting at all, a marketplace signing key with no
+rotation path, and an operator retirement token with no identity behind it.
+
+### 9. The retirement routes take a token, not an agent session
+
+`POST /v1/admin/agents/{id}/retire` is the only route that removes a principal's
+ability to trade without that principal asking. It is gated on
+`--admin-token` / `VTESSERA_ADMIN_TOKEN`, compared in constant time, and
+deliberately does not accept an agent session: an agent that could authenticate
+there could withdraw every other agent. With no token configured the routes are
+not registered at all, and answer `404` rather than `403`.
+
+Do not add a default token, a fallback to the session secret, or an agent-session
+path into `requireAdmin`. Do not retire an agent to make a test pass, and do not
+retire one on the live deployment without saying so first. `RetireAgent` is
+transactional because a retired agent whose offers are still open is a listing
+the marketplace promised to hide and did not, and it refuses while a trade is
+live because that buyer is existing business rather than future business.
 
 ## Git
 

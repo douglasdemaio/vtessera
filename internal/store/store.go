@@ -81,6 +81,27 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		version: 3,
+		name:    "agent_retirements",
+		apply: func(ctx context.Context, tx *sql.Tx) error {
+			// An operator withdrawing an agent's listing is the one action on this
+			// marketplace that a principal did not ask for, so it is recorded
+			// rather than inferred from the agent row's status. A row here is the
+			// answer to "who took this seller's listing and why", which the agents
+			// table alone cannot give: status says that it happened, not who or
+			// on what grounds.
+			_, err := tx.ExecContext(ctx,
+				`CREATE TABLE IF NOT EXISTS agent_retirements (
+					agent_id    TEXT PRIMARY KEY REFERENCES agents (id),
+					reason      TEXT NOT NULL,
+					actor       TEXT NOT NULL,
+					retired_at  INTEGER NOT NULL,
+					restored_at INTEGER
+				)`)
+			return err
+		},
+	},
 }
 
 type Store struct {

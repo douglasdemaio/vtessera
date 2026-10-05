@@ -135,6 +135,19 @@ pins were produced by an untrusted process. Phase 3 verifies them at runtime,
 which prevents a *repeat*, and certifies nothing about the originals. Re-derive
 from an RPC query or a second independent provider.
 
+**An operator can withdraw an agent, and only an operator.** The admin routes are
+the one place the service acts on a principal that did not ask to be acted on.
+They are absent unless a token is configured, they take that token rather than an
+agent session, the token is compared in constant time, and a retirement is refused
+while a trade is live. What remains: the token is a bearer secret with no
+identity behind it, so the `X-Operator` label on the audit row is whatever the
+caller typed and is not verified. The row records what was claimed, not who did
+it. Anyone who obtains the token can withdraw any listing, including the real
+marketplace's own entry, and there is no second approval and no notification to
+the affected agent. A retrieval mechanism without a rotation path and without
+attribution is the weak part, and it should be replaced with something that has
+both before the route is used on a deployment anybody cares about.
+
 **A card is self-describing and unauthenticated content.** Ownership is now
 enforced, but nothing verifies that the agent behind a card actually offers the
 capabilities it claims, or that the URL on the card is reachable, or that it

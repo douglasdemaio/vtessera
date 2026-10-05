@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -141,4 +142,115 @@ func requireAffected(res sql.Result) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// Retirement is an operator withdrawing an agent's listing.
+//
+// RetireAgent closes the agent's open offers and marks it retired in one
+// transaction. The two cannot be allowed to diverge: an agent marked retired
+// whose offers are still open is a listing the marketplace has promised to hide
+// and has not, and the reverse is a seller whose card vanished while their
+// offer kept taking buyers.
+//
+// Offers in any state other than open are left alone. A closed offer is part of a
+// completed trade, and rewriting that history would break the receipts naming it.
+//
+// Nothing is deleted. Trades, receipts and the registration all stay, so a
+// tessera a buyer already holds keeps verifying.
+func (s *Store) RetireAgent(ctx context.Context, id, reason, actor string, at time.Time) (domain.Agent, error) {
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE agents SET status = ?, updated_at = ? WHERE id = ?`,
+			string(domain.AgentRetired), nanos(at), id)
+		if err != nil {
+			return mapErr(err)
+		}
+		if err := requireAffected(res); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE offers SET status = ?, updated_at = ? WHERE agent_id = ? AND status = ?`,
+			string(domain.OfferClosed), nanos(at), id, string(domain.OfferOpen)); err != nil {
+			return mapErr(err)
+		}
+		// The agent_id is the primary key, so retiring an already-retired agent
+		// replaces the record rather than accumulating one per attempt. An
+		// operator who retires, restores and retires again should not have to
+		// reconcile three rows to learn what happened.
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO agent_retirements (agent_id, reason, actor, retired_at, restored_at)
+			 VALUES (?, ?, ?, ?, NULL)
+			 ON CONFLICT (agent_id) DO UPDATE SET
+			   reason = excluded.reason, actor = excluded.actor,
+			   retired_at = excluded.retired_at, restored_at = NULL`,
+			id, reason, actor, nanos(at)); err != nil {
+			return mapErr(err)
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.Agent{}, err
+	}
+	return s.GetAgent(ctx, id)
+}
+
+// RestoreAgent reverses a retirement. It is the reason retirement is a status
+// and not a deletion: a listing taken down in error can be put back.
+//
+// The closed offers are not reopened. Restoring is the operator declaring the
+// agent legitimate again, not the agent asking to have its old offers republished
+// — an offer may have been withdrawn deliberately, and a buyer who saw it close
+// has moved on. The agent republishes if it wants to sell again.
+func (s *Store) RestoreAgent(ctx context.Context, id, actor string, at time.Time) (domain.Agent, error) {
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE agents SET status = ?, updated_at = ? WHERE id = ?`,
+			string(domain.AgentActive), nanos(at), id)
+		if err != nil {
+			return mapErr(err)
+		}
+		if err := requireAffected(res); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE agent_retirements SET restored_at = ? WHERE agent_id = ? AND restored_at IS NULL`,
+			nanos(at), id); err != nil {
+			return mapErr(err)
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.Agent{}, err
+	}
+	return s.GetAgent(ctx, id)
+}
+
+// Retirement returns the current retirement record for an agent. A retired agent
+// always has one, so an operator reading a listing can tell a withdrawal from a
+// suspension without inferring it from timestamps.
+func (s *Store) Retirement(ctx context.Context, id string) (domain.Retirement, bool, error) {
+	var (
+		r         domain.Retirement
+		reason    string
+		actor     string
+		retiredAt int64
+		restored  sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT agent_id, reason, actor, retired_at, restored_at FROM agent_retirements WHERE agent_id = ?`, id).
+		Scan(&r.AgentID, &reason, &actor, &retiredAt, &restored)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return domain.Retirement{}, false, nil
+	case err != nil:
+		return domain.Retirement{}, false, fmt.Errorf("retirement: %w", err)
+	}
+	r.Reason = reason
+	r.Actor = actor
+	r.RetiredAt = fromNanos(retiredAt)
+	if restored.Valid {
+		at := fromNanos(restored.Int64)
+		r.RestoredAt = &at
+	}
+	return r, true, nil
 }

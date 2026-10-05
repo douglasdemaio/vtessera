@@ -87,6 +87,7 @@ type serverBuild struct {
 	sandbox       bool
 	acceptTTL     time.Duration
 	clock         func() time.Time
+	adminToken    string
 }
 
 func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Ledger) {
@@ -147,6 +148,9 @@ func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Led
 	opts.Version = "0.1.0-test"
 	opts.PublicBaseURL = publicBaseURL
 	opts.Sandbox = build.sandbox
+	if build.adminToken != "" {
+		opts.AdminToken = []byte(build.adminToken)
+	}
 	api := httpapi.New(opts)
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)

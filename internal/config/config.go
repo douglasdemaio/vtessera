@@ -20,10 +20,21 @@ import (
 )
 
 type Config struct {
-	Addr           string
-	DatabaseURL    string
-	SignerKeyPath  string
-	SessionSecret  []byte
+	Addr          string
+	DatabaseURL   string
+	SignerKeyPath string
+	SessionSecret []byte
+	// AdminToken authorises the operator routes that act on other agents:
+	// retiring and restoring a listing. It is separate from the session secret
+	// because it is a different kind of credential — one is issued to agents and
+	// proves an agent is itself, the other is held by the operator and proves
+	// the caller is the marketplace. Sharing one would let every agent retire
+	// every other agent.
+	//
+	// Unset means those routes are absent rather than open. There is no default
+	// token to guess and no way to mint one, so a deployment that has not chosen
+	// to have this capability does not have it.
+	AdminToken     []byte
 	ChallengeTTL   time.Duration
 	SessionTTL     time.Duration
 	RequestTimeout time.Duration
@@ -122,6 +133,7 @@ func Parse(args []string) (Config, error) {
 		addr      = fs.String("addr", env("VTESSERA_ADDR", ":8080"), "listen address")
 		dbURL     = fs.String("db", env("VTESSERA_DB", "file:vtessera.db"), "SQLite database DSN (Postgres is a planned target, not yet supported)")
 		signerKey = fs.String("signer-key", env("VTESSERA_SIGNER_KEY", "data/signer.key"), "path to the Ed25519 marketplace signing key")
+		adminTok  = fs.String("admin-token", os.Getenv("VTESSERA_ADMIN_TOKEN"), "operator token authorising agent retirement; unset removes the admin routes entirely")
 		secret    = fs.String("session-secret", os.Getenv("VTESSERA_SESSION_SECRET"), "session signing secret, at least 32 bytes (hex or base64)")
 		challenge = fs.Duration("challenge-ttl", 5*time.Minute, "auth challenge lifetime")
 		session   = fs.Duration("session-ttl", 24*time.Hour, "session token lifetime")
@@ -201,6 +213,13 @@ func Parse(args []string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	var adminToken []byte
+	if tok := strings.TrimSpace(*adminTok); tok != "" {
+		if len(tok) < 32 {
+			return Config{}, errors.New("admin-token must be at least 32 characters: generate one with `openssl rand -hex 32`")
+		}
+		adminToken = []byte(tok)
+	}
 	acceptTTLDur, err := time.ParseDuration(unset(*acceptTTL))
 	if err != nil {
 		return Config{}, fmt.Errorf("trade-accept-ttl %q is not a duration: %w", *acceptTTL, err)
@@ -220,6 +239,7 @@ func Parse(args []string) (Config, error) {
 		DatabaseURL:      *dbURL,
 		SignerKeyPath:    *signerKey,
 		SessionSecret:    decoded,
+		AdminToken:       adminToken,
 		ChallengeTTL:     *challenge,
 		SessionTTL:       *session,
 		RequestTimeout:   *timeout,
