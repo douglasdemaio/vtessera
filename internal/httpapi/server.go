@@ -1137,6 +1137,10 @@ var statusByError = []struct {
 	{registry.ErrOfferAttestationRequired, http.StatusConflict, "OFFER_ATTESTATION_REQUIRED"},
 	{registry.ErrNoProbeTarget, http.StatusConflict, "NO_PROBE_TARGET"},
 	{registry.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
+	// 409, not 404: the caller is authenticated and the offer exists. What is
+	// missing is the caller's own card, which is a step it has not taken rather
+	// than a resource it asked for and could not find.
+	{trade.ErrNoCardPublished, http.StatusConflict, "NO_CARD_PUBLISHED"},
 	{registry.ErrAgentHasLiveTrades, http.StatusConflict, "AGENT_HAS_LIVE_TRADES"},
 	{registry.ErrRetirementReasonRequired, http.StatusBadRequest, "REASON_REQUIRED"},
 	{registry.ErrAttestationRefused, http.StatusBadRequest, "ATTESTATION_REFUSED"},

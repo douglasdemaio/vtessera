@@ -75,8 +75,11 @@ temporary test in the repo, run it, and delete it — do not create a second mod
 that re-resolves the dependency graph.
 
 **The one sanctioned exception is `mcp/`**, the MCP server. It is a real module
-with its own `go.mod` because it depends on the official MCP SDK and nothing else,
-and it must stay importable by someone who wants only the client. It re-resolves
+with its own `go.mod` because it has one dependency graph of its own, and it must
+stay importable by someone who wants only the client. Its two direct requires are
+the official MCP SDK and `github.com/google/jsonschema-go`, the latter used only by
+the test that validates the registry listing against the published schema; everything
+else in `go.mod` is indirect. It re-resolves
 one dependency graph, not the service's, and it may not import this module at all:
 it talks to the service's public HTTP API, the same endpoints any agent reads with
 `curl`, and it holds no key. `make mcp-test` and friends are wired into `all`,

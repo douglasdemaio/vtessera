@@ -1,8 +1,10 @@
 # vtessera MCP server
 
 An MCP server over vtessera's public HTTP API. It is a **separate Go module** from
-the service, by design: it depends on the official MCP SDK and nothing else, it
-does not import the service, and it holds no key, no session and no database.
+the service, by design: it does not import the service, and it holds no key, no
+session and no database. Its two direct dependencies are the official MCP SDK and
+`github.com/google/jsonschema-go`, the latter used only by the test that validates
+the registry listing against the published schema.
 
 Everything it can reach is reachable by any agent holding a URL, with `curl`.
 
