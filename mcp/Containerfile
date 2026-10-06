@@ -1,0 +1,60 @@
+# vtessera-mcp, built and shipped as a single self-contained image.
+#
+# This is the MCP server, not the marketplace. It holds no key and writes no
+# database: every tool is a read of the vtessera public HTTP API, so the whole
+# server is a compiled binary and a listener. It is a separate module with its
+# own dependency graph, which is why this builds from mcp/ rather than the repo
+# root.
+#
+# Deployed with VTESSERA_MCP_ADDR set, it serves streamable HTTP on /mcp. Left
+# unset, the same binary speaks stdio, which is what an MCP client launching it
+# locally expects. The image default is the HTTP form because that is what a
+# hosted endpoint needs; the registry listing points at this image as a server,
+# not as a thing to attach to a client's stdio.
+
+# ---- build ----------------------------------------------------------------
+
+FROM docker.io/library/golang:1.27-alpine AS build
+
+WORKDIR /src
+
+# Dependencies first, so editing source does not re-download the module cache.
+# Pure Go compile: no C toolchain, no third-party services.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# CGO_ENABLED=0 keeps the runtime image to a static binary, and -trimpath strips
+# the build machine's paths from anything a panic would print.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
+      -o /out/vtessera-mcp ./cmd/vtessera-mcp
+
+# ---- runtime --------------------------------------------------------------
+
+FROM docker.io/library/alpine:3.21
+
+# ca-certificates for the outbound TLS calls to the marketplace, tzdata for
+# timestamps in logs.
+RUN apk add --no-cache ca-certificates tzdata \
+  && adduser -D -u 10001 vtessera
+
+COPY --from=build /out/vtessera-mcp /usr/local/bin/vtessera-mcp
+
+# Never run a network service as root. Unlike the marketplace, this process
+# writes nothing at all, so it needs no data directory and no volume: restarts
+# lose no state because there is none.
+USER vtessera
+
+EXPOSE 8080
+
+ENV VTESSERA_BASE_URL=https://vtessera.fly.dev \
+    VTESSERA_MCP_ADDR=:8080 \
+    VTESSERA_TIMEOUT=15s
+
+# No HEALTHCHECK on purpose, and not an oversight. The image has no curl or
+# wget installed to avoid them, and /mcp is a POST-only MCP endpoint, so a
+# container health probe here would have to speak MCP to learn anything true.
+# Fly's checks a tool call instead. See cmd/vtessera-mcp serveHTTP.
+
+ENTRYPOINT ["/usr/local/bin/vtessera-mcp"]
