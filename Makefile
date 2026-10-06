@@ -7,7 +7,7 @@ MCP_TAG ?= 0.1.0
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart image image-run fly-deploy fly-verify preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push
+.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart image image-run fly-deploy fly-verify preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push mcp-fly-deploy
 
 # mcp/ is a separate module (see AGENTS.md), so ./... does not reach it. Its checks
 # are wired in here rather than left to memory: a nested module that nothing builds
@@ -152,6 +152,16 @@ image-run: image
 # default of two machines would create two marketplaces with two signing keys.
 fly-deploy:
 	fly deploy --ha=false
+
+# The MCP server lives in its own Fly app and must not be deployed with `make
+# fly-deploy` above: that builds the marketplace from the repo root.
+# flyctl builds with the directory it is invoked from as the build context and
+# ignores a `context` set in the file, so the MCP app has to be deployed from
+# mcp/ - the `cd mcp` in this target is the point of it. Set FLY_API_TOKEN to
+# the vtessera-mcp deploy token first; a personal account token is unauthorized
+# for this app, and the marketplace app is pull-request-only.
+mcp-fly-deploy:
+	cd mcp && flyctl deploy
 
 # The verification key printed here is the marketplace identity. Run it before
 # and after a deploy: if it changed, the volume is gone.
