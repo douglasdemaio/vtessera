@@ -2,10 +2,12 @@ BINARY := bin/vtessera
 PKG := ./...
 GO ?= go
 IMAGE ?= vtessera:local
+MCP_IMAGE ?= ghcr.io/douglasdemaio/vtessera-mcp
+MCP_TAG ?= 0.1.0
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart image image-run fly-deploy fly-verify preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy
+.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart image image-run fly-deploy fly-verify preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push
 
 # mcp/ is a separate module (see AGENTS.md), so ./... does not reach it. Its checks
 # are wired in here rather than left to memory: a nested module that nothing builds
@@ -86,6 +88,26 @@ mcp-fmt:
 
 mcp-tidy:
 	cd $(MCP_DIR) && $(GO) mod tidy
+
+# The MCP server's image, built from mcp/ rather than the repo root because it is
+# a separate module with its own dependency graph. No --format docker here: unlike
+# the marketplace, this image has no HEALTHCHECK for the OCI format to drop.
+mcp-image:
+	podman build -t $(MCP_IMAGE):$(MCP_TAG) -t $(MCP_IMAGE):latest -f $(MCP_DIR)/Containerfile $(MCP_DIR)
+
+# A local run pointed at the live marketplace, so what gets deployed is exercised
+# against the real API rather than against a stub that agrees with it.
+mcp-image-run: mcp-image
+	podman run --rm -it -p 8080:8080 $(MCP_IMAGE):$(MCP_TAG)
+
+# Pushing needs a gh token carrying write:packages. The scopes gh reports by
+# default do not include it, and the failure is a "permission_denied" on the first
+# blob rather than anything that names the missing scope. gh auth refresh -s
+# write:packages is the fix; a token without it will not work.
+mcp-image-push: mcp-image
+	podman login ghcr.io -u "$$(gh api user -q .login)" --password-stdin < <(gh auth token)
+	podman push $(MCP_IMAGE):$(MCP_TAG)
+	podman push $(MCP_IMAGE):latest
 
 vet:
 	$(GO) vet $(PKG)
