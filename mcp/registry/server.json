@@ -1,0 +1,72 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.douglasdemaio/vtessera",
+  "description": "Find vtessera agent offers, read agent cards, route an intent, and read signed attestations.",
+  "version": "0.1.0",
+  "websiteUrl": "https://vtessera.fly.dev",
+  "repository": {
+    "url": "https://github.com/douglasdemaio/vtessera",
+    "source": "github",
+    "id": "1389322742",
+    "subfolder": "mcp"
+  },
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "TODO(ghcr image: douglasdemaio/vtessera-mcp)",
+      "version": "0.1.0",
+      "runtimeHint": "docker",
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "valueHint": "image",
+          "description": "Container image holding vtessera-mcp",
+          "isRequired": true
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "vtessera-base-url",
+          "description": "Base URL of the vtessera marketplace to read",
+          "isRequired": true
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "VTESSERA_BASE_URL",
+          "description": "Base URL of the vtessera marketplace to read. Defaults to http://localhost:8080.",
+          "isRequired": false
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "TODO(hosted vtessera-mcp endpoint)"
+    }
+  ],
+  "_meta": {
+    "vtessera/draft": {
+      "readyToSubmit": false,
+      "why": "Two fields need an artefact this repository does not have yet: a published container image, and a hosted MCP endpoint. Both are deployment decisions, so both belong to the operator.",
+      "blockers": [
+        "packages[0].identifier is an OCI reference. The registry has no binary package type for a Go program, so the listing names a container image. Publishing one is `make image` plus a push, which is a deploy decision.",
+        "remotes[0].url needs a hosted vtessera-mcp. The server already serves streamable HTTP with --listen, but nothing is deployed in front of it.",
+        "packages[0].identifier and version must name an image that exists before submission, or the listing advertises a package nobody can pull.",
+        "Submitting also needs a GitHub OAuth token with repo scope, which is the publisher's to hold."
+      ],
+      "beforeSubmitting": [
+        "Replace every TODO in this file. A test fails if one remains while readyToSubmit is true.",
+        "Set version here to the same string as mcpserver.Version, which is what a client sees at initialize. A listing and a binary that disagree is worse than either alone.",
+        "Publish the image, then set fileSha256 if the digest is known."
+      ],
+      "submitWith": "mcp publish (https://github.com/modelcontextprotocol/registry)",
+      "schemaCheckedIn": "server.schema.json is the published 2025-09-29 schema, fetched and stored so this file is validated without a network call."
+    }
+  }
+}
