@@ -260,8 +260,37 @@ func nonNilBytes(b []byte) []byte {
 // the operator rather than the agent: withdrawing a listing is a statement about
 // future business, and a buyer holding an open trade against that seller is
 // existing business with a counterparty who will not be there to finish it.
+// liveTradeQueryer is the read side a *sql.DB and a *sql.Tx both satisfy.
+type liveTradeQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 func (s *Store) LiveTradesForAgent(ctx context.Context, agentID string) ([]domain.Trade, error) {
-	rows, err := s.db.QueryContext(ctx,
+	ids, err := s.liveTradeIDs(ctx, s.db, agentID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Trade, 0, len(ids))
+	for _, id := range ids {
+		tr, err := s.GetTrade(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tr)
+	}
+	return out, nil
+}
+
+// liveTradeIDs lists the trades of an agent that have not finished, against
+// either handle. Recorded, settled, disputed and cancelled are finished: a
+// dispute is finished with the marketplace's involvement, not pending on it.
+//
+// It takes a queryer rather than the context alone so the retirement path can ask
+// the same question inside its own transaction. That matters: an agent accepted
+// a trade a moment before it was retired is a buyer waiting on a seller that can
+// no longer trade, and a check that ran before the write cannot see it.
+func (s *Store) liveTradeIDs(ctx context.Context, q liveTradeQueryer, agentID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx,
 		`SELECT id FROM trades
 		 WHERE (buyer_agent_id = ? OR seller_agent_id = ?)
 		   AND state NOT IN (?, ?, ?, ?)
@@ -284,13 +313,5 @@ func (s *Store) LiveTradesForAgent(ctx context.Context, agentID string) ([]domai
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("live trades rows: %w", err)
 	}
-	out := make([]domain.Trade, 0, len(ids))
-	for _, id := range ids {
-		tr, err := s.GetTrade(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, tr)
-	}
-	return out, nil
+	return ids, nil
 }

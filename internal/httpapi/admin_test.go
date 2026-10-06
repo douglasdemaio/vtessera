@@ -192,11 +192,22 @@ func TestRetirementIsRefusedWhileATradeIsLive(t *testing.T) {
 		t.Fatalf("retire with a live trade = %d %s, want 409", status, body)
 	}
 	var refusal struct {
-		Code string `json:"code"`
+		Code         string   `json:"code"`
+		AgentID      string   `json:"agentId"`
+		LiveTradeIDs []string `json:"liveTradeIds"`
 	}
 	decodeInto(t, body, &refusal)
 	if refusal.Code != "AGENT_HAS_LIVE_TRADES" {
 		t.Errorf("code = %s, want AGENT_HAS_LIVE_TRADES", refusal.Code)
+	}
+	// The refusal names the trades that block it. An operator holding it has to
+	// settle, dispute or expire each one, and a count alone does not tell them
+	// which.
+	if len(refusal.LiveTradeIDs) != 1 || refusal.LiveTradeIDs[0] != created.ID {
+		t.Errorf("liveTradeIds = %v, want the blocking trade %s", refusal.LiveTradeIDs, created.ID)
+	}
+	if refusal.AgentID != seller.id {
+		t.Errorf("agentId = %q, want %q", refusal.AgentID, seller.id)
 	}
 
 	// No record was written either, so the audit log does not claim a withdrawal

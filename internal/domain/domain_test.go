@@ -124,6 +124,47 @@ func TestAgentCardValidateRejectsInvalidFields(t *testing.T) {
 	})
 }
 
+func TestAProbeTargetMustBeAnUnambiguousHTTPSEndpoint(t *testing.T) {
+	base := func(target string) AgentCard {
+		return AgentCard{
+			Name: "Bot", PublicKey: validPublicKey(), URL: "https://example.com",
+			ProbeTarget: target,
+		}
+	}
+	// Every one of these is refused because the marketplace would be sending a
+	// request somewhere the agent did not clearly nominate. A target that could be
+	// read two ways is a target an agent can be redirected from.
+	for _, target := range []string{
+		"http://agent.example.com:8443/probe",            // plaintext
+		"https://agent.example.com/probe",                // no port: the default port is a guess
+		"https://agent.example.com:8443",                 // no path
+		"https://agent.example.com:8443/",                // a bare path is not an endpoint
+		"https://user:pass@agent.example.com:8443/probe", // credentials in a URL leak on
+		"https://agent.example.com:8443/probe?token=x",   // a query is state a reader cannot check
+		"https://agent.example.com:8443/probe#frag",      // and a fragment is not sent
+		"https://:8443/probe",                            // no host
+		"not a url",
+	} {
+		if err := base(target).Validate(); err == nil {
+			t.Errorf("Validate() accepted probe target %q", target)
+		}
+	}
+	for _, target := range []string{
+		"https://agent.example.com:8443/probe",
+		"https://agent.example.com:443/v1/capabilities",
+		"https://agent.example.com:8443/a/b/c",
+	} {
+		if err := base(target).Validate(); err != nil {
+			t.Errorf("Validate() rejected a usable probe target %q: %v", target, err)
+		}
+	}
+	// An agent that does not want to be probed says so by declaring nothing, which
+	// is the opt-in.
+	if err := base("").Validate(); err != nil {
+		t.Errorf("Validate() refused a card with no probe target: %v", err)
+	}
+}
+
 func TestValidateServiceURLRejectsNonHTTP(t *testing.T) {
 	cases := []string{"", "ftp://example.com", "https://", "example.com"}
 	for _, raw := range cases {

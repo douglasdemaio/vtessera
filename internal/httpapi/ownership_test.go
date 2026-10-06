@@ -165,11 +165,13 @@ func TestAnAgentCanStillWriteToItsOwnCardAndOffers(t *testing.T) {
 	agent := newAgent(t, server)
 
 	status, body := agent.raw(http.MethodPut, "/v1/agents/"+url.PathEscape(agent.id)+"/card", map[string]any{
-		"name":       "renamed by its owner",
-		"url":        "https://trader.example.com",
-		"version":    "0.2.0",
-		"publicKey":  agent.id,
-		"currencies": []string{usdc},
+		"card": map[string]any{
+			"name":       "renamed by its owner",
+			"url":        "https://trader.example.com",
+			"version":    "0.2.0",
+			"publicKey":  agent.id,
+			"currencies": []string{usdc},
+		},
 	}, true)
 	if status != http.StatusOK {
 		t.Fatalf("PUT own card = %d %s, want 200", status, body)
@@ -196,11 +198,14 @@ func TestACardClaimingAnotherKeyIsRefusedEvenOnTheOwnersOwnRoute(t *testing.T) {
 	other := newAgent(t, server)
 
 	status, body := agent.raw(http.MethodPut, "/v1/agents/"+url.PathEscape(agent.id)+"/card", map[string]any{
-		"name":       "not me",
-		"url":        "https://trader.example.com",
-		"version":    "0.1.0",
-		"publicKey":  other.id,
-		"currencies": []string{usdc},
+		"name": "not me",
+		"card": map[string]any{
+			"name":       "claims another key",
+			"url":        "https://trader.example.com",
+			"version":    "0.1.0",
+			"publicKey":  other.id,
+			"currencies": []string{usdc},
+		},
 	}, true)
 	if status == http.StatusOK {
 		t.Fatalf("PUT a card claiming another agent's key = 200 %s, want a refusal", body)

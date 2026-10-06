@@ -2,6 +2,7 @@ package trade_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/attest"
 	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/ledger"
@@ -24,6 +26,21 @@ const (
 	outsider  = "ApdCWPr4eyvhTRiYh2ndnFXZDkXsUuZq3yhVJK2wR9Tp"
 	usdc      = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 )
+
+// marketSigner is the marketplace's own key, used to sign the cards the registry
+// publishes. A fresh one per harness keeps a test's signatures scoped to it.
+func marketSigner(t *testing.T) *attest.SigningKey {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := attest.NewSigningKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
 
 type harness struct {
 	svc      *trade.Service
@@ -63,9 +80,9 @@ func setup(t *testing.T) harness {
 	if err != nil {
 		t.Fatalf("governed mints: %v", err)
 	}
-	registrySvc := registry.New(db, mints)
+	registrySvc := registry.New(db, mints, marketSigner(t))
 	for _, id := range []string{buyerKey, sellerKey, outsider} {
-		if _, _, err := registrySvc.Register(ctx, id, card(id)); err != nil {
+		if _, _, err := registrySvc.Register(ctx, id, card(id), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -76,7 +93,7 @@ func setup(t *testing.T) harness {
 		PriceAmount:     "12.50",
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain, domain.SettlementOnchain},
-	}, "")
+	}, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,9 +380,9 @@ func TestBidSwapsParties(t *testing.T) {
 	if err != nil {
 		t.Fatalf("governed mints: %v", err)
 	}
-	registrySvc := registry.New(db, mints)
+	registrySvc := registry.New(db, mints, marketSigner(t))
 	for _, id := range []string{buyerKey, sellerKey} {
-		if _, _, err := registrySvc.Register(ctx, id, card(id)); err != nil {
+		if _, _, err := registrySvc.Register(ctx, id, card(id), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -375,7 +392,7 @@ func TestBidSwapsParties(t *testing.T) {
 		PriceAmount:     "5.00",
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, "")
+	}, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

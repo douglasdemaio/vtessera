@@ -208,7 +208,11 @@ func devnetMarket(t *testing.T) (*httptest.Server, tokens.Registry, string) {
 
 	policy := limits.DefaultPolicy(limits.DefaultRates())
 	led := ledger.New(db, signer)
-	registrySvc := registry.New(db, mints, registry.WithPricer(policy))
+	marketSigner, err := signer.AttestationSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrySvc := registry.New(db, mints, marketSigner, registry.WithPricer(policy))
 	trades := trade.New(db, db, db, led).WithLimits(policy, db)
 	api := httpapi.New(httpapi.Options{
 		Registry:      registrySvc,

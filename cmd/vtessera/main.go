@@ -19,6 +19,7 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/ledger"
 	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/preflight"
+	"github.com/douglasdemaio/vtessera/internal/probe"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/settlement"
 	"github.com/douglasdemaio/vtessera/internal/store"
@@ -83,6 +84,13 @@ func run(args []string) error {
 		"generated", created,
 		"path", cfg.SignerKeyPath,
 	)
+	// The same key signs receipts and the cards this marketplace publishes. One
+	// identity means one thing to protect and one thing to rotate; a second key
+	// for listings would add an identity without removing the one that matters.
+	marketSigner, err := signer.AttestationSigner()
+	if err != nil {
+		return err
+	}
 
 	authSvc, err := auth.New(db, cfg.SessionSecret,
 		auth.WithChallengeTTL(cfg.ChallengeTTL),
@@ -97,9 +105,24 @@ func run(args []string) error {
 	// not have rather than assuming mainnet's.
 	var mints tokens.Registry
 	spendPolicy := cfg.Spend.Policy()
-	registrySvc := registry.New(db, mints, registry.WithPricer(spendPolicy))
+	// The probe runner owns this service's outbound traffic, so its limits are
+	// operator-declared rather than buried. A short timeout and a small body cap
+	// are what stop an agent that is unreachable from holding a connection.
+	prober := probe.New(cfg.Version, probe.Limits{
+		Timeout:          cfg.ProbeTimeout,
+		MaxResponseBytes: cfg.ProbeMaxResponseBytes,
+	})
+	registrySvc := registry.New(db, mints, marketSigner,
+		registry.WithPricer(spendPolicy),
+		registry.WithRequiredOfferAttestation(cfg.RequireOfferAttestation),
+		registry.WithProbeRunner(prober))
 	led := ledger.New(db, signer)
 	trades := trade.New(db, db, db, led).WithLimits(spendPolicy, db).WithAcceptanceTTL(cfg.AcceptTTL)
+	if cfg.RequireOfferAttestation {
+		logger.Info("offer attestation required: an unsigned offer will be refused")
+	} else {
+		logger.Warn("unsigned offers are accepted: a buyer is told a listing is unvouched-for, but the terms are not verified by anyone but the seller")
+	}
 	if len(cfg.AdminToken) > 0 {
 		logger.Info("admin routes enabled: an operator token can retire and restore agent listings")
 	} else {
@@ -140,7 +163,10 @@ func run(args []string) error {
 		}
 		// The registry governs the same set preflight checks, so an agent can
 		// never advertise a currency the service would refuse to settle in.
-		registrySvc = registry.New(db, mints, registry.WithPricer(spendPolicy))
+		registrySvc = registry.New(db, mints, marketSigner,
+			registry.WithPricer(spendPolicy),
+			registry.WithRequiredOfferAttestation(cfg.RequireOfferAttestation),
+			registry.WithProbeRunner(prober))
 
 		client := settlement.NewRPCClient(cfg.Solana.RPCURL)
 		logger.Info("preflight passed",

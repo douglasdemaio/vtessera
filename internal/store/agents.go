@@ -159,6 +159,18 @@ func requireAffected(res sql.Result) error {
 // tessera a buyer already holds keeps verifying.
 func (s *Store) RetireAgent(ctx context.Context, id, reason, actor string, at time.Time) (domain.Agent, error) {
 	err := s.write(ctx, func(tx *sql.Tx) error {
+		// Checked here rather than by the caller, in the same transaction as the
+		// write. A caller that checked first would have a window: a trade accepted
+		// between its check and this statement leaves a buyer holding a trade with
+		// a seller that has been withdrawn, which is the exact situation the
+		// refusal exists to prevent.
+		live, err := s.liveTradeIDs(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if len(live) > 0 {
+			return &LiveTradesError{AgentID: id, TradeIDs: live}
+		}
 		res, err := tx.ExecContext(ctx,
 			`UPDATE agents SET status = ?, updated_at = ? WHERE id = ?`,
 			string(domain.AgentRetired), nanos(at), id)
@@ -213,8 +225,9 @@ func (s *Store) RestoreAgent(ctx context.Context, id, actor string, at time.Time
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE agent_retirements SET restored_at = ? WHERE agent_id = ? AND restored_at IS NULL`,
-			nanos(at), id); err != nil {
+			`UPDATE agent_retirements SET restored_at = ?, restored_actor = ?
+			 WHERE agent_id = ? AND restored_at IS NULL`,
+			nanos(at), actor, id); err != nil {
 			return mapErr(err)
 		}
 		return nil
@@ -225,20 +238,49 @@ func (s *Store) RestoreAgent(ctx context.Context, id, actor string, at time.Time
 	return s.GetAgent(ctx, id)
 }
 
+// errLiveTrades is the sentinel the live-trade refusal unwraps to. The registry
+// re-exports it as ErrAgentHasLiveTrades; the duplication is deliberate, because
+// the store cannot import the registry that imports the store.
+var errLiveTrades = errors.New("agent has trades that have not reached a terminal state")
+
+// LiveTradesError refuses a retirement while trades of that agent have not
+// finished, and names which ones.
+//
+// It carries the IDs rather than only counting them because the operator holding
+// the refusal is the one who can act on it: they have to settle, dispute or let
+// expire each trade, and a count tells them how many they are already dealing
+// with rather than which.
+type LiveTradesError struct {
+	AgentID  string
+	TradeIDs []string
+}
+
+func (e *LiveTradesError) Error() string {
+	return fmt.Sprintf("%s has %d live trade(s): %s", e.AgentID, len(e.TradeIDs), strings.Join(e.TradeIDs, ", "))
+}
+
+// Unwrap lets errors.Is(err, registry.ErrAgentHasLiveTrades) recognise the
+// refusal without the store importing the registry, which would be a cycle.
+func (e *LiveTradesError) Unwrap() error {
+	return errLiveTrades
+}
+
 // Retirement returns the current retirement record for an agent. A retired agent
 // always has one, so an operator reading a listing can tell a withdrawal from a
 // suspension without inferring it from timestamps.
 func (s *Store) Retirement(ctx context.Context, id string) (domain.Retirement, bool, error) {
 	var (
-		r         domain.Retirement
-		reason    string
-		actor     string
-		retiredAt int64
-		restored  sql.NullInt64
+		r          domain.Retirement
+		reason     string
+		actor      string
+		retiredAt  int64
+		restored   sql.NullInt64
+		restoredBy sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT agent_id, reason, actor, retired_at, restored_at FROM agent_retirements WHERE agent_id = ?`, id).
-		Scan(&r.AgentID, &reason, &actor, &retiredAt, &restored)
+		`SELECT agent_id, reason, actor, retired_at, restored_at, restored_actor
+		 FROM agent_retirements WHERE agent_id = ?`, id).
+		Scan(&r.AgentID, &reason, &actor, &retiredAt, &restored, &restoredBy)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return domain.Retirement{}, false, nil
@@ -251,6 +293,9 @@ func (s *Store) Retirement(ctx context.Context, id string) (domain.Retirement, b
 	if restored.Valid {
 		at := fromNanos(restored.Int64)
 		r.RestoredAt = &at
+	}
+	if restoredBy.Valid {
+		r.RestoredBy = restoredBy.String
 	}
 	return r, true, nil
 }

@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/attest"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/money"
 )
@@ -29,6 +32,69 @@ func testAgent(id string) domain.Agent {
 }
 
 const validMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+// attestSigner is a throwaway Ed25519 key standing in for an agent or for the
+// marketplace. The tests that use it are about what was stored, not about who
+// signed, so the key does not need to persist anywhere.
+func attestSigner(t *testing.T) *attest.SigningKey {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := attest.NewSigningKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// seedAttestAgent registers an agent whose ID is the signer's own public key.
+//
+// The ID has to be the key rather than an arbitrary string because the card
+// statement names an agent and the verifier requires that the key which signed it
+// be that agent. A store that accepted a mismatch would let one agent sign a
+// card claiming to be another.
+func seedAttestAgent(t *testing.T, s *Store, key *attest.SigningKey) domain.Agent {
+	t.Helper()
+	id := key.PublicKeyBase58()
+	agent := testAgent(id)
+	agent.Card = domain.AgentCard{
+		Name: "alice", URL: "https://trader.example.com", PublicKey: id,
+		Currencies: []string{validMint},
+	}
+	if err := s.CreateAgent(context.Background(), agent); err != nil {
+		t.Fatal(err)
+	}
+	return agent
+}
+
+// attestCard is the statement the marketplace and the agent both sign, built the
+// way registry.Register builds it so a signature written by one is verifiable
+// through the other.
+func attestCard(agent domain.Agent) attest.Card {
+	skills := make([]attest.Skill, 0, len(agent.Card.Skills))
+	for _, sk := range agent.Card.Skills {
+		skills = append(skills, attest.Skill{
+			ID: sk.ID, Name: sk.Name, Tags: sk.Tags, Input: sk.Input, Output: sk.Output,
+		})
+	}
+	modes := make([]string, 0, len(agent.Card.SettlementModes))
+	for _, m := range agent.Card.SettlementModes {
+		modes = append(modes, string(m))
+	}
+	return attest.Card{
+		AgentID:         agent.ID,
+		Name:            agent.Card.Name,
+		Description:     agent.Card.Description,
+		Version:         agent.Card.Version,
+		URL:             agent.Card.URL,
+		Capabilities:    agent.Card.Capabilities,
+		Skills:          skills,
+		Currencies:      agent.Card.Currencies,
+		SettlementModes: modes,
+	}
+}
 
 func testOffer(id, agentID string) domain.Offer {
 	return domain.Offer{
@@ -543,5 +609,403 @@ func TestPing(t *testing.T) {
 	s := testStore(t)
 	if err := s.Ping(context.Background()); err != nil {
 		t.Errorf("ping: %v", err)
+	}
+}
+
+// The card and its signatures are written together, so a reader must never be
+// able to observe one without the others. The migration's own reason for
+// existing.
+func TestACardAndItsAttestationsAreStoredTogether(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	key := attestSigner(t)
+	market := attestSigner(t)
+
+	agent := seedAttestAgent(t, s, key)
+	sig, err := key.SignCard(attestCard(agent), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	marketSig, err := market.AttestCard(attestCard(agent), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAgentCard(ctx, agent, &sig, marketSig, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, found, err := s.CardAttestation(ctx, agent.ID)
+	if err != nil || !found {
+		t.Fatalf("CardAttestation = %v, %v; want a record", found, err)
+	}
+	if got.Agent == nil {
+		t.Fatal("the agent signature is missing from a card that was signed")
+	}
+	if got.Market.Value == "" {
+		t.Error("the marketplace signature is missing from a card this marketplace published")
+	}
+}
+
+// A card the agent did not sign still has a marketplace attestation, and the two
+// answers stay distinguishable. Collapsing them would tell a directory that a
+// capability list is unvouched-for when the marketplace did in fact publish it.
+func TestAnUnsignedCardKeepsItsMarketplaceAttestation(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	market := attestSigner(t)
+
+	agent := seedAttestAgent(t, s, market)
+	marketSig, err := market.AttestCard(attestCard(agent), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAgentCard(ctx, agent, nil, marketSig, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, found, err := s.CardAttestation(ctx, agent.ID)
+	if err != nil || !found {
+		t.Fatalf("CardAttestation = %v, %v; want a record", found, err)
+	}
+	if got.Agent != nil {
+		t.Error("an unsigned card reports an agent signature")
+	}
+	if got.Market.Value == "" {
+		t.Error("the marketplace attestation was dropped along with the agent's")
+	}
+}
+
+// Replacing a signed card with an unsigned one clears the agent's signature in
+// the same write. A stale one would be a signature over content no longer stored,
+// and a verifier checking it would be checking a card that does not exist.
+func TestAnUnsignedReplacementClearsTheAgentSignatureInOneWrite(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	key := attestSigner(t)
+	market := attestSigner(t)
+
+	agent := seedAttestAgent(t, s, key)
+	now := time.Now().UTC()
+	sig, err := key.SignCard(attestCard(agent), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marketSig, err := market.AttestCard(attestCard(agent), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAgentCard(ctx, agent, &sig, marketSig, now); err != nil {
+		t.Fatal(err)
+	}
+
+	renamed := domain.AgentCard{
+		Name: "renamed", URL: "https://trader.example.com", PublicKey: agent.ID,
+		Currencies: []string{validMint},
+	}
+	agent.Card = renamed
+	statement := attest.Card{
+		AgentID: agent.ID, Name: renamed.Name, URL: renamed.URL,
+		Currencies: []string{validMint},
+	}
+	newMarket, err := market.AttestCard(statement, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAgentCard(ctx, agent, nil, newMarket, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := s.CardAttestation(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Agent != nil {
+		t.Error("the previous agent signature survived an unsigned replacement")
+	}
+	// The marketplace re-signed, so its signature describes the stored card.
+	if err := attest.VerifyCardAttestedBy(statement, got.Market, market.PublicKeyBase58()); err != nil {
+		t.Errorf("the marketplace signature does not describe the card that replaced the one it signed: %v", err)
+	}
+}
+
+// An offer and its seller's signature are one write, so an offer cannot exist
+// unsigned when its signature was sent, or signed when it does not.
+func TestAnOfferAndItsSignatureAreStoredTogether(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	seller := attestSigner(t)
+
+	agent := seedAttestAgent(t, s, seller)
+	now := time.Now().UTC()
+	offer := domain.Offer{
+		ID:              "offer-1",
+		AgentID:         agent.ID,
+		Direction:       domain.DirectionAsk,
+		Description:     "summarize",
+		Capabilities:    []string{"summarize:document"},
+		PriceAmount:     money.MustParse("1.00"),
+		PriceMint:       validMint,
+		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
+		Status:          domain.OfferOpen,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	statement := attest.Offer{
+		ID: offer.ID, Seller: agent.ID, Description: offer.Description,
+		Direction: "ask", Capabilities: offer.Capabilities, Mint: validMint,
+		Scale: "6", AmountBaseUnits: "1000000", UnitAmount: "1.00",
+		SettlementModes: []string{"offchain"},
+	}
+	sig, err := seller.SignOffer(statement, offer.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOfferWithAttestation(ctx, offer, "", &sig); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.GetOffer(ctx, offer.ID); err != nil {
+		t.Fatalf("the offer was not stored alongside its signature: %v", err)
+	}
+	got, found, err := s.OfferAttestation(ctx, offer.ID)
+	if err != nil || !found {
+		t.Fatalf("OfferAttestation = %v, %v; want a signature", found, err)
+	}
+	if err := attest.VerifyOffer(statement, got); err != nil {
+		t.Errorf("the stored signature does not describe the offer: %v", err)
+	}
+}
+
+// A card from before attestations existed has no row at all, which is different
+// from a row saying the card is unsigned. A reader has to be able to tell.
+func TestACardFromBeforeAttestationsHasNoRecordRatherThanAnEmptyOne(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	agent := seedAttestAgent(t, s, attestSigner(t))
+
+	got, found, err := s.CardAttestation(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Error("an agent registered before attestations reports an attestation record")
+	}
+	if got.Market.Value != "" || got.Agent != nil {
+		t.Error("an absent record returned signature values")
+	}
+}
+
+// One agent signing a card that names another is the whole reason the statement
+// carries the agent separately from the key that signed it. Without the check a
+// verifiable card would prove nothing about who published it.
+func TestACardSignedByAnotherKeyIsRefused(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	agentKey := attestSigner(t)
+	impostor := attestSigner(t)
+	agent := seedAttestAgent(t, s, agentKey)
+
+	// Signing the raw canonical bytes is what an attacker would do. The
+	// convenience method refuses a card naming somebody else, but nothing stops a
+	// caller building the signature by hand, so the check that matters is the one
+	// at verification.
+	at := time.Now().UTC()
+	sig, err := impostor.Sign(attest.CardBytes(attestCard(agent), at), at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := attest.VerifyCard(attestCard(agent), sig); err == nil {
+		t.Fatal("a signature over a card naming another agent verifies; the test would not be testing anything")
+	}
+	marketSig, err := agentKey.AttestCard(attestCard(agent), at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAgentCard(ctx, agent, &sig, marketSig, at); err == nil {
+		t.Error("a card signed by a key other than the agent it names was stored")
+	}
+}
+
+// The mirror of the card rule for offers: a signature from a key that is not the
+// seller is not a seller attestation, and storing it would create a row that
+// claims a signature the seller never made.
+func TestAnOfferSignedByAnotherKeyIsRefused(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	seller := attestSigner(t)
+	impostor := attestSigner(t)
+	agent := seedAttestAgent(t, s, seller)
+
+	now := time.Now().UTC()
+	offer := domain.Offer{
+		ID:              "offer-1",
+		AgentID:         agent.ID,
+		Direction:       domain.DirectionAsk,
+		Description:     "summarize",
+		Capabilities:    []string{"summarize:document"},
+		PriceAmount:     money.MustParse("1.00"),
+		PriceMint:       validMint,
+		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
+		Status:          domain.OfferOpen,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	statement := attest.Offer{
+		ID: offer.ID, Seller: agent.ID, Description: offer.Description,
+		Direction: "ask", Capabilities: offer.Capabilities, Mint: validMint,
+		Scale: "6", AmountBaseUnits: "1000000", UnitAmount: "1.00",
+		SettlementModes: []string{"offchain"},
+	}
+	sig, err := impostor.Sign(attest.OfferBytes(statement, now), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOfferWithAttestation(ctx, offer, "", &sig); err == nil {
+		t.Error("an offer was stored with a signature from a key that is not the seller")
+	}
+	if _, err := s.GetOffer(ctx, offer.ID); err == nil {
+		t.Error("the refused offer was stored anyway")
+	}
+}
+
+// The refusal has to leave nothing behind. A signature rejected on its way in
+// must not leave an offer the marketplace will later list as signed.
+func TestARefusedOfferAttestationWritesNoOffer(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	seller := attestSigner(t)
+	impostor := attestSigner(t)
+	agent := seedAttestAgent(t, s, seller)
+
+	now := time.Now().UTC()
+	offer := domain.Offer{
+		ID: "offer-1", AgentID: agent.ID, Direction: domain.DirectionAsk,
+		Description: "summarize", Capabilities: []string{"summarize:document"},
+		PriceAmount: money.MustParse("1.00"), PriceMint: validMint,
+		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
+		Status:          domain.OfferOpen, CreatedAt: now, UpdatedAt: now,
+	}
+	statement := attest.Offer{
+		ID: offer.ID, Seller: agent.ID, Direction: "ask", Mint: validMint,
+	}
+	sig, err := impostor.Sign(attest.OfferBytes(statement, now), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOfferWithAttestation(ctx, offer, "", &sig); err == nil {
+		t.Fatal("the mismatched signature was accepted, so nothing was refused")
+	}
+	if _, found, err := s.OfferAttestation(ctx, offer.ID); err != nil || found {
+		t.Errorf("OfferAttestation = %v, %v; want no signature for an offer that does not exist", found, err)
+	}
+}
+
+// The live-trade refusal is the store's own, made inside the transaction that
+// writes the retirement. A caller that checked first would leave a window in which
+// a trade accepted after the check strands a buyer with a withdrawn seller, so the
+// test calls RetireAgent directly with nothing in front of it.
+func TestRetirementIsRefusedByTheStoreItselfWhileATradeIsLive(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if err := s.CreateAgent(ctx, testAgent("alice")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAgent(ctx, testAgent("bob")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOffer(ctx, testOffer("o1", "alice"), ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	trade := domain.Trade{
+		ID: "t-live", OfferID: "o1", BuyerAgentID: "bob", SellerAgentID: "alice",
+		Description: "summarize a document", Amount: money.MustParse("10"), Mint: validMint,
+		SettlementMode: domain.SettlementOffchain, State: domain.TradeAccepted, CreatedAt: now,
+	}
+	if err := s.CreateTrade(ctx, trade, "live-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.RetireAgent(ctx, "alice", "withdrawn", "ops", now)
+	var refusal *LiveTradesError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("RetireAgent = %v, want a live-trade refusal", err)
+	}
+	if len(refusal.TradeIDs) != 1 || refusal.TradeIDs[0] != trade.ID {
+		t.Errorf("refusal names %v, want the blocking trade %s", refusal.TradeIDs, trade.ID)
+	}
+	// Nothing was written: a refused retirement must not have closed the listing
+	// it was told not to close.
+	agent, err := s.GetAgent(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.Status != domain.AgentActive {
+		t.Errorf("status = %s, want the agent left active by a refused retirement", agent.Status)
+	}
+	if _, found, err := s.Retirement(ctx, "alice"); err != nil || found {
+		t.Errorf("a refused retirement left an audit record: found=%v err=%v", found, err)
+	}
+}
+
+// A trade that has finished does not block a withdrawal. Recorded, settled,
+// disputed and cancelled are all finished, and refusing on those would make an
+// agent impossible to withdraw.
+func TestAFinishedTradeDoesNotBlockARetirement(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if err := s.CreateAgent(ctx, testAgent("alice")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAgent(ctx, testAgent("bob")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOffer(ctx, testOffer("o1", "alice"), ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, state := range []domain.TradeState{
+		domain.TradeRecorded, domain.TradeSettled, domain.TradeDisputed, domain.TradeCancelled,
+	} {
+		trade := domain.Trade{
+			ID: "t-" + string(state), OfferID: "o1", BuyerAgentID: "bob", SellerAgentID: "alice",
+			Description: "summarize a document", Amount: money.MustParse("10"), Mint: validMint,
+			SettlementMode: domain.SettlementOffchain, State: state, CreatedAt: now,
+		}
+		if err := s.CreateTrade(ctx, trade, "key-"+string(state)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.RetireAgent(ctx, "alice", "withdrawn", "ops", now); err != nil {
+		t.Fatalf("a finished trade blocked the retirement: %v", err)
+	}
+}
+
+// Restoring records who reversed the withdrawal, separately from who made it.
+func TestRestoringRecordsTheOperatorWhoReversedTheWithdrawal(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if err := s.CreateAgent(ctx, testAgent("alice")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := s.RetireAgent(ctx, "alice", "withdrawn", "ops-a", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RestoreAgent(ctx, "alice", "ops-b", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := s.Retirement(ctx, "alice")
+	if err != nil || !found {
+		t.Fatalf("record found=%v err=%v", found, err)
+	}
+	if record.Actor != "ops-a" {
+		t.Errorf("actor = %q, want ops-a", record.Actor)
+	}
+	if record.RestoredBy != "ops-b" {
+		t.Errorf("restoredBy = %q, want ops-b", record.RestoredBy)
+	}
+	if record.RestoredAt == nil {
+		t.Error("restoredAt is not set although a restore happened")
 	}
 }

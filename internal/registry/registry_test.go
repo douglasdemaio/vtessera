@@ -2,12 +2,14 @@ package registry_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/agp"
+	"github.com/douglasdemaio/vtessera/internal/attest"
 	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/registry"
@@ -30,7 +32,23 @@ func newService(t *testing.T) *registry.Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return registry.New(db, mainnetMints(t))
+	return registry.New(db, mainnetMints(t), marketSigner(t))
+}
+
+// marketSigner is the marketplace's own key. Every card this registry publishes
+// is signed with it, so a test that reads a card's provenance has something to
+// verify against.
+func marketSigner(t *testing.T) *attest.SigningKey {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := attest.NewSigningKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }
 
 // mainnetMints is the governed set these tests run against. It is built from
@@ -60,7 +78,7 @@ func TestRegisterIsIdempotentAndUpdatesCard(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
 
-	created, isNew, err := svc.Register(ctx, aliceKey, card("alice"))
+	created, isNew, err := svc.Register(ctx, aliceKey, card("alice"), nil)
 	if err != nil || !isNew {
 		t.Fatalf("Register = %v, %v, want created", isNew, err)
 	}
@@ -68,7 +86,7 @@ func TestRegisterIsIdempotentAndUpdatesCard(t *testing.T) {
 		t.Errorf("status = %s, want active", created.Status)
 	}
 	updated := card("alice-renamed")
-	again, isNew, err := svc.Register(ctx, aliceKey, updated)
+	again, isNew, err := svc.Register(ctx, aliceKey, updated, nil)
 	if err != nil || isNew {
 		t.Fatalf("second Register = %v, %v, want update", isNew, err)
 	}
@@ -85,7 +103,7 @@ func TestRegisterRejectsMismatchedPublicKey(t *testing.T) {
 	svc := newService(t)
 	bad := card("alice")
 	bad.PublicKey = bobKey
-	if _, _, err := svc.Register(ctx, aliceKey, bad); err == nil {
+	if _, _, err := svc.Register(ctx, aliceKey, bad, nil); err == nil {
 		t.Fatal("want error for publicKey that does not match the authenticated agent")
 	}
 }
@@ -95,7 +113,7 @@ func TestRegisterRejectsInvalidCard(t *testing.T) {
 	svc := newService(t)
 	bad := card("alice")
 	bad.URL = "not-a-url"
-	if _, _, err := svc.Register(ctx, aliceKey, bad); err == nil {
+	if _, _, err := svc.Register(ctx, aliceKey, bad, nil); err == nil {
 		t.Fatal("want error for invalid card url")
 	}
 }
@@ -109,7 +127,7 @@ func TestPublishOfferRequiresRegisteredActiveAgent(t *testing.T) {
 		PriceAmount:     "1.50",
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, "")
+	}, "", "", nil)
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("PublishOffer err = %v, want not found for unknown agent", err)
 	}
@@ -120,7 +138,7 @@ func TestPublishOfferRejectsPriceBeyondCardCurrencies(t *testing.T) {
 	svc := newService(t)
 	withCurrencies := card("alice")
 	withCurrencies.Currencies = []string{usdc}
-	if _, _, err := svc.Register(ctx, aliceKey, withCurrencies); err != nil {
+	if _, _, err := svc.Register(ctx, aliceKey, withCurrencies, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err := svc.PublishOffer(ctx, aliceKey, registry.NewOffer{
@@ -129,7 +147,7 @@ func TestPublishOfferRejectsPriceBeyondCardCurrencies(t *testing.T) {
 		PriceAmount:     "1.00",
 		PriceMint:       "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr",
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, "")
+	}, "", "", nil)
 	if !errors.Is(err, registry.ErrCurrencyNotAccepted) {
 		t.Fatalf("err = %v, want ErrCurrencyNotAccepted", err)
 	}
@@ -138,7 +156,7 @@ func TestPublishOfferRejectsPriceBeyondCardCurrencies(t *testing.T) {
 func TestPublishOfferRejectsTooPreciseOnchainAmount(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
-	if _, _, err := svc.Register(ctx, aliceKey, card("alice")); err != nil {
+	if _, _, err := svc.Register(ctx, aliceKey, card("alice"), nil); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err := svc.PublishOffer(ctx, aliceKey, registry.NewOffer{
@@ -147,7 +165,7 @@ func TestPublishOfferRejectsTooPreciseOnchainAmount(t *testing.T) {
 		PriceAmount:     "1.000000001",
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOnchain},
-	}, "")
+	}, "", "", nil)
 	if !errors.Is(err, registry.ErrAmountTooPrecise) {
 		t.Fatalf("err = %v, want ErrAmountTooPrecise", err)
 	}
@@ -156,7 +174,7 @@ func TestPublishOfferRejectsTooPreciseOnchainAmount(t *testing.T) {
 func TestPublishOfferIdempotency(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
-	if _, _, err := svc.Register(ctx, aliceKey, card("alice")); err != nil {
+	if _, _, err := svc.Register(ctx, aliceKey, card("alice"), nil); err != nil {
 		t.Fatal(err)
 	}
 	in := registry.NewOffer{
@@ -167,11 +185,11 @@ func TestPublishOfferIdempotency(t *testing.T) {
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
 	}
-	first, isNew, err := svc.PublishOffer(ctx, aliceKey, in, "idem-1")
+	first, isNew, err := svc.PublishOffer(ctx, aliceKey, in, "idem-1", "", nil)
 	if err != nil || !isNew {
 		t.Fatalf("PublishOffer = %v, %v", isNew, err)
 	}
-	second, isNew, err := svc.PublishOffer(ctx, aliceKey, in, "idem-1")
+	second, isNew, err := svc.PublishOffer(ctx, aliceKey, in, "idem-1", "", nil)
 	if err != nil || isNew {
 		t.Fatalf("replay = %v, %v, want the same offer", isNew, err)
 	}
@@ -184,7 +202,7 @@ func TestSearchAndClose(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
 	for _, id := range []string{aliceKey, bobKey} {
-		if _, _, err := svc.Register(ctx, id, card(id)); err != nil {
+		if _, _, err := svc.Register(ctx, id, card(id), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -195,7 +213,7 @@ func TestSearchAndClose(t *testing.T) {
 		PriceAmount:     "3.00",
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, "")
+	}, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +247,7 @@ func TestAnnouncementSourceSkipsClosedAndInactive(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
 	for _, id := range []string{aliceKey, bobKey} {
-		if _, _, err := svc.Register(ctx, id, card(id)); err != nil {
+		if _, _, err := svc.Register(ctx, id, card(id), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -239,7 +257,7 @@ func TestAnnouncementSourceSkipsClosedAndInactive(t *testing.T) {
 		PriceAmount:     "3.00",
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, ""); err != nil {
+	}, "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := svc.PublishOffer(ctx, bobKey, registry.NewOffer{
@@ -248,7 +266,7 @@ func TestAnnouncementSourceSkipsClosedAndInactive(t *testing.T) {
 		PriceAmount:     "1.00",
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, ""); err != nil {
+	}, "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	announcements, err := svc.AnnouncementSource().Announcements(ctx)
@@ -286,7 +304,7 @@ func TestAnnouncementSourceRoutesToCheapestAgent(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
 	for _, id := range []string{aliceKey, bobKey} {
-		if _, _, err := svc.Register(ctx, id, card(id)); err != nil {
+		if _, _, err := svc.Register(ctx, id, card(id), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -301,7 +319,7 @@ func TestAnnouncementSourceRoutesToCheapestAgent(t *testing.T) {
 			PriceAmount:     spec.amount,
 			PriceMint:       usdc,
 			SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-		}, ""); err != nil {
+		}, "", "", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -321,7 +339,7 @@ func TestAnnouncementSourceRoutesToCheapestAgent(t *testing.T) {
 func TestAnnouncementCountStaysBounded(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
-	if _, _, err := svc.Register(ctx, aliceKey, card(aliceKey)); err != nil {
+	if _, _, err := svc.Register(ctx, aliceKey, card(aliceKey), nil); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 40; i++ {
@@ -331,7 +349,7 @@ func TestAnnouncementCountStaysBounded(t *testing.T) {
 			PriceAmount:     "1.00",
 			PriceMint:       usdc,
 			SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-		}, ""); err != nil {
+		}, "", "", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -347,7 +365,7 @@ func TestAnnouncementCountStaysBounded(t *testing.T) {
 func TestAgentReturnsRegisteredAgentOrNotFound(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
-	if _, _, err := svc.Register(ctx, aliceKey, card("alice")); err != nil {
+	if _, _, err := svc.Register(ctx, aliceKey, card("alice"), nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := svc.Agent(ctx, aliceKey)
@@ -369,9 +387,9 @@ func TestAgentsFiltersByStatusAndDefaultsToActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	svc := registry.New(db, mainnetMints(t))
+	svc := registry.New(db, mainnetMints(t), marketSigner(t))
 	for _, id := range []string{aliceKey, bobKey} {
-		if _, _, err := svc.Register(ctx, id, card(id)); err != nil {
+		if _, _, err := svc.Register(ctx, id, card(id), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -397,7 +415,7 @@ func TestAgentsFiltersByStatusAndDefaultsToActive(t *testing.T) {
 func TestOfferReturnsPublishedOfferOrNotFound(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
-	if _, _, err := svc.Register(ctx, aliceKey, card("alice")); err != nil {
+	if _, _, err := svc.Register(ctx, aliceKey, card("alice"), nil); err != nil {
 		t.Fatal(err)
 	}
 	published, _, err := svc.PublishOffer(ctx, aliceKey, registry.NewOffer{
@@ -406,7 +424,7 @@ func TestOfferReturnsPublishedOfferOrNotFound(t *testing.T) {
 		PriceAmount:     "1.00",
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, "")
+	}, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,10 +452,10 @@ func TestWithMintsGovernsOnchainPrecisionCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := registry.New(db, mints)
+	svc := registry.New(db, mints, marketSigner(t))
 	withCurrencies := card("alice")
 	withCurrencies.Currencies = []string{testMint}
-	if _, _, err := svc.Register(ctx, aliceKey, withCurrencies); err != nil {
+	if _, _, err := svc.Register(ctx, aliceKey, withCurrencies, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err = svc.PublishOffer(ctx, aliceKey, registry.NewOffer{
@@ -446,7 +464,7 @@ func TestWithMintsGovernsOnchainPrecisionCheck(t *testing.T) {
 		PriceAmount:     "1.005",
 		PriceMint:       testMint,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOnchain},
-	}, "")
+	}, "", "", nil)
 	if !errors.Is(err, registry.ErrAmountTooPrecise) {
 		t.Fatalf("PublishOffer err = %v, want ErrAmountTooPrecise for the 2-decimal test mint", err)
 	}
@@ -457,7 +475,7 @@ func TestWithMintsGovernsOnchainPrecisionCheck(t *testing.T) {
 func retirementAgent(t *testing.T, svc *registry.Service, key string) domain.Offer {
 	t.Helper()
 	ctx := context.Background()
-	if _, _, err := svc.Register(ctx, key, card("seller")); err != nil {
+	if _, _, err := svc.Register(ctx, key, card("seller"), nil); err != nil {
 		t.Fatal(err)
 	}
 	offer, _, err := svc.PublishOffer(ctx, key, registry.NewOffer{
@@ -467,7 +485,7 @@ func retirementAgent(t *testing.T, svc *registry.Service, key string) domain.Off
 		PriceAmount:     "10.00",
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, "")
+	}, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,6 +567,38 @@ func TestRetirementClosesTheListingAndIsReversible(t *testing.T) {
 	if record.RestoredAt == nil {
 		t.Error("the audit record lost the reversal")
 	}
+	if record.RestoredBy != "ops@example" {
+		t.Errorf("restoredBy = %q, want the operator who reversed it", record.RestoredBy)
+	}
+	if record.Actor != "ops@example" {
+		t.Errorf("actor = %q, want the operator who withdrew it, not the one who restored it", record.Actor)
+	}
+}
+
+// Who withdrew a listing and who put it back are usually two different operators,
+// and the record has to answer both questions. One column for both would either
+// misattribute the withdrawal or lose it.
+func TestTheRecordNamesWhomWithdrewTheListingAndWhomRestoredIt(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	retirementAgent(t, svc, aliceKey)
+
+	if _, err := svc.Retire(ctx, aliceKey, "duplicate listing", "ops-a@example"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Restore(ctx, aliceKey, "ops-b@example"); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := svc.Retirement(ctx, aliceKey)
+	if err != nil || !found {
+		t.Fatalf("record found=%v err=%v", found, err)
+	}
+	if record.Actor != "ops-a@example" {
+		t.Errorf("actor = %q, want the withdrawing operator", record.Actor)
+	}
+	if record.RestoredBy != "ops-b@example" {
+		t.Errorf("restoredBy = %q, want the restoring operator", record.RestoredBy)
+	}
 }
 
 func TestRetiringTwiceKeepsOneRecord(t *testing.T) {
@@ -608,7 +658,7 @@ func TestAReRegisteredAgentDoesNotReinstateItself(t *testing.T) {
 	// An agent updating its own card must not be a way back from a withdrawal.
 	// Otherwise retirement is revocable by the party it excludes, which would
 	// make the operator's action advisory rather than effective.
-	if _, _, err := svc.Register(ctx, aliceKey, card("alice-again")); err != nil {
+	if _, _, err := svc.Register(ctx, aliceKey, card("alice-again"), nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := svc.Agent(ctx, aliceKey)

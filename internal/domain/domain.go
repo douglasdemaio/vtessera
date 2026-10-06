@@ -57,11 +57,15 @@ func (s AgentStatus) Valid() bool {
 // was one. It is separate from Agent.Status because status says what is true now
 // and this says what was done, to whom, and why.
 type Retirement struct {
-	AgentID    string     `json:"agentId"`
-	Reason     string     `json:"reason"`
+	AgentID string `json:"agentId"`
+	Reason  string `json:"reason"`
+	// Actor is who withdrew the listing and RestoredBy is who put it back. They
+	// are separate because they are usually different operators, and one column
+	// for both would either misattribute the withdrawal or lose it.
 	Actor      string     `json:"actor"`
 	RetiredAt  time.Time  `json:"retiredAt"`
 	RestoredAt *time.Time `json:"restoredAt,omitempty"`
+	RestoredBy string     `json:"restoredBy,omitempty"`
 }
 
 type Agent struct {
@@ -82,6 +86,16 @@ type AgentCard struct {
 	Skills          []AgentSkill     `json:"skills,omitempty"`
 	Currencies      []string         `json:"currencies,omitempty"`
 	SettlementModes []SettlementMode `json:"settlementModes,omitempty"`
+	// ProbeTarget is where this marketplace may send a capability probe, and it
+	// is the agent's declaration that it wants to be probed. Empty means no: a
+	// card that does not name one is never probed, so an agent cannot have this
+	// service send traffic on its behalf by having a capability list read as a
+	// request.
+	//
+	// It is part of the card and therefore covered by both the agent's own
+	// signature and the marketplace's attestation. That is what stops a card being
+	// edited to name an address the marketplace will reach.
+	ProbeTarget string `json:"probeTarget,omitempty"`
 }
 
 type AgentSkill struct {
@@ -128,8 +142,46 @@ func (c AgentCard) validate() error {
 			return fmt.Errorf("currency: %w", err)
 		}
 	}
+	if c.ProbeTarget != "" {
+		if err := validateProbeTarget(c.ProbeTarget); err != nil {
+			return fmt.Errorf("agent card probeTarget: %w", err)
+		}
+	}
 	if len(c.Capabilities) > 64 {
 		return fmt.Errorf("agent card declares more than 64 capabilities")
+	}
+	return nil
+}
+
+// validateProbeTarget checks the shape of a declared probe endpoint at
+// registration, rather than at probe time.
+//
+// The routability of the address is decided when the probe runs, because a name
+// can resolve differently later and that is the whole of a rebinding answer. What
+// is fixed here is what cannot change: the scheme, the absence of credentials,
+// and an explicit port, so a declared target is exactly what it says.
+func validateProbeTarget(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("is not a valid URL: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("must be https, got %q", parsed.Scheme)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("must not carry credentials")
+	}
+	if parsed.Hostname() == "" {
+		return fmt.Errorf("must include a host")
+	}
+	if parsed.Port() == "" {
+		return fmt.Errorf("must name a port, so the target is unambiguous")
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		return fmt.Errorf("must name a path, so the target is unambiguous")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("must not carry a query or fragment")
 	}
 	return nil
 }

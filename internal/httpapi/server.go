@@ -6,17 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/douglasdemaio/vtessera/internal/agp"
+	"github.com/douglasdemaio/vtessera/internal/attest"
 	"github.com/douglasdemaio/vtessera/internal/auth"
 	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/ledger"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/settlement"
+	"github.com/douglasdemaio/vtessera/internal/store"
 	"github.com/douglasdemaio/vtessera/internal/tokens"
 	"github.com/douglasdemaio/vtessera/internal/trade"
 )
@@ -122,14 +125,25 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("POST /v1/admin/agents/{id}/retire", s.requireAdmin(s.handleRetireAgent))
 		s.mux.HandleFunc("POST /v1/admin/agents/{id}/restore", s.requireAdmin(s.handleRestoreAgent))
 		s.mux.HandleFunc("GET /v1/admin/agents/{id}/retirement", s.requireAdmin(s.handleGetRetirement))
+		// Running a probe makes this service send a request somewhere on an
+		// operator's say-so, which is why it is behind the token rather than the
+		// agent's own session: it spends the deployment's egress, and an agent
+		// that could trigger it at will could use this service as a way to send
+		// traffic to hosts the marketplace can reach and it cannot.
+		s.mux.HandleFunc("POST /v1/admin/agents/{id}/probe", s.requireAdmin(s.handleProbeAgent))
 	}
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	s.mux.HandleFunc("GET /v1/agents/{id}", s.handleGetAgent)
+	s.mux.HandleFunc("GET /v1/agents/{id}/attestation", s.handleGetCardAttestation)
 	s.mux.HandleFunc("PUT /v1/agents/{id}/card", s.authed(s.handlePutCard))
 	s.mux.HandleFunc("GET /v1/agents/{id}/offers", s.handleAgentOffers)
 	s.mux.HandleFunc("GET /v1/offers", s.handleSearchOffers)
 	s.mux.HandleFunc("POST /v1/agents/{id}/offers", s.authed(s.handlePublishOffer))
 	s.mux.HandleFunc("GET /v1/offers/{id}", s.handleGetOffer)
+	s.mux.HandleFunc("GET /v1/offers/{id}/attestation", s.handleGetOfferAttestation)
+	// Reading a probe result is public, the way reading an attestation is: the
+	// point of recording it is that a directory can check it without asking.
+	s.mux.HandleFunc("GET /v1/agents/{id}/capabilities", s.handleGetCapabilities)
 	s.mux.HandleFunc("POST /v1/offers/{id}/close", s.authed(s.handleCloseOffer))
 	s.mux.HandleFunc("POST /v1/trades", s.authed(s.handleCreateTrade))
 	s.mux.HandleFunc("GET /v1/trades/{id}", s.authed(s.handleGetTrade))
@@ -265,6 +279,167 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, agent)
 }
 
+// handleGetCardAttestation reports a card's provenance.
+//
+// Two signatures, two questions, and the answer keeps them apart. The marketplace
+// signature says this listing came from this deployment and has not changed since.
+// The agent signature says the agent stands behind its own claims, and it is the
+// one a reader has to look at before trusting a capability list.
+//
+// The verdicts are computed here rather than left to the reader: the service
+// holds the card and the signatures, so it is the one place that can say whether
+// they agree. A reader with all three can check them independently, and this is
+// the convenience that does not require them to.
+//
+// A card with no agent signature is reported as unsigned rather than refused, and
+// so is a card that predates attestations entirely. Every agent registered before
+// this existed has one of those two, and a 404 here would read as "no such
+// agent".
+func (s *Server) handleGetCardAttestation(w http.ResponseWriter, r *http.Request) {
+	agent, err := s.registry.Agent(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	found, hasRecord, err := s.registry.CardAttestation(r.Context(), agent.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	statement := s.registry.AttestedCard(agent.Card)
+	market := map[string]any{
+		// attested is separate from valid on purpose. A card that predates
+		// attestations has no marketplace signature to check, and reporting that
+		// as valid: false would tell a directory that this marketplace does not
+		// vouch for a card it published.
+		"attested": false,
+		"valid":    false,
+		"keyId":    s.registry.MarketplaceKeyID(),
+	}
+	agentSide := map[string]any{
+		"attested": false,
+		"valid":    false,
+		"keyId":    agent.ID,
+	}
+	payload := map[string]any{
+		"agentId":       agent.ID,
+		"marketplace":   market,
+		"agent":         agentSide,
+		"canonicalForm": attest.CanonicalForm,
+	}
+	if hasRecord {
+		market["attested"] = true
+		// Against this marketplace's own key rather than the card's: the card names
+		// the agent being described, the signature names who vouched, and checking
+		// the wrong one of those against the other would refuse every genuine
+		// marketplace attestation.
+		market["valid"] = attest.VerifyCardAttestedBy(statement, found.Market, s.registry.MarketplaceKeyID()) == nil
+		market["signature"] = found.Market
+	}
+	if found.Agent != nil {
+		agentSide["attested"] = true
+		agentSide["valid"] = attest.VerifyCard(statement, *found.Agent) == nil
+		agentSide["signature"] = *found.Agent
+	}
+	// hasRecord false means the card predates attestations: there is no row, so
+	// there is nothing to verify and nothing to claim. Reported rather than
+	// refused, because a 404 here would say the agent does not exist.
+	payload["recorded"] = hasRecord
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// handleGetOfferAttestation reports whether a stored offer signature verifies
+// against the offer as it currently stands.
+//
+// The interesting case is a signature that is present and no longer valid, which
+// means the offer changed after it was signed. That is reported as valid: false
+// rather than as a missing signature, because the two mean different things to a
+// buyer and only one of them is a warning.
+func (s *Server) handleGetOfferAttestation(w http.ResponseWriter, r *http.Request) {
+	offer, err := s.registry.Offer(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	sig, verified := s.registry.VerifyOfferAttestation(r.Context(), offer)
+	payload := map[string]any{
+		"offerId": offer.ID,
+		"seller":  offer.AgentID,
+		"signed":  sig.Value != "",
+		"valid":   verified,
+	}
+	if sig.Value != "" {
+		payload["signature"] = sig
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// handleGetCapabilities returns an agent's last recorded capability probe.
+//
+// An agent that has never been probed is a 404 with a different code from an agent
+// that does not exist, because they are different facts and a directory reading
+// this is deciding whether a capability list has been checked. Absence of a probe
+// is not a failure and is not reported as one.
+func (s *Server) handleGetCapabilities(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	report, found, err := s.registry.ProbeResult(r.Context(), agentID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !found {
+		if _, err := s.registry.Agent(r.Context(), agentID); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeErrorStatus(w, http.StatusNotFound, "NOT_PROBED",
+			"this agent has never been probed")
+		return
+	}
+	valid := s.registry.VerifyProbe(report) == nil
+	payload := map[string]any{
+		"agentId":   report.AgentID,
+		"target":    report.Target,
+		"results":   report.Results,
+		"passed":    report.Passed(),
+		"valid":     valid,
+		"checkedAt": report.CheckedAt,
+	}
+	if report.Signature != nil {
+		payload["signature"] = *report.Signature
+		payload["attestedBy"] = report.Signature.KeyID
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// handleProbeAgent runs a capability probe against one agent's declared endpoint.
+//
+// It answers 200 with the report whether or not the probe passed, because a probe
+// that ran and failed is the most useful answer this route can give. A probe that
+// could not run at all is an error, and the error says why: no declared target,
+// no longer active, or a target that is not permitted.
+func (s *Server) handleProbeAgent(w http.ResponseWriter, r *http.Request) {
+	report, err := s.registry.ProbeCapabilities(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	valid := s.registry.VerifyProbe(report) == nil
+	payload := map[string]any{
+		"agentId":   report.AgentID,
+		"target":    report.Target,
+		"results":   report.Results,
+		"passed":    report.Passed(),
+		"valid":     valid,
+		"checkedAt": report.CheckedAt,
+	}
+	if report.Signature != nil {
+		payload["signature"] = *report.Signature
+		payload["attestedBy"] = report.Signature.KeyID
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
 // requireOwnAgent refuses a write that names an agent in the path other than the
 // one that authenticated.
 //
@@ -293,20 +468,66 @@ func (s *Server) handlePutCard(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var card domain.AgentCard
-	if !decode(w, r, &card) {
+	card, sig, ok := decodePutCard(w, r)
+	if !ok {
 		return
 	}
 	// The session, not the path, decides who is being written. requireOwnAgent
 	// has already refused a mismatch, so these are the same value; passing the
 	// session means a future caller that forgets the check writes to itself
 	// rather than to somebody else.
-	agent, _, err := s.registry.Register(r.Context(), agentID, card)
+	agent, _, err := s.registry.Register(r.Context(), agentID, card, sig)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, agent)
+}
+
+// decodePutCard reads a card and an optional signature from either body shape:
+// wrapped under "card", or the bare card every agent already sends.
+//
+// A wrapped body is read into both fields at once so a signature and the card it
+// covers are validated as a pair. A bare body is decoded straight into a card,
+// which leaves the signature nil.
+func decodePutCard(w http.ResponseWriter, r *http.Request) (domain.AgentCard, *attest.Signature, bool) {
+	body, ok := readBody(w, r)
+	if !ok {
+		return domain.AgentCard{}, nil, false
+	}
+	var envelope cardEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON body: "+err.Error())
+		return domain.AgentCard{}, nil, false
+	}
+	if envelope.Card == nil {
+		var card domain.AgentCard
+		if err := json.Unmarshal(body, &card); err != nil {
+			writeErrorStatus(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON body: "+err.Error())
+			return domain.AgentCard{}, nil, false
+		}
+		return card, nil, true
+	}
+	var req putCardRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON body: "+err.Error())
+		return domain.AgentCard{}, nil, false
+	}
+	return req.Card, req.Attestation, true
+}
+
+// readBody reads a body under the same size limit every other route applies.
+//
+// Reading by hand rather than through a decoder is a cost of accepting two
+// shapes, and the limit is what keeps that cost from becoming a way to make the
+// service allocate without bound.
+func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	if err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, "INVALID_REQUEST", "request body is too large")
+		return nil, false
+	}
+	return body, true
 }
 
 func (s *Server) handleAgentOffers(w http.ResponseWriter, r *http.Request) {
@@ -351,6 +572,33 @@ func (s *Server) handleGetOffer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, offer)
 }
 
+// putCardRequest carries a card and the agent's signature over it.
+//
+// It is one of two accepted body shapes, and the other is the bare card, because
+// every agent written before attestations existed sends a bare card and the smoke
+// script is one of them. Requiring the wrapper would turn the addition of an
+// optional field into a 400 for the entire existing population, which is not a
+// break anyone was warned about in advance.
+//
+// A bare card carries no signature, which is exactly what it says: an agent that
+// does not sign is not a broken agent, it is an agent whose claims nobody but the
+// marketplace has vouched for. handlePutCard decides which shape arrived.
+type putCardRequest struct {
+	Card        domain.AgentCard  `json:"card"`
+	Attestation *attest.Signature `json:"attestation"`
+}
+
+// cardEnvelope tells a wrapped body from a bare one without guessing from field
+// contents.
+//
+// The discriminator is whether "card" is present as a key, not whether some field
+// happens to be non-empty. A bare card always carries a name, so key presence is
+// the only signal that cannot be produced by a card with an empty description and
+// no capabilities.
+type cardEnvelope struct {
+	Card *json.RawMessage `json:"card"`
+}
+
 type publishOfferRequest struct {
 	Direction       string   `json:"direction"`
 	Description     string   `json:"description"`
@@ -359,6 +607,14 @@ type publishOfferRequest struct {
 	PriceMint       string   `json:"priceMint"`
 	SettlementModes []string `json:"settlementModes"`
 	IdempotencyKey  string   `json:"idempotencyKey"`
+	// OfferID lets the seller name the offer it is signing. A signature covers
+	// the offer ID, so a seller that wants to publish signed terms has to know
+	// the ID before the offer exists. Omit it and the service assigns one, as it
+	// always has.
+	OfferID string `json:"offerId"`
+	// Attestation is the seller's detached signature over the offer's terms. It is
+	// verified against the stored content before the offer is saved.
+	Attestation *attest.Signature `json:"attestation"`
 }
 
 func (s *Server) handlePublishOffer(w http.ResponseWriter, r *http.Request) {
@@ -377,7 +633,7 @@ func (s *Server) handlePublishOffer(w http.ResponseWriter, r *http.Request) {
 		PriceAmount:     req.PriceAmount,
 		PriceMint:       req.PriceMint,
 		SettlementModes: toModes(req.SettlementModes),
-	}, req.IdempotencyKey)
+	}, req.IdempotencyKey, req.OfferID, req.Attestation)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -729,6 +985,19 @@ func (s *Server) handleRetireAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	agent, err := s.registry.Retire(r.Context(), id, body.Reason, adminActor(r))
 	if err != nil {
+		// A refusal while trades are live names them. The operator holding this
+		// refusal is the one who can clear it, and a count alone does not tell them
+		// which trades to settle, dispute or expire.
+		var live *store.LiveTradesError
+		if errors.As(err, &live) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":        err.Error(),
+				"code":         "AGENT_HAS_LIVE_TRADES",
+				"agentId":      live.AgentID,
+				"liveTradeIds": live.TradeIDs,
+			})
+			return
+		}
 		writeError(w, err)
 		return
 	}
@@ -865,9 +1134,12 @@ var statusByError = []struct {
 	// about the trade, so retrying unchanged will keep failing until time passes.
 	{trade.ErrNotExpiredYet, http.StatusConflict, "TRADE_NOT_EXPIRED"},
 	{trade.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
+	{registry.ErrOfferAttestationRequired, http.StatusConflict, "OFFER_ATTESTATION_REQUIRED"},
+	{registry.ErrNoProbeTarget, http.StatusConflict, "NO_PROBE_TARGET"},
 	{registry.ErrMintUnpriced, http.StatusConflict, "MINT_UNPRICED"},
 	{registry.ErrAgentHasLiveTrades, http.StatusConflict, "AGENT_HAS_LIVE_TRADES"},
 	{registry.ErrRetirementReasonRequired, http.StatusBadRequest, "REASON_REQUIRED"},
+	{registry.ErrAttestationRefused, http.StatusBadRequest, "ATTESTATION_REFUSED"},
 	{ledger.ErrNotSettled, http.StatusConflict, "INVALID_REQUEST"},
 	{ledger.ErrAlreadyIssued, http.StatusConflict, "ALREADY_ISSUED"},
 }

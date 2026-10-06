@@ -91,15 +91,115 @@ var migrations = []migration{
 			// answer to "who took this seller's listing and why", which the agents
 			// table alone cannot give: status says that it happened, not who or
 			// on what grounds.
+			// restored_actor is recorded separately from actor because the two are
+			// different people on the common case: the operator who withdrew a
+			// listing and the operator who put it back. One column for both would
+			// mean either that a restore left the retirement looking retired by the
+			// person who undid it, or that restoring overwrote who withdrew it.
 			_, err := tx.ExecContext(ctx,
 				`CREATE TABLE IF NOT EXISTS agent_retirements (
-					agent_id    TEXT PRIMARY KEY REFERENCES agents (id),
-					reason      TEXT NOT NULL,
-					actor       TEXT NOT NULL,
-					retired_at  INTEGER NOT NULL,
-					restored_at INTEGER
+					agent_id       TEXT PRIMARY KEY REFERENCES agents (id),
+					reason         TEXT NOT NULL,
+					actor          TEXT NOT NULL,
+					retired_at     INTEGER NOT NULL,
+					restored_at    INTEGER,
+					restored_actor TEXT
 				)`)
 			return err
+		},
+	},
+	{
+		version: 4,
+		name:    "agent_attestations",
+		apply: func(ctx context.Context, tx *sql.Tx) error {
+			// An agent's card and its offers are self-describing: until now
+			// nothing proved who was behind a listing. This table holds detached
+			// Ed25519 signatures over a canonical encoding of the content itself,
+			// which a third party can verify with no call to this service at all.
+			//
+			// There are two signatures and they answer different questions.
+			// market_signature is the marketplace's own, over the card it just
+			// accepted: it says this listing came from this deployment and has not
+			// changed since, which is what a directory needs in order to say which
+			// marketplace vouched for a card. card_signature is the agent's,
+			// saying the agent itself stands behind its own claims — a capability
+			// list is a promise only the agent can make, and the marketplace
+			// signing it would say nothing except that the marketplace stored it.
+			//
+			// card_signature is nullable and is absent for every agent registered
+			// before this migration. An unsigned card is not an invalid card, so
+			// nothing here refuses to start: the column answers whether the agent's
+			// own attestation exists, and a verifier decides what an absent one
+			// means. market_signature is NOT nullable, because a card on this
+			// service that the marketplace did not attest is not a card this
+			// marketplace published.
+			//
+			// The signed bytes are a canonical encoding, not the JSON stored in
+			// card, so these columns cannot be a substitute for the content and
+			// rewriting the JSON without re-signing leaves the pair disagreeing
+			// visibly rather than silently.
+			_, err := tx.ExecContext(ctx,
+				`CREATE TABLE IF NOT EXISTS agent_attestations (
+					agent_id         TEXT PRIMARY KEY REFERENCES agents (id),
+					card_signature   TEXT,
+					card_signed_at   INTEGER,
+					market_signature TEXT NOT NULL,
+					updated_at       INTEGER NOT NULL
+				)`)
+			if err != nil {
+				return err
+			}
+			// An offer's terms are a promise to a buyer, so the seller signs them
+			// and the signature travels with the offer row. One agent has many
+			// offers, so this is keyed per offer and the agent is a lookup column.
+			// There is no marketplace column here: the service does not speak for
+			// what a seller charges.
+			//
+			// ON DELETE CASCADE cannot fire on this table as written: nothing
+			// deletes an offer. It is here because the foreign key is the honest
+			// description of the relationship, and SQLite only enforces it when
+			// declared.
+			_, err = tx.ExecContext(ctx,
+				`CREATE TABLE IF NOT EXISTS offer_attestations (
+					offer_id       TEXT PRIMARY KEY REFERENCES offers (id),
+					agent_id       TEXT NOT NULL REFERENCES agents (id),
+					signature      TEXT NOT NULL,
+					signed_at      INTEGER NOT NULL
+				)`)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx,
+				`CREATE INDEX IF NOT EXISTS offer_attestations_agent
+				 ON offer_attestations (agent_id)`)
+			return err
+		},
+	},
+	{
+		version: 5,
+		name:    "capability_probes",
+		apply: func(ctx context.Context, tx *sql.Tx) error {
+			// One row per agent per probe, holding the last observation rather than
+			// the history. A probe answers "does this agent still do what it says",
+			// and a directory that can be shown any older answer is being offered a
+			// claim about when the agent was last checked, which is not the question.
+			// The signed_at column is when the marketplace attested this result, so
+			// a stale row is visible as a stale row.
+			_, err := tx.ExecContext(ctx,
+				`CREATE TABLE IF NOT EXISTS capability_probes (
+					agent_id        TEXT PRIMARY KEY REFERENCES agents (id),
+					target          TEXT NOT NULL,
+					results         TEXT NOT NULL,
+					passed          INTEGER NOT NULL,
+					signature       TEXT NOT NULL,
+					signed_at       INTEGER NOT NULL,
+					checked_at      INTEGER NOT NULL,
+					updated_at      INTEGER NOT NULL
+				)`)
+			if err != nil {
+				return err
+			}
+			return nil
 		},
 	},
 }

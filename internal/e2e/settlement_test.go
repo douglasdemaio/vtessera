@@ -255,7 +255,13 @@ func newMarketWithBank(t *testing.T, mint solana.PublicKey, policy fees.Policy, 
 		t.Fatal(err)
 	}
 	led := ledger.New(db, signer)
-	registrySvc := registry.New(db, mints)
+	// The marketplace attests cards with the ledger key, as main does, so a run
+	// against a validator exercises the same wiring the service ships with.
+	marketSigner, err := signer.AttestationSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrySvc := registry.New(db, mints, marketSigner)
 	rpcURL := testRPCURL()
 	client := settlement.NewRPCClient(rpcURL)
 	trades := trade.New(db, db, db, led).WithSettlement(trade.SettlementDeps{

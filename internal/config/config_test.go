@@ -438,3 +438,102 @@ func TestTheExpirySweepMustRun(t *testing.T) {
 		t.Errorf("error = %v, want it to name trade-expiry-sweep-interval", err)
 	}
 }
+
+// The requirement is the operator's to declare, so it is off unless they say so.
+// Turning it on by default would answer every agent that predates attestations
+// with a 409 the moment it deployed, which is a migration nobody asked for.
+func TestOfferAttestationIsNotRequiredUnlessAnOperatorDeclaresIt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("VTESSERA_REQUIRE_OFFER_ATTESTATION", "")
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RequireOfferAttestation {
+		t.Error("offer attestation is required without an operator asking for it")
+	}
+}
+
+// Both spellings are accepted, because a deployment's settings arrive as secrets
+// on the live host and as flags elsewhere, and only one of them working would
+// leave an operator believing they had enforced something.
+func TestOfferAttestationIsRequiredWhenDeclaredByFlagOrEnvironment(t *testing.T) {
+	t.Setenv("VTESSERA_REQUIRE_OFFER_ATTESTATION", "")
+	dir := t.TempDir()
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db"), "--require-offer-attestation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.RequireOfferAttestation {
+		t.Error("--require-offer-attestation did not take effect")
+	}
+
+	t.Setenv("VTESSERA_REQUIRE_OFFER_ATTESTATION", "1")
+	cfg, err = Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "d.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.RequireOfferAttestation {
+		t.Error("VTESSERA_REQUIRE_OFFER_ATTESTATION=1 did not take effect")
+	}
+}
+
+// A probe that could hang forever would hold a connection this service opened, so
+// the timeout and the body cap are bounded values and a mistyped one is refused at
+// boot rather than discovered on the first unreachable agent.
+func TestProbeLimitsAreBoundedAndMistypedOnesAreRefusedAtBoot(t *testing.T) {
+	t.Setenv("VTESSERA_PROBE_TIMEOUT", "")
+	t.Setenv("VTESSERA_PROBE_MAX_RESPONSE_BYTES", "")
+	dir := t.TempDir()
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProbeTimeout <= 0 || cfg.ProbeTimeout > time.Minute {
+		t.Errorf("probe timeout = %s, want a short positive default", cfg.ProbeTimeout)
+	}
+	if cfg.ProbeMaxResponseBytes <= 0 {
+		t.Errorf("probe max response bytes = %d, want a positive default", cfg.ProbeMaxResponseBytes)
+	}
+
+	if _, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "d.db"),
+		"--probe-timeout", "not-a-duration"}); err == nil {
+		t.Error("a probe timeout that is not a duration was accepted")
+	}
+	if _, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "e.db"),
+		"--probe-timeout", "0s"}); err == nil {
+		t.Error("a probe timeout of zero was accepted, which would abandon every probe immediately")
+	}
+	if _, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "f.db"),
+		"--probe-max-response-bytes", "0"}); err == nil {
+		t.Error("a zero response cap was accepted")
+	}
+	t.Setenv("VTESSERA_PROBE_TIMEOUT", "nonsense")
+	if _, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "g.db")}); err == nil {
+		t.Error("a mistyped VTESSERA_PROBE_TIMEOUT was accepted")
+	}
+	t.Setenv("VTESSERA_PROBE_TIMEOUT", "")
+	t.Setenv("VTESSERA_PROBE_MAX_RESPONSE_BYTES", "not-a-number")
+	if _, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "h.db")}); err == nil {
+		t.Error("a mistyped VTESSERA_PROBE_MAX_RESPONSE_BYTES was accepted")
+	}
+}
+
+// The declared limits are what the runner is built with, so an operator's setting
+// reaches the request rather than only the config struct.
+func TestDeclaredProbeLimitsReachTheConfiguration(t *testing.T) {
+	t.Setenv("VTESSERA_PROBE_TIMEOUT", "")
+	t.Setenv("VTESSERA_PROBE_MAX_RESPONSE_BYTES", "")
+	dir := t.TempDir()
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db"),
+		"--probe-timeout", "2s", "--probe-max-response-bytes", "4096"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProbeTimeout != 2*time.Second {
+		t.Errorf("probe timeout = %s, want 2s", cfg.ProbeTimeout)
+	}
+	if cfg.ProbeMaxResponseBytes != 4096 {
+		t.Errorf("probe max response bytes = %d, want 4096", cfg.ProbeMaxResponseBytes)
+	}
+}
