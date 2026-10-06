@@ -291,7 +291,7 @@ func TestOnchainTradeRefusesAnUngovernedMint(t *testing.T) {
 	h, deps := onchainHarness(t)
 	h.svc.WithSettlement(*deps)
 	// A valid Solana address that the service does not govern.
-	offer, _, err := h.registry.PublishOffer(ctx, sellerKey, registryOffer(t, outsider), "")
+	offer, _, err := h.registry.PublishOffer(ctx, sellerKey, registryOffer(t, outsider), "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

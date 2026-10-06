@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/douglasdemaio/vtessera/internal/attest"
 	"github.com/mr-tron/base58"
 )
 
@@ -82,4 +83,17 @@ func EntryHash(seq int64, prevHash, payloadHash string) string {
 func PayloadHash(payload []byte) string {
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
+}
+
+// AttestationSigner returns this ledger's key as an attest.SigningKey.
+//
+// It is the same key that issues receipts, deliberately: a marketplace with one
+// signing identity has one thing to protect and one thing to rotate, and the
+// alternative — a second key for listings — would add an identity without
+// removing the one that matters. The verification key in /healthz is therefore
+// the key a reader needs to check a card this marketplace published, which is
+// also the key a buyer needs to check a receipt. Blasting that radius is a real
+// cost and is recorded in the threat model rather than hidden here.
+func (s *Signer) AttestationSigner() (*attest.SigningKey, error) {
+	return attest.NewSigningKey(s.private)
 }

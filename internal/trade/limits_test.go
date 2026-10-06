@@ -52,9 +52,9 @@ func capSetup(t *testing.T, adjust func(limits.Policy) limits.Policy) harness {
 	if err := policy.Validate(); err != nil {
 		t.Fatalf("cap policy: %v", err)
 	}
-	registrySvc := registry.New(db, mints, registry.WithPricer(policy))
+	registrySvc := registry.New(db, mints, marketSigner(t), registry.WithPricer(policy))
 	for _, id := range []string{buyerKey, sellerKey, outsider} {
-		if _, _, err := registrySvc.Register(ctx, id, card(id)); err != nil {
+		if _, _, err := registrySvc.Register(ctx, id, card(id), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -80,7 +80,7 @@ func offerFor(t *testing.T, h harness, amount string) string {
 		PriceAmount:     amount,
 		PriceMint:       usdc,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, "")
+	}, "", "", nil)
 	if err != nil {
 		t.Fatalf("publish offer at %s: %v", amount, err)
 	}
@@ -259,7 +259,7 @@ func TestAnUnpricedCurrencyIsRefusedRatherThanTradedUncapped(t *testing.T) {
 		PriceAmount:     "1.00",
 		PriceMint:       unpricedMint,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, ""); !errors.Is(err, registry.ErrMintUnpriced) {
+	}, "", "", nil); !errors.Is(err, registry.ErrMintUnpriced) {
 		t.Fatalf("publishing an offer in an unpriced mint = %v, want registry.ErrMintUnpriced", err)
 	}
 
@@ -270,7 +270,7 @@ func TestAnUnpricedCurrencyIsRefusedRatherThanTradedUncapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := registry.New(h.db, mints)
+	legacy := registry.New(h.db, mints, marketSigner(t))
 	offer, _, err := legacy.PublishOffer(ctx, sellerKey, registry.NewOffer{
 		Direction:       domain.DirectionAsk,
 		Description:     "published before caps existed",
@@ -278,7 +278,7 @@ func TestAnUnpricedCurrencyIsRefusedRatherThanTradedUncapped(t *testing.T) {
 		PriceAmount:     "1000000.00",
 		PriceMint:       unpricedMint,
 		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
-	}, "")
+	}, "", "", nil)
 	if err != nil {
 		t.Fatalf("publish through an unpriced registry: %v", err)
 	}

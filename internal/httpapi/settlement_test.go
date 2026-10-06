@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/attest"
 	"github.com/douglasdemaio/vtessera/internal/auth"
 	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
@@ -78,6 +79,17 @@ func (c *stubChain) Transaction(context.Context, solana.Signature) (settlement.F
 
 // settlementSetup builds a server whose trade service settles on chain, so the
 // HTTP contract can be exercised without a validator.
+// mustAttestSigner derives the marketplace's attestation key from the ledger's,
+// as main does, so a test reading /healthz finds the key that signed the cards.
+func mustAttestSigner(t *testing.T, signer *ledger.Signer) *attest.SigningKey {
+	t.Helper()
+	key, err := signer.AttestationSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
 func settlementSetup(t *testing.T, verifier stubVerifier, chain *stubChain) (*httptest.Server, *ledger.Ledger) {
 	t.Helper()
 	ctx := context.Background()
@@ -122,7 +134,7 @@ func settlementSetup(t *testing.T, verifier stubVerifier, chain *stubChain) (*ht
 		Sleep:     func(context.Context, time.Duration) error { return nil },
 	})
 	server := httptest.NewServer(httpapi.New(httpapi.Options{
-		Registry:    registry.New(db, mints),
+		Registry:    registry.New(db, mints, mustAttestSigner(t, signer)),
 		Trades:      trades,
 		Auth:        authSvc,
 		Ledger:      led,

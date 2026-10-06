@@ -81,13 +81,18 @@ func setupSandboxServer(t *testing.T) (*httptest.Server, *ledger.Ledger) {
 }
 
 type serverBuild struct {
-	publicBaseURL string
-	unconfigured  bool
-	policy        *limits.Policy
-	sandbox       bool
-	acceptTTL     time.Duration
-	clock         func() time.Time
-	adminToken    string
+	publicBaseURL   string
+	unconfigured    bool
+	policy          *limits.Policy
+	sandbox         bool
+	acceptTTL       time.Duration
+	clock           func() time.Time
+	adminToken      string
+	requireOfferSig bool
+	// prober is the probe runner the harness installs. It is a field rather than a
+	// real runner so that a route test asserts what the route does with a result
+	// and never opens a socket.
+	prober registry.Prober
 }
 
 func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Ledger) {
@@ -114,6 +119,13 @@ func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Led
 		t.Fatal(err)
 	}
 	led := ledger.New(db, signer)
+	// The marketplace's attestation key is the ledger's key, as it is in main, so
+	// the harness reproduces the property the test depends on: the key a reader
+	// reads from /healthz is the key that signed the card.
+	marketKey, err := signer.AttestationSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
 	// An offer priced on chain is checked for precision against a governed scale,
 	// so the default harness governs mainnet mints even though it never settles.
 	// A test that needs the settlement-unconfigured routes asks for it explicitly.
@@ -126,11 +138,14 @@ func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Led
 		}
 		opts.Cluster = cluster.MainnetBeta
 	}
+	registryOpts := []registry.Option{registry.WithRequiredOfferAttestation(build.requireOfferSig)}
 	if policy != nil {
-		opts.Registry = registry.New(db, mints, registry.WithPricer(*policy))
-	} else {
-		opts.Registry = registry.New(db, mints)
+		registryOpts = append(registryOpts, registry.WithPricer(*policy))
 	}
+	if build.prober != nil {
+		registryOpts = append(registryOpts, registry.WithProbeRunner(build.prober))
+	}
+	opts.Registry = registry.New(db, mints, marketKey, registryOpts...)
 	trades := trade.New(db, db, db, led)
 	if policy != nil {
 		trades = trades.WithLimits(*policy, db)
@@ -191,7 +206,11 @@ func (c *agentClient) card(card domain.AgentCard) {
 	if len(card.Currencies) == 0 {
 		card.Currencies = []string{usdc, eurc}
 	}
-	body := c.do(http.MethodPut, "/v1/agents/"+url.PathEscape(c.id)+"/card", card, true)
+	// Wrapped rather than sent bare: the route takes the card and an optional
+	// signature together, so signing is a field on the request rather than a
+	// second call that could be forgotten.
+	body := c.do(http.MethodPut, "/v1/agents/"+url.PathEscape(c.id)+"/card",
+		map[string]any{"card": card}, true)
 	if body == nil {
 		c.t.Fatal("card registration failed")
 	}
@@ -939,9 +958,11 @@ func TestInvalidCardIsABadRequestNotAServerError(t *testing.T) {
 
 	// url is omitempty, so omitting it looks optional in the schema while
 	// validation rejects it. That mismatch cost a real agent a 500.
-	status, body := client.raw(http.MethodPut, "/v1/agents/"+url.PathEscape(agentID)+"/card", domain.AgentCard{
-		Name:      "trader",
-		PublicKey: agentID,
+	status, body := client.raw(http.MethodPut, "/v1/agents/"+url.PathEscape(agentID)+"/card", map[string]any{
+		"card": domain.AgentCard{
+			Name:      "trader",
+			PublicKey: agentID,
+		},
 	}, true)
 	if status != http.StatusBadRequest {
 		t.Fatalf("card with no url = %d, want 400: %s", status, body)

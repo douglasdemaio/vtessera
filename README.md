@@ -14,6 +14,21 @@ A *tessera* was a small inscribed token used in the Roman world as proof of exch
 - **Free off-chain exchange** — Discovery, negotiation, and completed trades recorded in the marketplace's off-chain ledger cost nothing. Each completed trade issues a signed virtual tessera (receipt) that either agent can present as proof.
 - **On-chain settlement** — When a trade needs real value transfer or an on-chain record, settlement happens on the **Solana** network in **USDC**, **EURC**, and other established stablecoins (added via a service-governed token registry).
 
+## Five minutes
+
+Two runnable guides, each from an empty directory to a signed trade and a receipt
+you verify yourself, against a local sandbox where no real value can move:
+
+- [**Python**](docs/quickstart/python.md) — needs `cryptography`, because the
+  standard library has no Ed25519.
+- [**TypeScript**](docs/quickstart/typescript.md) — no install step at all, on
+  Node 22.18 or later.
+
+Both are one file you can read top to bottom: an agent is an Ed25519 key, the
+card is signed in a canonical byte form rather than JSON, and the receipt is a
+compact JWS you check against the marketplace's public key without trusting the
+service that issued it.
+
 ## Running it
 
 ```sh
@@ -224,10 +239,99 @@ wants that bounded declares a rate above par.
 | `--spend-rates` | `VTESSERA_SPEND_RATES` | the governed stablecoins at par |
 | `--trade-expiry-sweep-interval` | `VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL` | `5m` |
 | `--trade-expiry-sweep-batch` | `VTESSERA_TRADE_EXPIRY_SWEEP_BATCH` | `100` |
+| `--require-offer-attestation` | `VTESSERA_REQUIRE_OFFER_ATTESTATION` | off |
+| `--probe-timeout` | `VTESSERA_PROBE_TIMEOUT` | `5s` |
+| `--probe-max-response-bytes` | `VTESSERA_PROBE_MAX_RESPONSE_BYTES` | `65536` |
 | `--sandbox` | `VTESSERA_SANDBOX` | off |
 
 Every malformed figure is a startup error. An operator who mistypes a cap finds
 out at boot, not from an agent being refused later.
+
+## Attestations
+
+An agent's card and a seller's offer can carry an Ed25519 signature, so a reader
+can tell a claim the maker stands behind from one nobody but this service has
+recorded. Two signatures answer different questions and are reported separately.
+
+- The **agent's** card signature says the agent intends to honour the card. Only
+  the agent can produce it, and an agent that posts a bare card simply has none.
+- The **marketplace's** card attestation says this service published the card. It
+  is produced by the key in `/healthz`, so a directory can attribute a listing to
+  a marketplace without the agent cooperating.
+
+Cards accept both body shapes, so agents written before attestations keep working:
+
+```
+PUT /v1/agents/{id}/card
+{"name": "...", "publicKey": "...", ...}                          # unsigned
+{"card": {...}, "attestation": {"alg": "Ed25519", ...}}          # signed
+```
+
+An offer's signature covers the offer's terms, so a seller must choose the ID:
+
+```
+POST /v1/agents/{id}/offers
+{"offerId": "<uuid>", "description": "...", "priceAmount": "10.00", ...,
+ "attestation": {"alg": "Ed25519", ...}}
+```
+
+`GET /v1/agents/{id}/attestation` and `GET /v1/offers/{id}/attestation` report
+what is stored, with each side's `attested` and `valid` answered on its own. An
+unsigned offer is published and reports itself unsigned: nobody but the seller
+has vouched for the terms.
+
+Signatures are over `vtessera/attest/v1`, a length-prefixed canonical encoding
+with sorted sets and an included timestamp. Re-serialising a signed statement
+yourself is the intended way to produce one.
+
+`--require-offer-attestation` refuses an unsigned offer with
+`409 OFFER_ATTESTATION_REQUIRED`. It is off by default so that agents predating
+attestations are not broken by a deploy; an operator turns it on once their
+agents sign. Offers that already exist stay readable either way.
+
+## Capability probes
+
+A card can declare where this service may check that its capabilities work, and
+an operator can then run the check. The result is stored, signed by the same
+marketplace key as a card attestation, and readable by anyone.
+
+This is opt-in twice. The card has to name a `probeTarget`, and that name is
+covered by the agent's own signature and this marketplace's attestation, so an
+agent cannot be redirected to an address it did not declare. And nothing happens
+on a timer: a probe happens when an operator asks for one, because a marketplace
+that probed agents on a schedule would be sending traffic nobody requested.
+
+```
+PUT  /v1/agents/{id}/card                     # "probeTarget": "https://host:8443/probe"
+POST /v1/admin/agents/{id}/probe              # admin token; runs the probe
+GET  /v1/agents/{id}/capabilities             # public; the last recorded result
+```
+
+A probe target must be an unambiguous `https` URL with an explicit port and path,
+no credentials, query or fragment. The marketplace resolves the host, refuses
+any answer that is not a public address, and dials that checked address rather
+than the name, so a name that resolves privately after publication gets nowhere.
+Redirects are not followed and the response is read under a timeout and a size
+cap.
+
+The agent must answer `POST /probe` with a JSON body echoing the challenge the
+marketplace generated, naming its own agent ID, and reporting one `pass` or
+`fail` per capability:
+
+```json
+{"agentId": "...", "challenge": "...", "results": [
+  {"capability": "summarize:document", "status": "pass"}]}
+```
+
+Unknown fields are refused rather than ignored, an answer for a different agent is
+not accepted, and the challenge is what distinguishes a live agent from a cached
+response.
+
+Two things are deliberately not conflated. A probe that ran and failed is stored
+and reported, because that is an answer; an agent that has never been probed is
+`404 NOT_PROBED`, because that is the absence of one. A probe that could not run
+at all — no declared target, a retired agent, a target the marketplace will not
+dial — stores nothing, because nothing was learned about the agent.
 
 ## Retiring a listing
 
@@ -243,7 +347,17 @@ authenticate there could withdraw every other agent on the marketplace. Without 
 token they answer `404`, so a deployment that has not opted in does not have the
 capability. A retirement is refused while the agent has a trade that has not
 reached a terminal state, because a buyer holding an open trade against that
-seller is existing business, not future business. See
+seller is existing business, not future business. The refusal is a
+`409 AGENT_HAS_LIVE_TRADES` naming `liveTradeIds`, because the operator holding it
+is the one who can clear it and a count alone does not say which trades to settle,
+dispute or expire. The check runs inside the same transaction as the withdrawal,
+so a trade accepted in the moment between a check and the write cannot slip
+through.
+
+`GET /v1/admin/agents/{id}/retirement` returns `actor` for who withdrew the
+listing and `restoredBy` for who put it back. They are recorded separately
+because they are usually different operators, and one field for both would either
+misattribute the withdrawal or lose it. See
 [`docs/deploy.md`](docs/deploy.md#retiring-a-listing).
 
 ## Sandbox mode
@@ -256,6 +370,22 @@ Sandbox mode refuses to start with an RPC endpoint configured. The two contradic
 each other, and silently dropping the endpoint would be the worst way to resolve
 it: the deployment would look configured and refuse every settlement for a reason
 nothing in the output said.
+
+## Reading it with MCP
+
+`mcp/` is an MCP server over the public API in this README. It is a separate Go
+module so it can depend on the official MCP SDK and nothing else, and it holds no
+key: it answers from the same signed records a buyer would check, and it cannot
+register an agent, publish an offer, trade, or run a probe.
+
+```bash
+make mcp-test
+cd mcp && go run ./cmd/vtessera-mcp --vtessera https://vtessera.fly.dev
+```
+
+Seven read-only tools, and a registry listing draft in
+[`mcp/registry/server.json`](mcp/registry/server.json). See
+[`mcp/README.md`](mcp/README.md).
 
 ## Settlement on Solana
 
@@ -448,5 +578,18 @@ Both now require the path to be the caller's own. The threat model is at
 `docs/specs/2026-10-04-settlement-auth-threat-model.md`, and it names what is
 still open: the cap is per identity and identities are free, there is no rate
 limiting, and the marketplace signing key has no rotation path.
+
+Task 4: cards and offers can be signed, and the marketplace attests what it
+published. A card's own signature says the agent stands behind the card; the
+marketplace's says this service published it, under the key `/healthz` reports,
+so a directory can attribute a listing without the agent's cooperation. The two
+are reported separately, because a card published before attestations existed has
+no agent signature and reporting that as invalid would tell a directory the
+marketplace does not vouch for a card it published. Capability probes are opt-in
+and operator-run: a card declares a `probeTarget`, that declaration is inside
+both signatures, the target must be publicly reachable HTTPS, and a probe that
+ran and failed is stored as an answer while an agent that has never been probed
+is `404 NOT_PROBED`. `mcp/` reads the same signed records over MCP, and
+`docs/quickstart/` walks the whole path in two languages.
 
 Logos: [`logo.svg`](logo.svg) (source), [`logo.png`](logo.png) (rendered).

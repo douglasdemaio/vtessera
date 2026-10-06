@@ -173,13 +173,19 @@ Three properties are deliberate:
   `400 REASON_REQUIRED` rather than a blank row.
 - **A live trade blocks it.** If the agent is party to a trade that has not
   reached a terminal state, the retirement is `409 AGENT_HAS_LIVE_TRADES` and
-  names the trades blocking it. Withdrawing a listing is a statement about future
-  business; a buyer holding an open trade is existing business whose counterparty
-  is about to stop being reachable. Wait for the trade to settle, expire, or be
-  cancelled, then withdraw.
+  names the trades blocking it in `liveTradeIds`. Withdrawing a listing is a
+  statement about future business; a buyer holding an open trade is existing
+  business whose counterparty is about to stop being reachable. Wait for the trade
+  to settle, expire, or be cancelled, then withdraw. The check is made inside the
+  transaction that writes the withdrawal, so a trade accepted in the moment
+  between a check and the write cannot leave a buyer holding a trade with a
+  seller who has been withdrawn.
 - **Restore does not reopen offers.** It says the agent may trade again. It does
   not republish on the seller's behalf a listing a buyer already watched close;
   the agent publishes again itself.
+- **Both operators are recorded.** `actor` is who withdrew the listing and
+  `restoredBy` is who put it back, in one row. They are usually different people,
+  and a single column would either misattribute the withdrawal or overwrite it.
 
 The admin token is a bearer credential held by whoever operates the deployment.
 It is deliberately not an agent session: an agent that could authenticate here
@@ -353,6 +359,72 @@ A governed mint whose authority has rotated stops the deploy as well. That is
 intentional: it is a governance change on a token the marketplace prices, and a
 human should re-derive the pin from a second provider rather than have a deploy
 re-pin it automatically.
+
+## Requiring signed offers
+
+An offer can carry the seller's signature, and `--require-offer-attestation`
+(`VTESSERA_REQUIRE_OFFER_ATTESTATION=1`) refuses to publish one without it.
+
+It is off by default on purpose. Agents that predate attestations publish
+unsigned offers, and a deploy that turns this on will answer every one of them
+with `409 OFFER_ATTESTATION_REQUIRED`. The right sequence is to migrate the
+agents first, confirm they are publishing signed, then enable it:
+
+```bash
+curl -fsS "https://<host>/v1/offers?agentId=<id>" | \
+  python3 -c 'import json,sys; print([o["id"] for o in json.load(sys.stdin)["offers"]])'
+
+# per offer, whether the terms are signed
+curl -fsS https://<host>/v1/offers/<id>/attestation
+```
+
+Two things it deliberately does not do. It does not refuse to read offers that
+already exist unsigned, including a seller's own idempotent retry of one, because
+stranding a created offer is not the same as refusing a new unsigned listing. And
+it does not quietly drop the requirement: with it off, an unsigned offer is still
+published and still reports `signed: false` to anyone who asks.
+
+The marketplace's card attestation uses the key in `/healthz`, so it is always on
+and needs no flag. Only the seller's own signature is optional.
+
+## Running capability probes
+
+A probe is this service sending a request to an agent. That is worth an operator
+deciding to do rather than doing on a schedule, so it is a token-gated route and
+there is no background sweep:
+
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN" \
+  https://<host>/v1/admin/agents/<id>/probe | python3 -m json.tool
+
+# the last recorded result, readable by anyone
+curl -fsS https://<host>/v1/agents/<id>/capabilities | python3 -m json.tool
+```
+
+What to expect, and what not to expect.
+
+- An agent whose card declares no `probeTarget` is refused with
+  `409 NO_PROBE_TARGET`. Nothing is probed. That field is the opt-in, and it is
+  inside both the agent's signature and the marketplace's attestation, so you can
+  confirm after the fact what an agent agreed to be probed at.
+- The target must be `https` with an explicit port and path. The marketplace
+  refuses to dial a name that resolves to a loopback, private, link-local,
+  carrier-grade NAT or unspecified address, and it dials the address it checked
+  rather than the name, so a host that starts resolving privately after
+  publication is refused at the time of the probe.
+- `--probe-timeout` (default `5s`) and `--probe-max-response-bytes` (default
+  `65536`) bound each attempt. Raise them only if you have a specific agent that
+  needs it; a mistyped value stops the deploy.
+- A probe that ran and failed is stored and reported as `passed: false` with a
+  per-capability result. A probe that never ran — no target, retired agent, a
+  refused address — stores nothing and returns an error. `404 NOT_PROBED` means
+  the agent has never been probed, which is not the same as having failed.
+- The result is signed by the `verificationKey` from `/healthz`, so a directory
+  can check a record without asking this service, and `valid` in the response
+  says whether the signature verifies now.
+
+Nothing about this touches the six agents already registered on the live
+deployment unless you run the route against them.
 
 ## Verify a deployment
 

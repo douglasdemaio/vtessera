@@ -58,6 +58,21 @@ type Config struct {
 	ExpirySweepEvery time.Duration
 	// ExpirySweepBatch bounds one sweep.
 	ExpirySweepBatch int
+	// RequireOfferAttestation makes a seller-signed offer the only kind that can
+	// be published. It is off by default because an agent that predates
+	// attestations publishes unsigned offers, and turning this on is how an
+	// operator says they have finished migrating their agents rather than a
+	// change that should surprise them at deploy time.
+	//
+	// The marketplace still attests every card while this is off, and a buyer
+	// reading an unsigned offer is told plainly that nobody but the seller has
+	// vouched for the terms.
+	RequireOfferAttestation bool
+	// ProbeTimeout and ProbeMaxResponseBytes bound one capability probe. They are
+	// configured rather than fixed because they are the only knobs standing between
+	// an unreachable agent and a connection this service is holding open.
+	ProbeTimeout          time.Duration
+	ProbeMaxResponseBytes int64
 	// Sandbox marks this deployment as one where no real value moves. It is a
 	// behavioural switch, not a label: on-chain settlement is refused outright,
 	// so an agent cannot mistake it for the real thing.
@@ -152,16 +167,19 @@ func Parse(args []string) (Config, error) {
 		localnetHosts = fs.String("localnet-allow-host", os.Getenv("VTESSERA_LOCALNET_ALLOW_HOST"), "localnet only: comma-separated hosts exempt from the loopback rule")
 		preflightOnly = fs.Bool("preflight-only", false, "run the settlement preflight, print the report, and exit without serving")
 
-		spendPerTrade  = fs.String("spend-cap-per-trade", env("VTESSERA_SPEND_CAP_PER_TRADE", "10.00"), "USD cap a single trade may commit without an opt-in")
-		spendPerDay    = fs.String("spend-cap-per-day", env("VTESSERA_SPEND_CAP_PER_DAY", "10.00"), "USD cap one agent may commit per rolling day without an opt-in")
-		spendCeilTrade = fs.String("spend-cap-max-per-trade", os.Getenv("VTESSERA_SPEND_CAP_MAX_PER_TRADE"), "most any one agent may raise its per-trade cap to; unset forbids raising it")
-		spendCeilDay   = fs.String("spend-cap-max-per-day", os.Getenv("VTESSERA_SPEND_CAP_MAX_PER_DAY"), "most any one agent may raise its daily cap to; unset forbids raising it")
-		spendWindow    = fs.String("spend-cap-window", env("VTESSERA_SPEND_CAP_WINDOW", "24h"), "rolling window the daily cap is measured over")
-		spendRates     = fs.String("spend-rates", os.Getenv("VTESSERA_SPEND_RATES"), "extra USD rates as a comma-separated list of mint=usd@decimals; the governed stablecoins are built in at par")
-		acceptTTL      = fs.String("trade-accept-ttl", env("VTESSERA_TRADE_ACCEPT_TTL", "72h"), "how long an accepted trade may wait to be committed before either party may cancel it")
-		sweepEvery     = fs.String("trade-expiry-sweep-interval", env("VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL", "5m"), "how often to sweep expired accepted trades")
-		sweepBatch     = fs.Int("trade-expiry-sweep-batch", 100, "how many expired accepted trades one sweep may cancel")
-		sandbox        = fs.Bool("sandbox", env("VTESSERA_SANDBOX", "") == "1", "refuse on-chain settlement and advertise this deployment as a sandbox where no real value moves")
+		spendPerTrade   = fs.String("spend-cap-per-trade", env("VTESSERA_SPEND_CAP_PER_TRADE", "10.00"), "USD cap a single trade may commit without an opt-in")
+		spendPerDay     = fs.String("spend-cap-per-day", env("VTESSERA_SPEND_CAP_PER_DAY", "10.00"), "USD cap one agent may commit per rolling day without an opt-in")
+		spendCeilTrade  = fs.String("spend-cap-max-per-trade", os.Getenv("VTESSERA_SPEND_CAP_MAX_PER_TRADE"), "most any one agent may raise its per-trade cap to; unset forbids raising it")
+		spendCeilDay    = fs.String("spend-cap-max-per-day", os.Getenv("VTESSERA_SPEND_CAP_MAX_PER_DAY"), "most any one agent may raise its daily cap to; unset forbids raising it")
+		spendWindow     = fs.String("spend-cap-window", env("VTESSERA_SPEND_CAP_WINDOW", "24h"), "rolling window the daily cap is measured over")
+		spendRates      = fs.String("spend-rates", os.Getenv("VTESSERA_SPEND_RATES"), "extra USD rates as a comma-separated list of mint=usd@decimals; the governed stablecoins are built in at par")
+		acceptTTL       = fs.String("trade-accept-ttl", env("VTESSERA_TRADE_ACCEPT_TTL", "72h"), "how long an accepted trade may wait to be committed before either party may cancel it")
+		sweepEvery      = fs.String("trade-expiry-sweep-interval", env("VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL", "5m"), "how often to sweep expired accepted trades")
+		sweepBatch      = fs.Int("trade-expiry-sweep-batch", 100, "how many expired accepted trades one sweep may cancel")
+		probeTimeout    = fs.String("probe-timeout", env("VTESSERA_PROBE_TIMEOUT", "5s"), "how long one capability probe may take before it is abandoned")
+		probeBodyBytes  = fs.Int64("probe-max-response-bytes", envInt64("VTESSERA_PROBE_MAX_RESPONSE_BYTES", 65536), "largest capability probe response this service will read")
+		requireOfferSig = fs.Bool("require-offer-attestation", env("VTESSERA_REQUIRE_OFFER_ATTESTATION", "") == "1", "refuse to publish an offer the seller has not signed, so every live listing is verifiable")
+		sandbox         = fs.Bool("sandbox", env("VTESSERA_SANDBOX", "") == "1", "refuse on-chain settlement and advertise this deployment as a sandbox where no real value moves")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "vtessera: A2A marketplace gateway with AGP routing and virtual tessera receipts\n\n")
@@ -224,9 +242,19 @@ func Parse(args []string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("trade-accept-ttl %q is not a duration: %w", *acceptTTL, err)
 	}
+	probeTimeoutDur, err := time.ParseDuration(unset(*probeTimeout))
+	if err != nil {
+		return Config{}, fmt.Errorf("probe-timeout %q is not a duration: %w", *probeTimeout, err)
+	}
 	sweepEveryDur, err := time.ParseDuration(unset(*sweepEvery))
 	if err != nil {
 		return Config{}, fmt.Errorf("trade-expiry-sweep-interval %q is not a duration: %w", *sweepEvery, err)
+	}
+	if probeTimeoutDur <= 0 {
+		return Config{}, fmt.Errorf("probe-timeout %q is not a positive duration", *probeTimeout)
+	}
+	if *probeBodyBytes <= 0 {
+		return Config{}, fmt.Errorf("probe-max-response-bytes must be positive, got %d", *probeBodyBytes)
 	}
 	if *sweepBatch <= 0 {
 		return Config{}, fmt.Errorf("trade-expiry-sweep-batch must be positive, got %d", *sweepBatch)
@@ -235,21 +263,26 @@ func Parse(args []string) (Config, error) {
 		AcceptTTL:        acceptTTLDur,
 		ExpirySweepEvery: sweepEveryDur,
 		ExpirySweepBatch: *sweepBatch,
-		Addr:             *addr,
-		DatabaseURL:      *dbURL,
-		SignerKeyPath:    *signerKey,
-		SessionSecret:    decoded,
-		AdminToken:       adminToken,
-		ChallengeTTL:     *challenge,
-		SessionTTL:       *session,
-		RequestTimeout:   *timeout,
-		ShutdownGrace:    *grace,
-		PublicBaseURL:    strings.TrimRight(*baseURL, "/"),
-		Version:          *version,
-		PreflightOnly:    *preflightOnly,
-		Spend:            spendCfg,
-		Sandbox:          *sandbox,
-		Solana:           solanaCfg,
+
+		RequireOfferAttestation: *requireOfferSig,
+
+		ProbeTimeout:          probeTimeoutDur,
+		ProbeMaxResponseBytes: *probeBodyBytes,
+		Addr:                  *addr,
+		DatabaseURL:           *dbURL,
+		SignerKeyPath:         *signerKey,
+		SessionSecret:         decoded,
+		AdminToken:            adminToken,
+		ChallengeTTL:          *challenge,
+		SessionTTL:            *session,
+		RequestTimeout:        *timeout,
+		ShutdownGrace:         *grace,
+		PublicBaseURL:         strings.TrimRight(*baseURL, "/"),
+		Version:               *version,
+		PreflightOnly:         *preflightOnly,
+		Spend:                 spendCfg,
+		Sandbox:               *sandbox,
+		Solana:                solanaCfg,
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -490,6 +523,21 @@ func parseLocalnetMints(raw string) ([]tokens.Token, error) {
 
 // unset normalises the three ways a variable can be absent into one.
 func unset(v string) string { return strings.TrimSpace(v) }
+
+// envInt64 reads an integer setting from the environment, falling back to the
+// declared default when it is unset.
+func envInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+		// A malformed value is reported as the default here and then as a parse
+		// failure by the flag below, so an operator who mistypes it finds out at
+		// boot rather than running with a limit they did not choose.
+		return -1
+	}
+	return fallback
+}
 
 func splitList(v string) []string {
 	raw := unset(v)
