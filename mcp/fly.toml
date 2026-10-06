@@ -92,11 +92,12 @@ primary_region = "fra"
   min_machines_running = 0
 
   # Deliberately no [[http_service.checks]]. The endpoint is /mcp, which is
-  # POST-only: an MCP initialize is not a thing a health prober can send without
-  # speaking MCP, and a GET here returns 400 rather than a health verdict. The
-  # server has no /healthz on purpose, because a second endpoint reporting a
-  # different notion of health than the marketplace does is one more thing that
-  # can disagree with the truth. Verify a deploy by calling a tool.
+  # POST-only for real MCP traffic; a health probe's GET is answered with a 200
+  # status line before the MCP handler sees it (probeReporting in the cmd), so a
+  # prober can learn the process is up without speaking MCP. The server has no
+  # /healthz on purpose, because a second endpoint reporting a different notion
+  # of health than the marketplace does is one more thing that can disagree with
+  # the truth. Verify a deploy by calling a tool.
   #
   # [[http_service.checks]]
   #   interval = "30s"
