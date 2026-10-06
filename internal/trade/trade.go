@@ -30,6 +30,17 @@ var (
 	ErrOnchainUnavailable = errors.New("the chain could not be consulted")
 	ErrModeNotAccepted    = errors.New("offer does not accept this settlement mode")
 	ErrAgentUnavailable   = errors.New("counterparty agent is not available")
+	// ErrNoCardPublished means the caller authenticated, which proves it holds
+	// the key behind its identity, and then tried to trade without ever publishing
+	// a card. Sessions are issued before an agent exists, so this is the ordinary
+	// state of any identity that has not run PUT /v1/agents/{id}/card yet.
+	//
+	// It is a 409 with its own code rather than the 404 the caller used to get.
+	// A 404 says the thing asked for does not exist, and that is false in a way
+	// that costs an integrator a day: the offer exists, the offer ID is right, and
+	// the caller is looking at a refusal that reads as "bad identifier" for a
+	// request that had nothing wrong with it.
+	ErrNoCardPublished = errors.New("this identity has authenticated but published no agent card")
 	// ErrMintUngoverned means the offer names a governed mint that is not
 	// governed on this cluster. It is a 409 rather than a 400: the mint was the
 	// seller's choice and the buyer cannot correct it, so it is a conflict with
@@ -495,6 +506,16 @@ func (s *Service) Create(ctx context.Context, actorID, offerID string, mode doma
 	for _, party := range []string{buyer, seller} {
 		agent, err := s.agents.GetAgent(ctx, party)
 		if err != nil {
+			// A missing row means one of two different things, and answering both
+			// with 404 was wrong for one of them. For the counterparty it is close
+			// enough: something the offer names is not there. For the caller it is
+			// not — the session already proved the identity exists, so there is no
+			// agent row only because no card has been published, and 404 NOT_FOUND
+			// on an offer that is sitting right there reads as a bad offer ID.
+			if errors.Is(err, domain.ErrNotFound) && party == actorID {
+				return domain.Trade{}, false, fmt.Errorf(
+					"%w: PUT /v1/agents/%s/card first", ErrNoCardPublished, actorID)
+			}
 			return domain.Trade{}, false, err
 		}
 		if agent.Status != domain.AgentActive {

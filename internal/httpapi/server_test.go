@@ -200,6 +200,27 @@ func newAgent(t *testing.T, server *httptest.Server, opts ...func(*clientOptions
 	return client
 }
 
+// newCardlessAgent returns an identity that has authenticated and never published
+// a card. This is the state every identity is in before its first
+// PUT /v1/agents/{id}/card, and it is reachable without any error being reported
+// anywhere along the way.
+func newCardlessAgent(t *testing.T, server *httptest.Server) *agentClient {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &agentClient{
+		t:       t,
+		base:    server.URL,
+		http:    server.Client(),
+		id:      base58.Encode(public),
+		private: private,
+	}
+	client.authenticate()
+	return client
+}
+
 func (c *agentClient) card(card domain.AgentCard) {
 	c.t.Helper()
 	card.PublicKey = c.id
@@ -1124,5 +1145,47 @@ func TestCancellingAnExpiredAcceptedTradeSucceeds(t *testing.T) {
 	decodeInto(t, buyer.do(http.MethodPost, "/v1/trades/"+id+"/cancel", map[string]any{}, true), &cancelled)
 	if cancelled.State != domain.TradeCancelled {
 		t.Errorf("state = %s, want cancelled", cancelled.State)
+	}
+}
+
+func TestACardlessBuyerIsToldToPublishACardRatherThanThatTheOfferIsMissing(t *testing.T) {
+	server, _ := setupServer(t)
+	seller := newAgent(t, server)
+	offer := seller.publishOffer("10", usdc)
+	buyer := newCardlessAgent(t, server)
+
+	request := map[string]any{
+		"offerId": offer.ID, "settlementMode": "offchain", "idempotencyKey": "cardless-1",
+	}
+	status, body := buyer.raw(http.MethodPost, "/v1/trades", request, true)
+
+	// The offer is real and the session is real. Answering 404 here told an
+	// integrator that an identifier it had just read out of GET /v1/agents was
+	// wrong, for a request that had nothing wrong with it.
+	if status != http.StatusConflict {
+		t.Fatalf("cardless buyer = %d %s, want 409", status, body)
+	}
+	var refusal struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	decodeInto(t, body, &refusal)
+	if refusal.Code != "NO_CARD_PUBLISHED" {
+		t.Errorf("code = %s, want NO_CARD_PUBLISHED", refusal.Code)
+	}
+	// The refusal has to say what to do about it, not merely that something is
+	// absent.
+	if !strings.Contains(refusal.Error, "/v1/agents/"+buyer.id+"/card") {
+		t.Errorf("refusal %q does not name the request that would fix it", refusal.Error)
+	}
+
+	// And it is a step rather than a dead end: the same request, unchanged, works
+	// once the card is published.
+	buyer.card(domain.AgentCard{
+		Name: "buyer", Description: "an agent that had not published yet",
+		URL: "https://buyer.example.com", Version: "0.1.0",
+	})
+	if status, body := buyer.raw(http.MethodPost, "/v1/trades", request, true); status != http.StatusCreated {
+		t.Fatalf("same request after publishing a card = %d %s, want 201", status, body)
 	}
 }

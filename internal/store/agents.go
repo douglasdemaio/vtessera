@@ -238,10 +238,17 @@ func (s *Store) RestoreAgent(ctx context.Context, id, actor string, at time.Time
 	return s.GetAgent(ctx, id)
 }
 
-// errLiveTrades is the sentinel the live-trade refusal unwraps to. The registry
-// re-exports it as ErrAgentHasLiveTrades; the duplication is deliberate, because
-// the store cannot import the registry that imports the store.
-var errLiveTrades = errors.New("agent has trades that have not reached a terminal state")
+// ErrAgentHasLiveTrades is the sentinel the live-trade refusal unwraps to, and the
+// only definition of it in the service. registry.ErrAgentHasLiveTrades is this
+// value under another name, not a second errors.New of the same sentence.
+//
+// The two were separately constructed once. errors.Is compares by identity, so
+// that pair never matched and errors.Is(refusal, registry.ErrAgentHasLiveTrades)
+// was false, making the matching entry in httpapi's status table unreachable. The
+// retire route was never wrong to the caller, because it matches on the concrete
+// type with errors.As and writes the 409 itself; the cost was a table entry that
+// looked load-bearing and any other caller matching on the sentinel.
+var ErrAgentHasLiveTrades = errors.New("agent has trades that have not reached a terminal state")
 
 // LiveTradesError refuses a retirement while trades of that agent have not
 // finished, and names which ones.
@@ -260,9 +267,9 @@ func (e *LiveTradesError) Error() string {
 }
 
 // Unwrap lets errors.Is(err, registry.ErrAgentHasLiveTrades) recognise the
-// refusal without the store importing the registry, which would be a cycle.
+// refusal, which the store cannot reference directly without a cycle.
 func (e *LiveTradesError) Unwrap() error {
-	return errLiveTrades
+	return ErrAgentHasLiveTrades
 }
 
 // Retirement returns the current retirement record for an agent. A retired agent

@@ -12,6 +12,7 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/probe"
+	"github.com/douglasdemaio/vtessera/internal/store"
 	"github.com/douglasdemaio/vtessera/internal/tokens"
 	"github.com/google/uuid"
 	"strconv"
@@ -40,7 +41,11 @@ var (
 	// The refusal itself is a *store.LiveTradesError, which names the blocking
 	// trades, and it satisfies errors.Is against this sentinel. This one exists so
 	// a caller can recognise the refusal without importing the store.
-	ErrAgentHasLiveTrades = errors.New("agent has trades that have not reached a terminal state")
+	//
+	// It is an alias of store.ErrAgentHasLiveTrades, not a second errors.New of
+	// the same sentence. errors.Is matches on identity, not on text, so two
+	// separate sentinels with identical text never match, and these two did not.
+	ErrAgentHasLiveTrades = store.ErrAgentHasLiveTrades
 
 	// ErrRetirementReasonRequired refuses a retirement with no stated reason. A
 	// privileged action that removes somebody's ability to sell needs to say why
@@ -587,11 +592,17 @@ func (s *Service) VerifyProbe(report probe.Report) error {
 // would happily replay.
 func (s *Service) challenge() string {
 	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
-		// A probe that cannot be challenged is not a probe, and the fallback keeps
-		// the failure loud rather than probing with a guessable nonce.
-		return base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d-not-a-challenge", s.now().UnixNano())))
-	}
+	// There is no error to handle. crypto/rand.Read never returns one: if the
+	// system source fails it crashes the program rather than hand back a short
+	// read, so a probe challenge is either random or the process is gone.
+	//
+	// This previously fell back to a base64 timestamp ending "-not-a-challenge",
+	// under a comment saying the fallback kept the failure loud rather than
+	// probing with a guessable nonce. It was unreachable, and had it been reached
+	// it would have done the thing the comment rules out: it issued a nonce an
+	// attacker could compute from the clock. Failing loudly is what rand.Read
+	// already does.
+	_, _ = rand.Read(raw)
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 

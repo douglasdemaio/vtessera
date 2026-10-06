@@ -669,3 +669,27 @@ func TestAReRegisteredAgentDoesNotReinstateItself(t *testing.T) {
 		t.Errorf("status = %s after re-registering, want still retired", got.Status)
 	}
 }
+
+func TestARefusedRetirementIsRecognisableAsTheSameErrorEverywhere(t *testing.T) {
+	// Two packages own this refusal and used to name it separately: the store
+	// creates it, the registry re-exports a sentinel so a caller can recognise it
+	// without importing the store. Each called errors.New with the same sentence,
+	// and errors.Is matches on identity rather than on text, so the pair did not
+	// match. The retire route was never wrong to an operator - it matches the
+	// concrete type with errors.As and writes the 409 itself - but the matching
+	// entry in httpapi's status table was unreachable, and any caller reaching for
+	// the sentinel the way the table does would have been told the marketplace had
+	// broken when an agent had only an unsettled trade.
+	err := &store.LiveTradesError{AgentID: aliceKey, TradeIDs: []string{"t1"}}
+
+	if !errors.Is(err, registry.ErrAgentHasLiveTrades) {
+		t.Error("the registry sentinel does not recognise the store's refusal, " +
+			"so it is a copy of it rather than the same error")
+	}
+	if !errors.Is(err, store.ErrAgentHasLiveTrades) {
+		t.Error("the refusal does not unwrap to the store's own sentinel")
+	}
+	if errors.Is(err, registry.ErrRetirementReasonRequired) {
+		t.Error("the refusal matches an unrelated sentinel")
+	}
+}
