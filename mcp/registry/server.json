@@ -13,7 +13,7 @@
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "TODO(ghcr image: douglasdemaio/vtessera-mcp)",
+      "identifier": "ghcr.io/douglasdemaio/vtessera-mcp:0.1.0",
       "version": "0.1.0",
       "runtimeHint": "docker",
       "runtimeArguments": [
@@ -47,16 +47,15 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "TODO(hosted vtessera-mcp endpoint)"
+      "url": "https://vtessera-mcp.fly.dev/mcp"
     }
   ],
   "_meta": {
     "vtessera/draft": {
       "readyToSubmit": false,
-      "why": "Two fields need an artefact this repository does not have yet: a published container image, and a hosted MCP endpoint. Both are deployment decisions, so both belong to the operator.",
+      "why": "The hosted endpoint is real and verified: https://vtessera-mcp.fly.dev/mcp initializes and serves all seven read-only tools against the live marketplace. The remaining gap before submission is the container image: the identifier names ghcr.io/douglasdemaio/vtessera-mcp:0.1.0, and publishing it is a deploy decision.",
       "blockers": [
-        "packages[0].identifier is an OCI reference. The registry has no binary package type for a Go program, so the listing names a container image. Publishing one is `make image` plus a push, which is a deploy decision.",
-        "remotes[0].url needs a hosted vtessera-mcp. The server already serves streamable HTTP with --listen, but nothing is deployed in front of it.",
+        "packages[0].identifier is an OCI reference. The registry has no binary package type for a Go program, so the listing names a container image. Publishing it is `make mcp-image-push`, which needs a gh token carrying write:packages.",
         "packages[0].identifier and version must name an image that exists before submission, or the listing advertises a package nobody can pull.",
         "Submitting also needs a GitHub OAuth token with repo scope, which is the publisher's to hold."
       ],
