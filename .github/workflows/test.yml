@@ -1,0 +1,80 @@
+name: Test
+
+# This repository had no pull-request CI. The only workflow here is an
+# agentic maintenance job on a schedule, which is not a build: nothing
+# checked that vtessera compiled or that its tests passed before anything
+# reached main, so a broken tree was only ever found by deploying it.
+#
+# The steps below are the local commands from AGENTS.md, unchanged. A check
+# that is not the command a maintainer runs is a check that drifts from what
+# is actually tested.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # Two modules, so two sums: the service's and mcp/'. Keying the cache on
+          # only one of them either misses the graph or rebuilds it every run.
+          cache-dependency-path: |
+            go.sum
+            mcp/go.sum
+      - name: Formatting
+        # Not `make fmt`: that rewrites in place and exits 0 either way, so it
+        # can never fail a build. This fails.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:" >&2
+            echo "$unformatted" >&2
+            echo >&2
+            echo "run 'gofmt -w' on them and commit the result" >&2
+            exit 1
+          fi
+      # make all is fmt vet test build plus the four mcp/ checks and mcp-build.
+      # mcp/ is a separate module, so ./... does not reach it and its suite is
+      # invisible to the service's; that is why it is in this command and not
+      # left to memory.
+      #
+      # The mcp Containerfile builds from mcp/, not here, so this is the only
+      # place the nested module's build is exercised.
+      - run: make all
+      - name: make fmt left the tree alone
+        # make all runs `make fmt`, which rewrites in place. If it changed
+        # anything, the committed tree was not formatted, and this is the only
+        # signal that says so.
+        run: git diff --exit-code
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            mcp/go.sum
+      # A separate job rather than a step so it runs alongside the main one.
+      # The service holds a SQLite writer, a signing key and a session store, so
+      # the concurrency bugs are the plausible kind here and the hermetic suite
+      # does not find them on its own.
+      - name: Race
+        run: make race
+      - name: mcp module under -race
+        run: cd mcp && go test -race ./...
