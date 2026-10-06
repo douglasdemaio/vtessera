@@ -5,9 +5,12 @@ IMAGE ?= vtessera:local
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke image image-run fly-deploy fly-verify preflight-live
+.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart image image-run fly-deploy fly-verify preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy
 
-all: fmt vet test build
+# mcp/ is a separate module (see AGENTS.md), so ./... does not reach it. Its checks
+# are wired in here rather than left to memory: a nested module that nothing builds
+# is a module that rots quietly, and this one talks to the service's public API.
+all: fmt vet test build mcp-fmt mcp-vet mcp-test mcp-build
 
 build:
 	$(GO) build -trimpath -o $(BINARY) ./cmd/vtessera
@@ -66,6 +69,24 @@ preflight-live: build
 		$(if $(filter mainnet-beta,$(CLUSTER)),--mainnet-ack $(or $(MAINNET_ACK),1),) \
 		--session-secret $(or $(VTESSERA_SESSION_SECRET),0123456789abcdef0123456789abcdef)
 
+MCP_DIR := mcp
+MCP_BINARY := $(MCP_DIR)/bin/vtessera-mcp
+
+mcp-build:
+	cd $(MCP_DIR) && $(GO) build -trimpath -o bin/vtessera-mcp ./cmd/vtessera-mcp
+
+mcp-test:
+	cd $(MCP_DIR) && $(GO) test ./...
+
+mcp-vet:
+	cd $(MCP_DIR) && $(GO) vet ./...
+
+mcp-fmt:
+	cd $(MCP_DIR) && test -z "$$($(GO) fmt ./...)" || { echo "mcp/ needs gofmt: run \'cd mcp && go fmt ./...\'"; exit 1; }
+
+mcp-tidy:
+	cd $(MCP_DIR) && $(GO) mod tidy
+
 vet:
 	$(GO) vet $(PKG)
 
@@ -77,6 +98,13 @@ tidy:
 
 smoke: build
 	./scripts/smoke.sh $(BINARY)
+
+# Runs both quickstarts against a throwaway sandbox. Deliberately not part of
+# `all`: it needs python3 (with cryptography) and node 22.18+, and the hermetic
+# suite must not start depending on two more runtimes. The guides are the API's
+# front door, so this is how they are kept honest rather than left to rot.
+quickstart: build
+	./scripts/quickstart.sh $(BINARY)
 
 # podman defaults to the OCI image format, which has no HEALTHCHECK field, so it
 # drops the directive with a warning and the container reports no health status.

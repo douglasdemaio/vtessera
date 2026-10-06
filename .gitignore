@@ -4,4 +4,5 @@ data/
 *.db-shm
 *.db-wal
 *.key
+__pycache__/
 .superpowers/

@@ -21,11 +21,23 @@ make race       # whole suite under -race
 make vet fmt
 make build      # -> bin/vtessera
 make smoke      # builds the binary and runs a process-level journey
+make quickstart # runs both quickstart guides against a throwaway sandbox
 
 make preflight-live   # verify a real cluster without starting the service
 ```
 
-`make preflight-live` is the only thing in this list that touches the network. It
+`make quickstart` runs `quickstart/python/agent.py` and
+`quickstart/typescript/agent.ts` against a throwaway sandbox, one marketplace
+each. It is not wired into `all`, and that is deliberate: it needs `python3` with
+`cryptography` plus node 22.18 or later, and constraint 1 means the hermetic
+suite must not start depending on two more runtimes. The guides are the API's
+front door, so if a change moves an endpoint, an attestation field or a receipt
+claim, this is the check that catches it. It moves no value: the sandbox refuses
+on-chain settlement and no chain is configured.
+
+`make mcp-test` runs the MCP module's suite, which is a separate module and so is
+invisible to `./...`. `make smoke` is hermetic. `make preflight-live` is the only
+thing in this list that touches the network. It
 is the §11.13 acceptance check and it is worth running after any change to a
 base58 constant:
 
@@ -61,6 +73,14 @@ repository's existing Go toolchain and its existing dependency set. If a
 measurement needs a program that does not belong in the repo, write it as a
 temporary test in the repo, run it, and delete it — do not create a second module
 that re-resolves the dependency graph.
+
+**The one sanctioned exception is `mcp/`**, the MCP server. It is a real module
+with its own `go.mod` because it depends on the official MCP SDK and nothing else,
+and it must stay importable by someone who wants only the client. It re-resolves
+one dependency graph, not the service's, and it may not import this module at all:
+it talks to the service's public HTTP API, the same endpoints any agent reads with
+`curl`, and it holds no key. `make mcp-test` and friends are wired into `all`,
+because a nested module that nothing builds rots quietly. Do not add a second one.
 
 ### 2. `TMPDIR` is required
 
@@ -301,6 +321,8 @@ is why the fee and mint tests assert the new values rather than the old.
 | `docs/specs/2026-09-27-phase3-cluster-aware-settlement-design.md` | Approved Phase 3 design (revision 2). Read before touching settlement. |
 | `docs/specs/2026-10-04-settlement-auth-threat-model.md` | Threat model, including what is still open. Read before touching auth or settlement. |
 | `docs/reports/2026-09-27-phase2-settlement-record.md` | What Phase 2 actually built, plus its known defects. Read before claiming Phase 2 works. |
+| `docs/quickstart/python.md` | The five-minute journey, in Python. |
+| `docs/quickstart/typescript.md` | The same journey, in TypeScript, with no install step. |
 
 When changing behaviour, update the relevant document in the same change.
 
