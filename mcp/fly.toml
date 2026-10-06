@@ -41,7 +41,26 @@ primary_region = "fra"
   # flyctl builds the same Containerfile the local `make mcp-image` does, so what
   # ships is what was tested. That Containerfile builds from mcp/, because mcp/ is
   # its own module and the repo root is a different dependency graph.
-  dockerfile = "mcp/Containerfile"
+  #
+  # Paths in this section are relative to this file's directory, not to the
+  # directory you invoke flyctl from: `dockerfile = "mcp/Containerfile"` resolves
+  # to mcp/mcp/Containerfile and the build fails before it starts. This is the
+  # `-f mcp/Containerfile mcp/` pair the Makefile passes.
+  #
+  # The build root is the corrupting subtlety here, and it is not configurable:
+  # flyctl builds with the directory you invoke it from as the context, ignoring
+  # any `context` set in this file (`context = "mcp"` was tested and ignored).
+  # `dockerfile`, by contrast, is relative to THIS file's directory. So leave it
+  # as "Containerfile" (mcp/Containerfile) and run the deploy from mcp/, where
+  # working directory and config directory are the same thing:
+  #
+  #   cd mcp && flyctl deploy
+  #
+  # Running from the repo root sends the root module (a different dependency
+  # graph) to a Containerfile expecting mcp/'s go.mod, and the build fails with
+  # "directory not found". Deployed this way, fly builds exactly what
+  # `make mcp-image` builds: `podman build -f mcp/Containerfile mcp/`.
+  dockerfile = "Containerfile"
 
 [env]
   # Not secrets. There is nothing to keep here: the server holds no key and signs
