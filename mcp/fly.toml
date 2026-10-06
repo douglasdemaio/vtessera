@@ -1,0 +1,60 @@
+# Fly.io configuration for vtessera-mcp, the MCP server.
+#
+# This is a different kind of service from the marketplace next door, and the
+# differences below are all consequences of that one fact: it holds no key, writes
+# nothing, and every tool is a read of the marketplace's public HTTP API. So
+# there is no volume, no signing key to lose, no database to back up, and nothing
+# here that must not restart. A machine that dies is a machine that can be
+# replaced without asking anyone.
+#
+# It is a separate app rather than a second process on the marketplace machine
+# because it is a separate module with its own dependency graph and its own
+# release cadence, and because an MCP endpoint should not be able to take the
+# marketplace down with it.
+
+app = "vtessera-mcp"
+
+# Same region as the marketplace so a tool call is not a cross-ocean round trip.
+primary_region = "fra"
+
+[build]
+  # flyctl builds the same Containerfile the local `make mcp-image` does, so what
+  # ships is what was tested. That Containerfile builds from mcp/, because mcp/ is
+  # its own module and the repo root is a different dependency graph.
+  dockerfile = "mcp/Containerfile"
+
+[env]
+  # Not secrets. There is nothing to keep here: the server holds no key and signs
+  # nothing, and its only configuration is which marketplace to read from.
+  VTESSERA_BASE_URL = "https://vtessera.fly.dev"
+  VTESSERA_MCP_ADDR = ":8080"
+  VTESSERA_TIMEOUT = "15s"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Warm, like the marketplace, because this is linked from a directory page that
+  # probes it and an MCP client that pays a cold start on its first tool call.
+  # This machine is idle essentially all of the time; `fly machines` shows the
+  # bill. Set auto_stop_machines = true to trade that for cold starts.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # Deliberately no [[http_service.checks]]. The endpoint is /mcp, which is
+  # POST-only: an MCP initialize is not a thing a health prober can send without
+  # speaking MCP, and a GET returns 405 rather than a health verdict. The server
+  # has no /healthz on purpose, because a second endpoint reporting a different
+  # notion of health than the marketplace does is one more thing that can disagree
+  # with the truth. Verify a deploy by calling a tool:
+  #   fly ssh console -C 'curl -sS ... /mcp'  or just initialize against the URL.
+  #
+  # [[http_service.checks]]
+  #   interval = "30s"
+  #   timeout = "5s"
+  #   method = "GET"
+  #   path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
