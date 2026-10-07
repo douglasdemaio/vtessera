@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -62,7 +63,7 @@ func serveHTTP(server *mcpserver.Server, addr string) {
 	defer stop()
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           probeReporting(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -78,6 +79,28 @@ func serveHTTP(server *mcpserver.Server, addr string) {
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("vtessera-mcp: %v", err)
 	}
+}
+
+// probeReporting answers a health probe's GET with 200 before the MCP handler
+// sees it, because the MCP handler rejects anything that is not POST and a
+// directory that checks this endpoint by GET must be able to learn it is up.
+// When agent-ai-tool.com carries mcp_endpoint_url it probes it with a GET and
+// treats a non-2xx answer as a dead endpoint; a POST-only MCP path would
+// otherwise report "withheld, it did not answer a recent health check" for a
+// server that answers every real MCP call. The body is a status line only, so a
+// client that speaks MCP still POSTs to work.
+func probeReporting(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			if r.Method == http.MethodGet {
+				_, _ = io.WriteString(w, "vtessera-mcp is serving; speak MCP over POST /mcp\n")
+			}
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // checkMarketplace reports whether the marketplace is answering, once, at startup.

@@ -11,6 +11,26 @@
 # because it is a separate module with its own dependency graph and its own
 # release cadence, and because an MCP endpoint should not be able to take the
 # marketplace down with it.
+#
+# Deploy scope: this file covers the MCP app only. The marketplace and
+# agent-ai-tool.com stay pull-request-only; a deploy token for this app must not
+# be read as permission for either of them.
+#
+# Four properties the hosted version has to keep, none of which this file can
+# enforce but all of which the image is built to satisfy:
+#   - an agent's private key never reaches this process: it has no key material
+#     and no place to keep any, and it only ever reads the marketplace's public
+#     HTTP API;
+#   - read tools work with no credentials, because those endpoints are public;
+#   - a caller's bearer token, if a write tool ever accepts one, is used for
+#     that request alone and never stored. Today no tool reads one at all -
+#     the set is entirely read-only - so this holds trivially. Adding a write
+#     tool would need the server switched to the SDK's Stateless mode to keep
+#     it, because in the default sessionful mode a tool handler is bound to the
+#     token that sent `initialize` rather than to the caller's current request.
+#     That is a design decision, not an implementation detail; do not assume it.
+#   - no tool touches a spending cap. The whole tool set is read-only, and the
+#     package documentation for mcp/internal/mcpserver says so as a contract.
 
 app = "vtessera-mcp"
 
@@ -21,7 +41,26 @@ primary_region = "fra"
   # flyctl builds the same Containerfile the local `make mcp-image` does, so what
   # ships is what was tested. That Containerfile builds from mcp/, because mcp/ is
   # its own module and the repo root is a different dependency graph.
-  dockerfile = "mcp/Containerfile"
+  #
+  # Paths in this section are relative to this file's directory, not to the
+  # directory you invoke flyctl from: `dockerfile = "mcp/Containerfile"` resolves
+  # to mcp/mcp/Containerfile and the build fails before it starts. This is the
+  # `-f mcp/Containerfile mcp/` pair the Makefile passes.
+  #
+  # The build root is the corrupting subtlety here, and it is not configurable:
+  # flyctl builds with the directory you invoke it from as the context, ignoring
+  # any `context` set in this file (`context = "mcp"` was tested and ignored).
+  # `dockerfile`, by contrast, is relative to THIS file's directory. So leave it
+  # as "Containerfile" (mcp/Containerfile) and run the deploy from mcp/, where
+  # working directory and config directory are the same thing:
+  #
+  #   cd mcp && flyctl deploy
+  #
+  # Running from the repo root sends the root module (a different dependency
+  # graph) to a Containerfile expecting mcp/'s go.mod, and the build fails with
+  # "directory not found". Deployed this way, fly builds exactly what
+  # `make mcp-image` builds: `podman build -f mcp/Containerfile mcp/`.
+  dockerfile = "Containerfile"
 
 [env]
   # Not secrets. There is nothing to keep here: the server holds no key and signs
@@ -33,21 +72,31 @@ primary_region = "fra"
 [http_service]
   internal_port = 8080
   force_https = true
-  # Warm, like the marketplace, because this is linked from a directory page that
-  # probes it and an MCP client that pays a cold start on its first tool call.
-  # This machine is idle essentially all of the time; `fly machines` shows the
-  # bill. Set auto_stop_machines = true to trade that for cold starts.
-  auto_stop_machines = false
+
+  # Smallest machine and idle auto-stop, because this server serves almost
+  # nobody. shared-cpu-1x/256MB is the smallest size Fly offers at all - its
+  # pricing page lists tiers 256/512MB/1GB/2GB and calls 256MB the "Smallest
+  # Machine size" - so there is no smaller number available to choose here.
+  #
+  # Auto-stop is where the saving is: Fly bills by the second while running and
+  # is explicit that auto-stopped machines cost less. For a tool called
+  # occasionally rather than continuously that is the difference between paying
+  # for 30 days of a machine and paying for its actual calls.
+  #
+  # The cost is a cold start. It is a cheap one: no database to load and no key
+  # to read, because this server has neither.
+  auto_stop_machines = true
   auto_start_machines = true
-  min_machines_running = 1
+  # Zero, because a non-zero floor with auto-stop on would keep one machine warm
+  # and make auto-stop decorative.
+  min_machines_running = 0
 
   # Deliberately no [[http_service.checks]]. The endpoint is /mcp, which is
   # POST-only: an MCP initialize is not a thing a health prober can send without
   # speaking MCP, and a GET returns 405 rather than a health verdict. The server
   # has no /healthz on purpose, because a second endpoint reporting a different
   # notion of health than the marketplace does is one more thing that can disagree
-  # with the truth. Verify a deploy by calling a tool:
-  #   fly ssh console -C 'curl -sS ... /mcp'  or just initialize against the URL.
+  # with the truth. Verify a deploy by calling a tool.
   #
   # [[http_service.checks]]
   #   interval = "30s"
