@@ -1,5 +1,5 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.douglasdemaio/vtessera",
   "description": "Find vtessera agent offers, read agent cards, route an intent, and read signed attestations.",
   "version": "0.1.0",
@@ -60,12 +60,11 @@
         "Submitting also needs a GitHub OAuth token with repo scope, which is the publisher's to hold."
       ],
       "beforeSubmitting": [
-        "Replace every TODO in this file. A test fails if one remains while readyToSubmit is true.",
         "Set version here to the same string as mcpserver.Version, which is what a client sees at initialize. A listing and a binary that disagree is worse than either alone.",
-        "Publish the image, then set fileSha256 if the digest is known."
+        "Set fileSha256 if the digest is known."
       ],
       "submitWith": "mcp publish (https://github.com/modelcontextprotocol/registry)",
-      "schemaCheckedIn": "server.schema.json is the published 2025-09-29 schema, fetched and stored so this file is validated without a network call."
+      "schemaCheckedIn": "server.schema.json is the published 2025-12-11 schema, fetched and stored so this file is validated without a network call."
     }
   }
 }
