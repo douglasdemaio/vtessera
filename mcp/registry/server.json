@@ -53,19 +53,17 @@
   "_meta": {
     "vtessera/draft": {
       "readyToSubmit": false,
-      "why": "The hosted endpoint is real and verified: https://vtessera-mcp.fly.dev/mcp initializes and serves all seven read-only tools against the live marketplace. The remaining gap before submission is the container image: the identifier names ghcr.io/douglasdemaio/vtessera-mcp:0.1.0, and publishing it is a deploy decision.",
+      "why": "The hosted endpoint is real and verified: https://vtessera-mcp.fly.dev/mcp initializes and serves all seven read-only tools against the live marketplace. The image exists and carries the ownership label: ghcr.io/douglasdemaio/vtessera-mcp:0.1.0 was pushed and its config labels io.modelcontextprotocol.server.name to the name in this file. What remains is outside this repo's control: the package is still private, so the registry's anonymous pull that verifies the label cannot read it yet.",
       "blockers": [
-        "packages[0].identifier is an OCI reference. The registry has no binary package type for a Go program, so the listing names a container image. Publishing it is `make mcp-image-push`, which needs a gh token carrying write:packages.",
-        "packages[0].identifier and version must name an image that exists before submission, or the listing advertises a package nobody can pull.",
-        "Submitting also needs a GitHub OAuth token with repo scope, which is the publisher's to hold."
+        "ghcr.io/douglasdemaio/vtessera-mcp is private. The registry verifies OCI ownership by pulling the image and reading the io.modelcontextprotocol.server.name annotation, which requires making the package public: package settings, Change visibility.",
+        "Submitting needs a GitHub OAuth token with repo scope, which is the publisher's to hold."
       ],
       "beforeSubmitting": [
-        "Replace every TODO in this file. A test fails if one remains while readyToSubmit is true.",
         "Set version here to the same string as mcpserver.Version, which is what a client sees at initialize. A listing and a binary that disagree is worse than either alone.",
-        "Publish the image, then set fileSha256 if the digest is known."
+        "Set fileSha256 if the digest is known."
       ],
       "submitWith": "mcp publish (https://github.com/modelcontextprotocol/registry)",
-      "schemaCheckedIn": "server.schema.json is the published 2025-09-29 schema, fetched and stored so this file is validated without a network call."
+      "schemaCheckedIn": "server.schema.json is the published 2025-12-11 schema, fetched and stored so this file is validated without a network call."
     }
   }
 }
