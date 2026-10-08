@@ -108,6 +108,9 @@ jobs:
         if: matrix.client == 'python'
         run: pip install --no-cache-dir -r examples/python/requirements.txt
       - name: Build the marketplace
-        run: go build -trimpath -o bin/vtessera ./cmd/vtessera
+        # -buildvcs=false: the container's git refuses this checkout (uid
+        # mismatch between runner and image), and the VCS stamp in a test
+        # binary is not what this job is about.
+        run: go build -trimpath -buildvcs=false -o bin/vtessera ./cmd/vtessera
       - name: Run the ${{ matrix.client }} reference client against a sandbox
         run: ./scripts/examples.sh bin/vtessera ${{ matrix.client }}
