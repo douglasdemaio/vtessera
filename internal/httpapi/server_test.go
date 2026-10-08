@@ -93,6 +93,11 @@ type serverBuild struct {
 	// real runner so that a route test asserts what the route does with a result
 	// and never opens a socket.
 	prober registry.Prober
+	// challenge is a pre-issued auth challenge the harness installs in the store
+	// before serving. The published handshake vector needs the server to redeem a
+	// fixed challenge ID and nonce that issuance would never produce, and this is
+	// the seam that lets the test present exactly that state.
+	challenge *domain.Challenge
 }
 
 func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Ledger) {
@@ -117,6 +122,11 @@ func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Led
 	authSvc, err := auth.New(db, []byte(sessionK))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if build.challenge != nil {
+		if err := db.CreateChallenge(ctx, *build.challenge); err != nil {
+			t.Fatalf("install fixed challenge: %v", err)
+		}
 	}
 	led := ledger.New(db, signer)
 	// The marketplace's attestation key is the ledger's key, as it is in main, so

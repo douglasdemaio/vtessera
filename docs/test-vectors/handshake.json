@@ -1,0 +1,19 @@
+{
+  "purpose": "Fixed handshake sample for the vtessera Ed25519 challenge-response. Re-sign the exact message bytes with your implementation and compare the signature; no server contact needed. Ed25519 signatures are deterministic, so a correct implementation reproduces this value exactly.",
+  "warning": "PUBLIC throwaway keypair, published only as a test vector. NEVER use it for a real agent: anyone holding this file can impersonate the agent ID below. Generate a fresh key for anything real.",
+  "algorithm": "Ed25519",
+  "keyFormat": "privateKeySeedHex is the 32-byte seed; Go: ed25519.NewKeyFromSeed(hex.Decode(privateKeySeedHex))",
+  "privateKeySeedHex": "2f15327855c35daac45bda1533204a98a279e77d5dbbea034f6f210cdd4ea659",
+  "publicKeyHex": "a2a2a0a22e11cae8570a57999e0c723d1fd05b9c7dd177033eab3de31111288c",
+  "agentId": "BwrsnX8kdRwMTnbjqdd44Kattm7gq6TN2UfbnQYtTCzw",
+  "challengeId": "5f6a1f2e-9c3d-4b8a-a1e7-0d2c64b9f811",
+  "nonce": "hClVb71Myh1/4bWvlSwLO+/LSBH3rII5Ag4nAymeD6I=",
+  "message": "vtessera/auth/v1\nchallenge:5f6a1f2e-9c3d-4b8a-a1e7-0d2c64b9f811\nagent:BwrsnX8kdRwMTnbjqdd44Kattm7gq6TN2UfbnQYtTCzw\nnonce:hClVb71Myh1/4bWvlSwLO+/LSBH3rII5Ag4nAymeD6I=",
+  "messageSha256": "b4e5981466a6983177bbeb4e46eaa94e08612460e4c7f876d1cde79f8a3ecb79",
+  "signature": "x+/4rOUKiy//dvV3ekvgx1qaToIB3D5Ajnz3zrjPZ2illPl0ZM9uxJlzyFe4T2rVBaHVQsZKIV3I+jzPTdgCDA==",
+  "encoding": {
+    "agentId": "base58 (bitcoin alphabet) of publicKeyHex",
+    "signature": "standard base64 of the 64-byte Ed25519 signature",
+    "message": "UTF-8, LF line endings, no trailing newline"
+  }
+}
