@@ -67,15 +67,23 @@ Two answers deserve a careful read, and the server instructions say so:
 
 ## Registry listing
 
-[`registry/server.json`](registry/server.json) is the draft for the official MCP
-Registry. It is schema-valid and its `readyToSubmit` flag is **false**: it still
-carries two placeholders, because a published container image and a hosted
-endpoint are deployment decisions that belong to the operator, not to a commit.
+[`registry/server.json`](registry/server.json) is the listing for the official
+MCP Registry, and it is published: `io.github.douglasdemaio/vtessera@0.1.0`,
+with the hosted endpoint `https://vtessera-mcp.fly.dev/mcp` as its remote and
+`ghcr.io/douglasdemaio/vtessera-mcp:0.1.0` as its OCI package. Check the file
+without publishing:
+
+```bash
+mcp-publisher validate mcp/registry/server.json
+```
 
 [`registry/server.schema.json`](registry/server.schema.json) is the registry's
-published 2025-09-29 schema, checked in so `internal/mcpserver/registry_test.go`
-validates the listing with no network call. That test is why the draft is honest:
-it refused a description that was 174 characters against a 100-character limit,
-which is the kind of mistake that otherwise reaches a user as a failed install.
+published 2025-12-11 schema, checked in so `internal/mcpserver/registry_test.go`
+validates the listing with no network call. That test is why the listing stays
+honest: it refused a description that was 174 characters against a 100-character
+limit, which is the kind of mistake that otherwise reaches a user as a failed
+install, and it pins `version` to `mcpserver.Version` — a listing and a binary
+that disagree is worse than either alone.
 
-Submit with `mcp publish` once the placeholders are real and the flag is flipped.
+For a new release, bump `version`, the image tag and `mcpserver.Version`
+together, validate, then publish with `mcp-publisher publish`.
