@@ -78,3 +78,36 @@ jobs:
         run: make race
       - name: mcp module under -race
         run: cd mcp && go test -race ./...
+
+  examples:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - client: python
+            image: python:3.12
+          - client: typescript
+            image: node:22
+          - client: go
+            image: golang:1.27
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            mcp/go.sum
+      # Each client runs in its own fresh container on its own runtime, because
+      # a reference client that quietly stops working on the runtime it claims
+      # to support is a reference client nobody has run. Only the Python client
+      # has a dependency, and it is not in this module's graph at all.
+      - name: The client's one dependency
+        if: matrix.client == 'python'
+        run: pip install --no-cache-dir -r examples/python/requirements.txt
+      - name: Build the marketplace
+        run: go build -trimpath -o bin/vtessera ./cmd/vtessera
+      - name: Run the ${{ matrix.client }} reference client against a sandbox
+        run: ./scripts/examples.sh bin/vtessera ${{ matrix.client }}
