@@ -58,7 +58,7 @@
         "Submitting needs a GitHub OAuth token with repo scope, which is the publisher's to hold."
       ],
       "beforeSubmitting": [
-        "Set version here to the same string as mcpserver.Version, which is what a client sees at initialize. A listing and a binary that disagree is worse than either alone. For an OCI package the version lives only in the identifier's tag; a separate packages[].version is rejected by the registry.",
+        "Set version here to the same string as mcpserver.Version, which is what a client sees at initialize. A listing and a binary that disagree is worse than either alone.",
         "Set fileSha256 if the digest is known."
       ],
       "submitWith": "mcp publish (https://github.com/modelcontextprotocol/registry)",
