@@ -57,7 +57,9 @@ func TestTheListingNamesTheVersionTheBinaryReports(t *testing.T) {
 	var draft struct {
 		Version  string `json:"version"`
 		Packages []struct {
-			Version string `json:"version"`
+			RegistryType string `json:"registryType"`
+			Identifier   string `json:"identifier"`
+			Version      string `json:"version"`
 		} `json:"packages"`
 	}
 	if err := json.Unmarshal(readJSON(t, listingPath), &draft); err != nil {
@@ -67,8 +69,15 @@ func TestTheListingNamesTheVersionTheBinaryReports(t *testing.T) {
 		t.Errorf("listing version %q, binary reports %q", draft.Version, Version)
 	}
 	for i, p := range draft.Packages {
-		if p.Version != Version {
-			t.Errorf("packages[%d] version %q, binary reports %q", i, p.Version, Version)
+		// The registry rejects a `version` field on an OCI package: the tag in
+		// the identifier is the version, and a separate field is an error, not a
+		// duplicate. So for OCI the claim to check is the tag.
+		reported := p.Version
+		if p.RegistryType == "oci" {
+			reported = p.Identifier[strings.LastIndex(p.Identifier, ":")+1:]
+		}
+		if reported != Version {
+			t.Errorf("packages[%d] version %q, binary reports %q", i, reported, Version)
 		}
 	}
 }
