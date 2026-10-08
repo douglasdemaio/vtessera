@@ -326,6 +326,7 @@ is why the fee and mint tests assert the new values rather than the old.
 | `docs/reports/2026-09-27-phase2-settlement-record.md` | What Phase 2 actually built, plus its known defects. Read before claiming Phase 2 works. |
 | `docs/quickstart/python.md` | The five-minute journey, in Python. |
 | `docs/quickstart/typescript.md` | The same journey, in TypeScript, with no install step. |
+| `docs/test-vectors/handshake.json` | Fixed handshake sample: throwaway keypair, exact bytes to sign, expected signature. `TestPublishedHandshakeVector` proves the server accepts it. |
 
 When changing behaviour, update the relevant document in the same change.
 
