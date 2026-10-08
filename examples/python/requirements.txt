@@ -1,0 +1,3 @@
+# One package: Ed25519. public_bytes_raw needs a cryptography recent enough to
+# have it, which is 42.0.
+cryptography>=42

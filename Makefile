@@ -7,7 +7,7 @@ MCP_TAG ?= 0.1.0
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart image image-run fly-deploy fly-verify preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push mcp-fly-deploy
+.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart examples image image-run fly-deploy fly-verify preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push mcp-fly-deploy
 
 # mcp/ is a separate module (see AGENTS.md), so ./... does not reach it. Its checks
 # are wired in here rather than left to memory: a nested module that nothing builds
@@ -127,6 +127,13 @@ smoke: build
 # front door, so this is how they are kept honest rather than left to rot.
 quickstart: build
 	./scripts/quickstart.sh $(BINARY)
+
+# Runs the reference clients in examples/ against a throwaway sandbox. Same
+# reasoning as quickstart: needs python3 (with cryptography) and node 22.18+,
+# so not part of `all`, but CI runs each client in its own fresh container on
+# every change so they cannot quietly rot.
+examples: build
+	./scripts/examples.sh $(BINARY)
 
 # podman defaults to the OCI image format, which has no HEALTHCHECK field, so it
 # drops the directive with a warning and the container reports no health status.

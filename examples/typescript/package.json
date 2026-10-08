@@ -1,0 +1,13 @@
+{
+  "name": "vtessera-reference-client",
+  "private": true,
+  "type": "module",
+  "description": "The smallest complete vtessera client: handshake, one off-chain trade, a receipt verified locally.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node client.ts"
+  },
+  "dependencies": {}
+}

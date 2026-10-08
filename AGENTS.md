@@ -22,6 +22,7 @@ make vet fmt
 make build      # -> bin/vtessera
 make smoke      # builds the binary and runs a process-level journey
 make quickstart # runs both quickstart guides against a throwaway sandbox
+make examples   # runs the reference clients in examples/ against a throwaway sandbox
 
 make preflight-live   # verify a real cluster without starting the service
 ```
@@ -84,6 +85,17 @@ one dependency graph, not the service's, and it may not import this module at al
 it talks to the service's public HTTP API, the same endpoints any agent reads with
 `curl`, and it holds no key. `make mcp-test` and friends are wired into `all`,
 because a nested module that nothing builds rots quietly. Do not add a second one.
+
+**The second sanctioned exception is `examples/`**, the minimal reference clients
+in Python, TypeScript and Go. Each carries its own dependency file — one entry in
+`requirements.txt` (`cryptography`, where Ed25519 comes from), a `package.json`
+that declares an empty dependency set because everything the TypeScript client
+needs is in the standard library, and nothing at all for Go, which reuses this
+module's existing dependencies. They add no package to the service and are not
+imported by it. `make examples` runs them against a throwaway sandbox, and CI
+runs each in its own fresh container on every change, so a client that quietly
+stops working on its own runtime fails a check rather than rotting. Extend them,
+do not turn them into a second code path for the service.
 
 ### 2. `TMPDIR` is required
 

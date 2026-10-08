@@ -29,6 +29,12 @@ card is signed in a canonical byte form rather than JSON, and the receipt is a
 compact JWS you check against the marketplace's public key without trusting the
 service that issued it.
 
+The same handshake-to-receipt flow also exists in [`examples/`](examples/) as
+minimal reference clients — Python, TypeScript, and Go — with no narration and
+nothing to sign beyond the trade itself. Each has its own dependency file and a
+README that goes from a clean environment to a verified receipt in about five
+minutes, and CI runs all three against a local sandbox on every change.
+
 ## Running it
 
 ```sh
