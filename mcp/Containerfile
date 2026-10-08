@@ -41,6 +41,12 @@ RUN apk add --no-cache ca-certificates tzdata \
 
 COPY --from=build /out/vtessera-mcp /usr/local/bin/vtessera-mcp
 
+# The MCP registry proves ownership of an OCI package by pulling the image and
+# checking for this annotation. It must equal the `name` in
+# mcp/registry/server.json (io.github.douglasdemaio/vtessera), and it is what
+# makes a publish of that listing verifiable at all.
+LABEL io.modelcontextprotocol.server.name="io.github.douglasdemaio/vtessera"
+
 # Never run a network service as root. Unlike the marketplace, this process
 # writes nothing at all, so it needs no data directory and no volume: restarts
 # lose no state because there is none.
@@ -53,8 +59,9 @@ ENV VTESSERA_BASE_URL=https://vtessera.fly.dev \
     VTESSERA_TIMEOUT=15s
 
 # No HEALTHCHECK on purpose, and not an oversight. The image has no curl or
-# wget installed to avoid them, and /mcp is a POST-only MCP endpoint, so a
-# container health probe here would have to speak MCP to learn anything true.
-# Fly's checks a tool call instead. See cmd/vtessera-mcp serveHTTP.
+# wget installed to avoid them, and probing /mcp's health is GET-answered by
+# probeReporting in the cmd with a 200 status line before the MCP handler sees
+# it, so no health check here is needed. Verify a deploy by calling a tool.
+# See cmd/vtessera-mcp serveHTTP.
 
 ENTRYPOINT ["/usr/local/bin/vtessera-mcp"]
