@@ -582,3 +582,35 @@ func TestDeclaredProbeLimitsReachTheConfiguration(t *testing.T) {
 		t.Errorf("probe max response bytes = %d, want 4096", cfg.ProbeMaxResponseBytes)
 	}
 }
+
+func TestRequestRateLimitsAreOnByDefault(t *testing.T) {
+	// The threat model recorded no rate limiting at all, so the deployment that
+	// has not been tuned is the one that most needs the default.
+	dir := t.TempDir()
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimit.AgentBurst <= 0 || cfg.RateLimit.IPBurst <= 0 {
+		t.Errorf("rate limit = %+v, want both layers on by default", cfg.RateLimit)
+	}
+	if cfg.RateLimit.IPHeader != "Fly-Client-IP" {
+		t.Errorf("ip header = %q, want the header Fly sets", cfg.RateLimit.IPHeader)
+	}
+}
+
+func TestARateWithNoBurstIsRefused(t *testing.T) {
+	// A rate with no tokens never allows anything, which is not what an
+	// operator setting a rate meant; it is refused at boot rather than shipping
+	// a limit that silently blocks the route.
+	dir := t.TempDir()
+	t.Setenv("VTESSERA_RATE_LIMIT_AGENT_RPS", "10")
+	t.Setenv("VTESSERA_RATE_LIMIT_AGENT_BURST", "0")
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err == nil {
+		t.Fatalf("Parse = %+v, want an error", cfg)
+	}
+	if !strings.Contains(err.Error(), "rate-limit-agent-burst") {
+		t.Errorf("error = %v, want it to name rate-limit-agent-burst", err)
+	}
+}

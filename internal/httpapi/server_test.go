@@ -89,6 +89,9 @@ type serverBuild struct {
 	clock           func() time.Time
 	adminToken      string
 	requireOfferSig bool
+	// rateLimit configures the request limits. Zero leaves both layers off, so
+	// every test that is not about limiting behaves as it did before.
+	rateLimit httpapi.RateLimitOptions
 	// prober is the probe runner the harness installs. It is a field rather than a
 	// real runner so that a route test asserts what the route does with a result
 	// and never opens a socket.
@@ -176,6 +179,7 @@ func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Led
 	if build.adminToken != "" {
 		opts.AdminToken = []byte(build.adminToken)
 	}
+	opts.RateLimit = build.rateLimit
 	api := httpapi.New(opts)
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)

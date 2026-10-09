@@ -141,6 +141,18 @@ func run(args []string) error {
 	if cfg.Sandbox {
 		logger.Info("sandbox mode: on-chain settlement is refused, no real value moves here")
 	}
+	switch {
+	case cfg.RateLimit.AgentBurst > 0 || cfg.RateLimit.IPBurst > 0:
+		logger.Info("request rate limits active",
+			"agentRps", cfg.RateLimit.AgentRPS,
+			"agentBurst", cfg.RateLimit.AgentBurst,
+			"ipRps", cfg.RateLimit.IPRPS,
+			"ipBurst", cfg.RateLimit.IPBurst,
+			"ipHeader", cfg.RateLimit.IPHeader,
+		)
+	default:
+		logger.Warn("request rate limits are disabled: nothing bounds how fast one caller can hit the API")
+	}
 
 	// On-chain settlement is only wired when a cluster and an endpoint are both
 	// configured, and only after preflight has confirmed the endpoint is the
@@ -260,6 +272,13 @@ func run(args []string) error {
 		GenesisHash:   preflightGenesis,
 		Sandbox:       cfg.Sandbox,
 		AdminToken:    cfg.AdminToken,
+		RateLimit: httpapi.RateLimitOptions{
+			AgentRPS:   cfg.RateLimit.AgentRPS,
+			AgentBurst: cfg.RateLimit.AgentBurst,
+			IPRPS:      cfg.RateLimit.IPRPS,
+			IPBurst:    cfg.RateLimit.IPBurst,
+			IPHeader:   cfg.RateLimit.IPHeader,
+		},
 	})
 	server := &http.Server{
 		Addr:              cfg.Addr,

@@ -321,9 +321,17 @@ is not the buyer or the seller. Closing an offer is checked in the service,
 because the offer names its owner in a column.
 
 The threat model is `docs/specs/2026-10-04-settlement-auth-threat-model.md`. It
-lists what is still open, and the four that matter are a cap per identity when
-identities are free, no rate limiting at all, a marketplace signing key with no
-rotation path, and an operator retirement token with no identity behind it.
+lists what is still open, and the three that matter are a cap per identity when
+identities are free, a marketplace signing key with no rotation path, and an
+operator retirement token with no identity behind it. Rate limiting was the
+fourth and is now in place: two in-memory token buckets in `internal/httpapi`,
+one per authenticated agent and one per client address, both on by default and
+both configurable with `--rate-limit-*`. The per-address bucket keys on the
+header the proxy sets (`--rate-limit-ip-header`, default `Fly-Client-IP`),
+because behind Fly every connection shares the proxy's address; keying on
+`RemoteAddr` there would throttle every caller together. The buckets are
+in-memory and reset on restart, which is fine while this is one machine, and the
+threat model records it as a known limit rather than implying otherwise.
 
 ### 9. The retirement routes take a token, not an agent session
 

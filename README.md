@@ -267,6 +267,11 @@ wants that bounded declares a rate above par.
 | `--probe-timeout` | `VTESSERA_PROBE_TIMEOUT` | `5s` |
 | `--probe-max-response-bytes` | `VTESSERA_PROBE_MAX_RESPONSE_BYTES` | `65536` |
 | `--sandbox` | `VTESSERA_SANDBOX` | off |
+| `--rate-limit-agent-rps` | `VTESSERA_RATE_LIMIT_AGENT_RPS` | `30` |
+| `--rate-limit-agent-burst` | `VTESSERA_RATE_LIMIT_AGENT_BURST` | `60` |
+| `--rate-limit-ip-rps` | `VTESSERA_RATE_LIMIT_IP_RPS` | `20` |
+| `--rate-limit-ip-burst` | `VTESSERA_RATE_LIMIT_IP_BURST` | `40` |
+| `--rate-limit-ip-header` | `VTESSERA_RATE_LIMIT_IP_HEADER` | `Fly-Client-IP` |
 
 Every malformed figure is a startup error. An operator who mistypes a cap finds
 out at boot, not from an agent being refused later.
@@ -424,6 +429,33 @@ sessions; this is not a wider exposure than they already have.
 A resolved dispute still counts as `disputed` in `/v1/metrics`: the count is a
 record that a dispute happened, and a review that could lower it would let an
 operator bury the disputes it lost.
+
+## Request rate limits
+
+Two in-memory token buckets bound how fast one caller can hit the API, and both
+are on by default because the deployment nobody has tuned is the one that most
+needs them. An authenticated request is charged to the agent's key
+(`--rate-limit-agent-rps`, `--rate-limit-agent-burst`); everything else —
+starting a challenge, reading the board — is charged to the client address
+(`--rate-limit-ip-rps`, `--rate-limit-ip-burst`). A request over its bucket is
+refused with `429` and a `Retry-After` the caller can act on, and the body is
+
+```json
+{"error": "too many requests; retry after the Retry-After delay", "code": "RATE_LIMITED"}
+```
+
+Behind a proxy, keying the address bucket on the connection would throttle every
+visitor together, so it reads the header the proxy sets instead
+(`--rate-limit-ip-header`, default `Fly-Client-IP`). Fly makes the service port
+unreachable directly, which is what makes trusting that header safe; a deployment
+behind a different proxy should name the header that proxy sets, and one with no
+proxy should set the flag empty to use the connection's own address. Setting a
+burst to `0` turns that layer off.
+
+The buckets live in one process and reset on restart, which is fine while the
+deployment is a single machine — the shape the service is built for. They are not
+shared, and a restart forgives a burst in progress; the threat model records that
+as a known limit rather than pretending otherwise.
 
 ## Sandbox mode
 

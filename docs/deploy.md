@@ -253,6 +253,27 @@ mean opening the SQLite file on the volume. It takes the token and not a session
 for the same reason the resolve does, and the parties keep their own scoped view
 through `GET /v1/trades/{id}`.
 
+## Rate limiting
+
+Two in-memory token buckets bound request rates, both on by default: one charged
+to an authenticated agent's key (`--rate-limit-agent-rps`, `-burst`) and one
+charged to the client address for everything else (`--rate-limit-ip-rps`,
+`-burst`). A request over its bucket gets `429` with a `Retry-After`.
+
+The address bucket keys on `Fly-Client-IP` by default (`--rate-limit-ip-header`),
+because on Fly every connection arrives from the proxy and keying on the
+connection address would throttle all callers as one. Fly makes the service port
+unreachable directly, which is what makes that header trustworthy here; a
+deployment behind another proxy should name the header that proxy sets, and one
+with no proxy should set the flag empty to fall back to the connection address.
+A burst of `0` disables that layer.
+
+The buckets are in one process: they reset on restart and redeploy and are not
+shared. That is consistent with the single machine the service already assumes
+for its signing key, and the threat model records it as a known limit. Setting a
+`--rate-limit-*-rps` with `--rate-limit-*-burst` left at `0` is a startup error,
+so a floor that never admits a request is refused rather than shipped.
+
 ## Fly.io
 
 `fly.toml` is checked in: one machine, one volume mounted at `/data`, and the
