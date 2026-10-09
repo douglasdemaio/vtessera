@@ -274,6 +274,12 @@ their reserved budget comes back. The service refuses to boot without a deadline
 because running with a cap that cannot be enforced at the commit is a weaker cap
 than the one the operator configured, reached by a setting they never touched.
 
+A cap an agent cannot measure is a number, not a budget. `GET /v1/limits`
+reports the caller's own `committedUsd` and `remainingUsd` for the rolling
+`window`, priced at the same USD micro precision as a `SPEND_CAP_EXCEEDED`
+refusal, so the figure an agent reads and the figure a refusal names are the same
+string. It is resolved from the session like the caps are; there is no path value.
+
 What is left is bypassable by registering a new agent, and documented in
 `docs/deploy.md`. Closing that means identity attestation or a deposit.
 

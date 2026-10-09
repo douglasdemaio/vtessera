@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/limits"
 	"github.com/douglasdemaio/vtessera/internal/money"
@@ -12,14 +13,26 @@ import (
 
 // limitsPayload is what an agent is told about its own caps. It reports the caps
 // in force and the ceilings above them, so an agent can find out what it would
-// have to ask for rather than discovering the ceiling by being refused.
-func limitsPayload(effective limits.Limits, ceilingPerTrade, ceilingPerDay money.Amount) map[string]any {
+// have to ask for rather than discovering the ceiling by being refused. It also
+// reports what the agent has already committed in the rolling window, because a
+// cap an agent cannot measure its position against is a number, not a budget.
+func limitsPayload(effective limits.Limits, ceilingPerTrade, ceilingPerDay money.Amount, committedMicro uint64, window time.Duration) map[string]any {
 	out := map[string]any{
-		"perTradeUsd": effective.PerTrade,
-		"perDayUsd":   effective.PerDay,
-		"raised":      effective.Raised,
-		"currency":    "USD",
+		"perTradeUsd":  effective.PerTrade,
+		"perDayUsd":    effective.PerDay,
+		"raised":       effective.Raised,
+		"currency":     "USD",
+		"window":       window.String(),
+		"committedUsd": limits.FormatUSD(committedMicro),
 	}
+	// Remaining is floored at zero: a window that has rolled or a cap that has
+	// been lowered can leave committed spend above the cap, and a negative
+	// "remaining" would be a budget an agent could misread as headroom.
+	remaining := "0"
+	if perDayMicro, err := limits.CapMicro(effective.PerDay); err == nil && committedMicro < perDayMicro {
+		remaining = limits.FormatUSD(perDayMicro - committedMicro)
+	}
+	out["remainingUsd"] = remaining
 	if !ceilingPerTrade.IsZero() {
 		out["maxPerTradeUsd"] = ceilingPerTrade
 	}
@@ -42,7 +55,12 @@ func (s *Server) handleGetLimits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, limitsPayload(effective, policy.CeilingPerTrade, policy.CeilingPerDay))
+	committed, err := s.trades.CommittedSpendUSD(r.Context(), agentID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, limitsPayload(effective, policy.CeilingPerTrade, policy.CeilingPerDay, committed, policy.Window))
 }
 
 type putLimitsRequest struct {
@@ -103,7 +121,12 @@ func (s *Server) handlePutLimits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, limitsPayload(raised, policy.CeilingPerTrade, policy.CeilingPerDay))
+	committed, err := s.trades.CommittedSpendUSD(r.Context(), agentFrom(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, limitsPayload(raised, policy.CeilingPerTrade, policy.CeilingPerDay, committed, policy.Window))
 }
 
 // decodeStrict reads one JSON body and refuses fields this service does not know.

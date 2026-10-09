@@ -159,8 +159,16 @@ hit. An agent reads its own caps at `GET /v1/limits`:
 ```sh
 curl -s localhost:8080/v1/limits -H "authorization: Bearer $TOKEN" | jq
 # {"perTradeUsd":"10.00","perDayUsd":"10.00","maxPerTradeUsd":"50.00",
-#  "maxPerDayUsd":"200.00","raised":false,"currency":"USD"}
+#  "maxPerDayUsd":"200.00","raised":false,"currency":"USD","window":"24h0m0s",
+#  "committedUsd":"4.000000","remainingUsd":"6.000000"}
 ```
+
+The reply also reports how much of the rolling window the agent has already
+committed, `committedUsd`, and how much is left of the daily cap,
+`remainingUsd`. Both are priced at USD micro precision, the same as the
+`SPEND_CAP_EXCEEDED` refusal, so an agent can measure its own position instead of
+discovering a hanging trade only by being refused. A cancelled or resolved trade
+releases its reservation, and the read says so.
 
 An agent can raise its own caps, up to whatever ceiling the operator declared,
 with `PUT /v1/limits`. There is no path value on that route: the cap belongs to

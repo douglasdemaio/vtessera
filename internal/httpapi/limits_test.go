@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/limits"
 	"github.com/douglasdemaio/vtessera/internal/money"
 )
@@ -194,5 +195,67 @@ func TestCapsEndpointsReportWhenCapsAreNotConfigured(t *testing.T) {
 	status, _ = agent.raw(http.MethodPut, "/v1/limits", map[string]any{"perTradeUsd": "50.00"}, true)
 	if status != http.StatusNotImplemented {
 		t.Errorf("PUT /v1/limits with no policy = %d, want 501", status)
+	}
+}
+
+// An agent that opens a trade is holding budget it can no longer spend, so the
+// read has to say so. Without this the only way to learn what a hanging trade
+// costs you is to open another one and be refused.
+func TestReadingCapsReportsCommittedSpend(t *testing.T) {
+	server, agent := capsServer(t, nil)
+	seller := newAgent(t, server)
+	offer := seller.publishOffer("4.00", usdc, "summarize:document")
+
+	var created domain.Trade
+	decodeInto(t, agent.do(http.MethodPost, "/v1/trades", map[string]any{
+		"offerId":        offer.ID,
+		"settlementMode": "offchain",
+		"idempotencyKey": "committed",
+	}, true), &created)
+
+	got := decode(t, agent.do(http.MethodGet, "/v1/limits", nil, true))
+	// Committed spend is rendered at USD micro precision, the same as a refusal
+	// message, so the number here and the number in a SPEND_CAP_EXCEEDED reply
+	// are the same string.
+	if got["committedUsd"] != "4.000000" {
+		t.Errorf("committedUsd = %v, want 4.000000: an open trade reserves its amount", got["committedUsd"])
+	}
+	if got["remainingUsd"] != "6.000000" {
+		t.Errorf("remainingUsd = %v, want 6.000000 against a 10.00 day", got["remainingUsd"])
+	}
+	if got["window"] != "24h0m0s" {
+		t.Errorf("window = %v, want 24h0m0s", got["window"])
+	}
+
+	// The spend belongs to the buyer, not to the marketplace: a different agent
+	// still has its whole day.
+	other := newAgent(t, server)
+	got = decode(t, other.do(http.MethodGet, "/v1/limits", nil, true))
+	if got["committedUsd"] != "0.000000" {
+		t.Errorf("another agent's committedUsd = %v, want 0.000000", got["committedUsd"])
+	}
+}
+
+func TestACancelledTradeReleasesCommittedSpend(t *testing.T) {
+	server, agent := capsServer(t, nil)
+	seller := newAgent(t, server)
+	offer := seller.publishOffer("4.00", usdc, "summarize:document")
+
+	var created domain.Trade
+	decodeInto(t, agent.do(http.MethodPost, "/v1/trades", map[string]any{
+		"offerId":        offer.ID,
+		"settlementMode": "offchain",
+		"idempotencyKey": "released",
+	}, true), &created)
+
+	var cancelled domain.Trade
+	decodeInto(t, agent.do(http.MethodPost, "/v1/trades/"+created.ID+"/cancel", map[string]any{}, true), &cancelled)
+
+	got := decode(t, agent.do(http.MethodGet, "/v1/limits", nil, true))
+	if got["committedUsd"] != "0.000000" {
+		t.Errorf("committedUsd after cancel = %v, want 0.000000: a released trade is not spend", got["committedUsd"])
+	}
+	if got["remainingUsd"] != "10.000000" {
+		t.Errorf("remainingUsd after cancel = %v, want 10.000000, the whole day back", got["remainingUsd"])
 	}
 }
