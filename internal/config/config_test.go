@@ -419,6 +419,9 @@ func TestAnAcceptanceDeadlineDefaultsToThreeDays(t *testing.T) {
 	if cfg.AcceptTTL != 72*time.Hour {
 		t.Errorf("AcceptTTL = %s, want 72h", cfg.AcceptTTL)
 	}
+	if cfg.OfferTTL != 24*time.Hour {
+		t.Errorf("OfferTTL = %s, want 24h", cfg.OfferTTL)
+	}
 	if cfg.ExpirySweepEvery != 5*time.Minute {
 		t.Errorf("ExpirySweepEvery = %s, want 5m", cfg.ExpirySweepEvery)
 	}
@@ -451,6 +454,21 @@ func TestAnOpenDeadlineDefaultsToADay(t *testing.T) {
 	}
 	if cfg.OpenTTL != 24*time.Hour {
 		t.Errorf("OpenTTL = %s, want 24h", cfg.OpenTTL)
+	}
+}
+
+func TestAnOfferDeadlineIsRequired(t *testing.T) {
+	// A listing with no deadline is the gap this closes: a seller that has
+	// stopped answering stays discoverable, and a buyer cannot tell it from a
+	// live one. A zero TTL has to stop the boot.
+	dir := t.TempDir()
+	t.Setenv("VTESSERA_OFFER_TTL", "0")
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err == nil {
+		t.Fatalf("Parse with no offer deadline = %+v, want an error", cfg)
+	}
+	if !strings.Contains(err.Error(), "offer-ttl") {
+		t.Errorf("error = %v, want it to name offer-ttl", err)
 	}
 }
 

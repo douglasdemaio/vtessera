@@ -66,7 +66,8 @@ without either.
 
 **What has no deadline now** (the heart of §7):
 
-- Open offers — the `offers` table has no expiry column.
+- Open offers — bounded by `offers.expires_at` (migration 6) and the offer
+  sweep (`--offer-ttl`, default `24h`).
 - `disputed` trades — terminal forever until the operator resolves them (§5.4/§5.5).
 
 `settlement_pending` gained a layer rather than a column: the reconciler cancels
@@ -116,8 +117,9 @@ change `agents.status`, close an offer, or touch a trade
 
 - **Trade state:** a trade with an unreachable seller sits in
   `proposed`/`negotiating` until the open deadline (`24h` by default) passes;
-  the sweeper then cancels it (`event=expired`, actor `""`). Its offers still
-  stay `open` and discoverable — that is gap 4, unchanged.
+  the sweeper then cancels it (`event=expired`, actor `""`). Its offer now
+  closes after the offer TTL (`--offer-ttl`, default `24h`), so a silent seller
+  also drops out of discovery.
 - **Buyer's budget:** charged from `created_at`, and **released** when the
   sweeper cancels the stale trade (`cancelled` is a released state); under the
   open deadline a trade that simply ages out of the window stops counting too.
@@ -273,10 +275,16 @@ fixed; the rest are open.
    partial unique index is released. A request the chain resolved as a failed
    execution is left `settlement_pending` so the buyer may rebuild. The buyer is
    no longer the only one who can clear an abandoned build.
-4. **Offers never expire, and a failed probe changes nothing.** A silent
-   seller's listing stays `open` and discoverable with no expiry column
-   (`schema.sql:16-33`); the probe is the one signal an operator has, and it is
-   explicitly not a consequence-bearing check (`registry.go:524-569`).
+4. ~~**Offers never expire.**~~ **Fixed 2026-10-09.** A published offer now
+   carries `offers.expires_at` (migration 6), set from `--offer-ttl` (default
+   `24h`), and the offer sweep closes it once the deadline passes, so a silent
+   seller drops out of discovery and search. The deadline is deliberately not
+   part of the attested offer bytes — it is marketplace policy, not a seller
+   term — and existing rows are backfilled from their creation time.
+   **The second half is unchanged and still open: a failed probe changes
+   nothing.** The probe is the one signal an operator has, and it is explicitly
+   not a consequence-bearing check (`registry.go:524-569`); whether a failed
+   probe should close a listing is a separate decision, not taken here.
 5. **A dispute outliving the cap window releases the buyer's budget.** Because
    `disputed` is charged only until it ages out of the 24h window
    (`limits.go:112-115`), a dispute open longer than a day no longer constrains

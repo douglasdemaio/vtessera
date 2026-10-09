@@ -203,10 +203,10 @@ func (s *Store) CreateOfferWithAttestation(ctx context.Context, o domain.Offer, 
 	}
 	return s.write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO offers (id, agent_id, direction, description, capabilities, price_amount, price_mint, settlement_modes, status, idempotency_key, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO offers (id, agent_id, direction, description, capabilities, price_amount, price_mint, settlement_modes, status, idempotency_key, created_at, updated_at, expires_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			o.ID, o.AgentID, string(o.Direction), o.Description, string(caps), o.PriceAmount.String(),
-			o.PriceMint, string(modes), string(o.Status), nullString(idempotencyKey), nanos(o.CreatedAt), nanos(o.UpdatedAt))
+			o.PriceMint, string(modes), string(o.Status), nullString(idempotencyKey), nanos(o.CreatedAt), nanos(o.UpdatedAt), expiryColumn(o.ExpiresAt))
 		if err != nil {
 			return mapErr(err)
 		}

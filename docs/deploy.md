@@ -123,6 +123,15 @@ The deadline is also what lets the cap be enforced at the off-chain commit. That
 refusal would otherwise strand the buyer, so the service refuses to boot without
 a deadline rather than run with a weaker cap than the one it was configured with.
 
+A published **offer** carries its own deadline, `--offer-ttl` (default `24h`), and
+the same sweep closes it once the deadline passes, so a seller that has stopped
+answering drops out of discovery rather than staying on the board as though it
+were live. The deadline lives in `offers.expires_at` and is not part of the
+attested offer: it is marketplace policy, not one of the seller's terms. On the
+upgrade that added the column (migration 6), existing offers were backfilled from
+their creation time with the 24h default, so a listing older than a day at that
+moment expires on the next sweep — republish it if you want it to stay.
+
 One known limit remains, bounded and worth stating to an operator rather than
 discovering in an incident:
 

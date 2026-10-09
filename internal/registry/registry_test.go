@@ -693,3 +693,163 @@ func TestARefusedRetirementIsRecognisableAsTheSameErrorEverywhere(t *testing.T) 
 		t.Error("the refusal matches an unrelated sentinel")
 	}
 }
+
+// offerClock is a mutable clock the offer sweep can be driven against, so the
+// tests do not have to sleep on wall time.
+type offerClock struct{ at time.Time }
+
+func (c *offerClock) now() time.Time          { return c.at }
+func (c *offerClock) advance(d time.Duration) { c.at = c.at.Add(d) }
+
+func newOfferService(t *testing.T, ttl time.Duration, clock *offerClock) *registry.Service {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "offers.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return registry.New(db, mainnetMints(t), marketSigner(t),
+		registry.WithOfferTTL(ttl), registry.WithClock(clock.now))
+}
+
+func registerAgent(t *testing.T, svc *registry.Service, key string) {
+	t.Helper()
+	if _, _, err := svc.Register(context.Background(), key, card(key), nil); err != nil {
+		t.Fatalf("register %s: %v", key, err)
+	}
+}
+
+func publishTestOffer(t *testing.T, svc *registry.Service, key, description string) domain.Offer {
+	t.Helper()
+	offer, _, err := svc.PublishOffer(context.Background(), key, registry.NewOffer{
+		Direction:       domain.DirectionAsk,
+		Description:     description,
+		Capabilities:    []string{"summarize"},
+		PriceAmount:     "3.00",
+		PriceMint:       usdc,
+		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
+	}, "", "", nil)
+	if err != nil {
+		t.Fatalf("PublishOffer %s: %v", description, err)
+	}
+	return offer
+}
+
+func TestAPublishedOfferCarriesItsDeadline(t *testing.T) {
+	clock := &offerClock{at: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
+	svc := newOfferService(t, time.Hour, clock)
+	registerAgent(t, svc, aliceKey)
+
+	offer := publishTestOffer(t, svc, aliceKey, "summarize a document")
+	if want := clock.at.Add(time.Hour); !offer.ExpiresAt.Equal(want) {
+		t.Errorf("expiresAt = %s, want %s: a listing needs a deadline to be swept", offer.ExpiresAt, want)
+	}
+}
+
+func TestAnExpiredOfferStopsBeingDiscoverable(t *testing.T) {
+	clock := &offerClock{at: time.Now().UTC()}
+	svc := newOfferService(t, time.Hour, clock)
+	registerAgent(t, svc, aliceKey)
+	offer := publishTestOffer(t, svc, aliceKey, "summarize a document")
+
+	clock.advance(2 * time.Hour)
+	expired, err := svc.ExpireOffers(context.Background(), 100)
+	if err != nil || expired != 1 {
+		t.Fatalf("ExpireOffers = %d, %v, want 1", expired, err)
+	}
+	found, err := svc.Search(context.Background(), domain.OfferQuery{Text: "document"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 0 {
+		t.Errorf("an expired offer is still discoverable: %d results", len(found))
+	}
+	got, err := svc.Offer(context.Background(), offer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.OfferClosed {
+		t.Errorf("status = %s, want closed after the sweep", got.Status)
+	}
+}
+
+func TestTheOfferSweepLeavesAFreshOfferOpen(t *testing.T) {
+	clock := &offerClock{at: time.Now().UTC()}
+	svc := newOfferService(t, time.Hour, clock)
+	registerAgent(t, svc, aliceKey)
+	offer := publishTestOffer(t, svc, aliceKey, "summarize a document")
+
+	clock.advance(30 * time.Minute)
+	expired, err := svc.ExpireOffers(context.Background(), 100)
+	if err != nil || expired != 0 {
+		t.Fatalf("ExpireOffers = %d, %v, want 0 before the deadline", expired, err)
+	}
+	got, err := svc.Offer(context.Background(), offer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.OfferOpen {
+		t.Errorf("status = %s, want open before the deadline", got.Status)
+	}
+}
+
+func TestTheOfferSweepIsBounded(t *testing.T) {
+	clock := &offerClock{at: time.Now().UTC()}
+	svc := newOfferService(t, time.Hour, clock)
+	registerAgent(t, svc, aliceKey)
+	for _, d := range []string{"one", "two", "three"} {
+		publishTestOffer(t, svc, aliceKey, "summarize "+d)
+	}
+	clock.advance(2 * time.Hour)
+
+	first, err := svc.ExpireOffers(context.Background(), 2)
+	if err != nil || first != 2 {
+		t.Fatalf("first ExpireOffers = %d, %v, want 2", first, err)
+	}
+	second, err := svc.ExpireOffers(context.Background(), 2)
+	if err != nil || second != 1 {
+		t.Fatalf("second ExpireOffers = %d, %v, want 1: the batch is a bound, not a target", second, err)
+	}
+}
+
+func TestAClosedOfferIsNotTouchedByTheSweep(t *testing.T) {
+	clock := &offerClock{at: time.Now().UTC()}
+	svc := newOfferService(t, time.Hour, clock)
+	registerAgent(t, svc, aliceKey)
+	offer := publishTestOffer(t, svc, aliceKey, "summarize a document")
+
+	closed, err := svc.CloseOffer(context.Background(), aliceKey, offer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(2 * time.Hour)
+	expired, err := svc.ExpireOffers(context.Background(), 100)
+	if err != nil || expired != 0 {
+		t.Fatalf("ExpireOffers = %d, %v, want 0 for an already-closed offer", expired, err)
+	}
+	got, err := svc.Offer(context.Background(), offer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.UpdatedAt.Equal(closed.UpdatedAt) {
+		t.Errorf("updatedAt = %s, want %s: the sweep overwrote the seller's own close",
+			got.UpdatedAt, closed.UpdatedAt)
+	}
+}
+
+func TestNoOfferDeadlineMeansNoOfferSweep(t *testing.T) {
+	clock := &offerClock{at: time.Now().UTC()}
+	svc := newOfferService(t, 0, clock)
+	registerAgent(t, svc, aliceKey)
+	offer := publishTestOffer(t, svc, aliceKey, "summarize a document")
+
+	if !offer.ExpiresAt.IsZero() {
+		t.Errorf("expiresAt = %s, want zero when no deadline is configured", offer.ExpiresAt)
+	}
+	clock.advance(100 * time.Hour)
+	expired, err := svc.ExpireOffers(context.Background(), 100)
+	if err != nil || expired != 0 {
+		t.Fatalf("ExpireOffers = %d, %v, want 0 with no deadline", expired, err)
+	}
+}
