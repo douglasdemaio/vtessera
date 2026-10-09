@@ -45,6 +45,13 @@ of "a session is a key", and the ones that are not are marked.
    the service verifies at boot, on every request, and on every reconciler tick.
 5. **The operator's configuration.** Cluster, endpoint, caps, ceilings. An
    operator mistake is a security event, not a support ticket.
+6. **Service layer to an agent-declared probe endpoint.** The target comes from
+   the agent's own signed card, but the agent chose it, so a capability probe is
+   the only outbound request the service makes to a URL a caller supplied. It
+   dials only public addresses, checked at the moment of connection; it follows
+   no redirect; it bounds the response; and it identifies itself as
+   `vtessera-probe/<version>` so the agent being checked can see who called
+   rather than being probed anonymously.
 
 Boundary 2 is where the defect this document was written after was found: two
 handlers took an agent ID from the path and passed it straight to a service
@@ -94,6 +101,7 @@ caller's would have no way to notice, and the listing would still change.
 | Repoint the RPC endpoint at another chain | Genesis hash and every governed mint's existence, program, decimals, and authorities are verified at boot, per request, and per tick. |
 | Race two trade creations to take the same dollar | Refused: `Create` holds a lock across reading the cap and writing the reservation. |
 | Flood the API to exhaust the machine | 429 with a `Retry-After` once the caller's bucket empties, per agent and per client address. |
+| Point the probe at an internal address so the marketplace fetches it | Refused: only public addresses are dialled, resolved and checked at the moment of connection, and redirects are not followed. |
 
 ## Accepted risks
 
