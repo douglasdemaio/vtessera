@@ -252,6 +252,11 @@ func nonNilBytes(b []byte) []byte {
 	return b
 }
 
+// liveTradeQueryer is the read side a *sql.DB and a *sql.Tx both satisfy.
+type liveTradeQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // LiveTradesForAgent returns a party's trades that have not reached a terminal
 // state, so a retirement can be refused while one is in flight.
 //
@@ -260,11 +265,6 @@ func nonNilBytes(b []byte) []byte {
 // the operator rather than the agent: withdrawing a listing is a statement about
 // future business, and a buyer holding an open trade against that seller is
 // existing business with a counterparty who will not be there to finish it.
-// liveTradeQueryer is the read side a *sql.DB and a *sql.Tx both satisfy.
-type liveTradeQueryer interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
-
 func (s *Store) LiveTradesForAgent(ctx context.Context, agentID string) ([]domain.Trade, error) {
 	ids, err := s.liveTradeIDs(ctx, s.db, agentID)
 	if err != nil {
