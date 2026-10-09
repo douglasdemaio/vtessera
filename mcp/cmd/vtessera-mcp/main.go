@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -50,20 +51,21 @@ func main() {
 
 // serveHTTP exposes the same tool set over streamable HTTP for a hosted server.
 //
-// Only /mcp is registered. There is no health endpoint here on purpose: an operator
-// can tell whether this process works by calling a tool, and a second endpoint
-// reporting a different notion of health than the marketplace does is one more
-// thing that can disagree with the truth.
+// Three things are registered and nothing else. POST /mcp is the MCP transport.
+// The MCP Server Card answers a GET at /mcp/server-card, which is the location the
+// extension reserves relative to the transport URL, so a discovering client finds
+// identity and transport without speaking MCP. Everything else, including a GET of
+// /mcp itself, answers the health-probe status line: a directory that checks the
+// endpoint with GET must be able to learn it is up, and the MCP handler rejects
+// anything that is not POST.
 func serveHTTP(server *mcpserver.Server, addr string) {
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server.Server }, nil)
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", handler)
+	mux := newMux(server)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           probeReporting(mux),
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -81,26 +83,60 @@ func serveHTTP(server *mcpserver.Server, addr string) {
 	}
 }
 
-// probeReporting answers a health probe's GET with 200 before the MCP handler
-// sees it, because the MCP handler rejects anything that is not POST and a
-// directory that checks this endpoint by GET must be able to learn it is up.
-// When agent-ai-tool.com carries mcp_endpoint_url it probes it with a GET and
-// treats a non-2xx answer as a dead endpoint; a POST-only MCP path would
-// otherwise report "withheld, it did not answer a recent health check" for a
-// server that answers every real MCP call. The body is a status line only, so a
-// client that speaks MCP still POSTs to work.
-func probeReporting(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet || r.Method == http.MethodHead {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			if r.Method == http.MethodGet {
-				_, _ = io.WriteString(w, "vtessera-mcp is serving; speak MCP over POST /mcp\n")
-			}
-			return
+// newMux lays out the hosted routes. It is separate from serveHTTP so the routing
+// rules can be exercised without a listener.
+func newMux(server *mcpserver.Server) *http.ServeMux {
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server.Server }, nil)
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", handler)
+	mux.HandleFunc("GET /mcp/server-card", serveServerCard(server))
+	mux.HandleFunc("GET /mcp", serveProbe)
+	mux.HandleFunc("/", serveProbe)
+	return mux
+}
+
+// serveServerCard answers the discovery document for the host it was asked on.
+//
+// The transport URL is built from the request rather than configured, because this
+// process is behind a proxy and cannot read its own public address; a client that
+// fetched the card from a hostname is told to connect back to that same hostname.
+// The document is advisory, so trusting the Host header here adds no authority: it
+// changes only what the fetching client would already believe.
+func serveServerCard(server *mcpserver.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(server.Card(transportURL(r))); err != nil {
+			log.Printf("vtessera-mcp: writing the server card: %v", err)
 		}
-		next.ServeHTTP(w, r)
-	})
+	}
+}
+
+// transportURL is where a client should send MCP after reading the card.
+func transportURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host + "/mcp"
+}
+
+// serveProbe answers a health probe's GET with 200, because a directory that
+// checks this endpoint by GET treats a non-2xx answer as a dead endpoint; a
+// POST-only MCP path would otherwise report "withheld, it did not answer a recent
+// health check" for a server that answers every real MCP call. The body is a
+// status line only, so a client that speaks MCP still POSTs to work.
+func serveProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		_, _ = io.WriteString(w, "vtessera-mcp is serving; speak MCP over POST /mcp\n")
+	}
 }
 
 // checkMarketplace reports whether the marketplace is answering, once, at startup.

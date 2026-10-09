@@ -54,6 +54,7 @@
       "published": "2026-10-08",
       "publishedAs": "io.github.douglasdemaio/vtessera@0.1.0",
       "endpoint": "https://vtessera-mcp.fly.dev/mcp",
+      "serverCard": "https://vtessera-mcp.fly.dev/mcp/server-card",
       "image": "ghcr.io/douglasdemaio/vtessera-mcp:0.1.0",
       "validatedWith": "mcp-publisher validate mcp/registry/server.json",
       "notes": "version must equal mcpserver.Version and the OCI identifier's tag must equal both: a listing and a binary that disagree is worse than either alone. Bump them together, run mcp-publisher validate, then publish with mcp-publisher publish."
