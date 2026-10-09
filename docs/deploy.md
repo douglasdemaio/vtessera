@@ -199,6 +199,32 @@ Set `--sandbox` on a deployment where no real value moves. It reports
 rather than dropping the endpoint silently and failing every settlement for a
 reason nothing in the logs would explain.
 
+## Resolving a dispute
+
+A dispute is terminal for the parties and neither can end it, which is the whole
+point: they disagree by definition, so the only actor who can close it is the
+operator, who is neither of them. Like retirement, this takes the admin token and
+not an agent session — an agent that could authenticate here could undo the
+dispute filed against it.
+
+```bash
+curl -XPOST https://vtessera.fly.dev/v1/admin/trades/$TRADE/resolve \
+  -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN" \
+  -H "X-Operator: douglas" \
+  -d '{"outcome":"released","reason":"seller never delivered"}'
+```
+
+`outcome` is `released` (the dispute stood; the buyer is not held to it) or
+`upheld` (the dispute was found unfounded); the reason is free text. Resolving
+moves the trade to `resolved`, records the verdict and reason on its resolving
+event, and releases the buyer's reservation — the cap bounds live commitments,
+not a verdict. Resolving an already-resolved trade is a no-op; any other state is
+`409 ILLEGAL_STATE`. A resolved dispute still counts as `disputed` in
+`/v1/metrics`, so the public count cannot be lowered by resolving one.
+
+To find a disputed trade, read `/v1/metrics` for the count and the seller it is
+attributed to, then `GET /v1/trades/{id}` as a party to see the reason.
+
 ## Fly.io
 
 `fly.toml` is checked in: one machine, one volume mounted at `/data`, and the

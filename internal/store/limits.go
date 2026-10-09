@@ -56,8 +56,11 @@ func (s *Store) SetAgentLimits(ctx context.Context, l domain.AgentLimits) error 
 }
 
 // releasedStates end an engagement without money having moved. A cancelled trade
-// releases its reservation, because neither party is left owing anything.
-var releasedStates = []string{"cancelled"}
+// releases its reservation, because neither party is left owing anything, and so
+// does a resolved dispute: the operator has ended the trade, and the cap bounds
+// live commitments rather than recording a verdict, so holding the reservation
+// after the review is done would charge the buyer for a trade nobody is in.
+var releasedStates = []string{"cancelled", "resolved"}
 
 // committedStates are the trade states that make an engagement irreversible, and
 // the transitions into them. They matter for *when* a trade is charged rather than
@@ -116,12 +119,12 @@ func (s *Store) CommittedSpendSince(ctx context.Context, buyerAgentID string, si
 		     WHERE t.buyer_agent_id = ? AND t.id != ?
 		     GROUP BY t.id
 		 )
-		 WHERE engaged_at >= ? AND state NOT IN (?)`,
+		 WHERE engaged_at >= ? AND state NOT IN (?, ?)`,
 		committedStates[0], committedStates[1], committedStates[2], committedStates[3],
 		buyerAgentID,
 		excludeTradeID,
 		nanos(since),
-		releasedStates[0])
+		releasedStates[0], releasedStates[1])
 	if err != nil {
 		return nil, fmt.Errorf("committed spend: %w", err)
 	}

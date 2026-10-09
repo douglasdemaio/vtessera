@@ -348,13 +348,14 @@ const (
 	TradeRecorded          TradeState = "recorded"
 	TradeSettled           TradeState = "settled"
 	TradeDisputed          TradeState = "disputed"
+	TradeResolved          TradeState = "resolved"
 	TradeCancelled         TradeState = "cancelled"
 )
 
 func (s TradeState) Valid() bool {
 	switch s {
 	case TradeProposed, TradeNegotiating, TradeAccepted, TradeSettlementPending,
-		TradeRecorded, TradeSettled, TradeDisputed, TradeCancelled:
+		TradeRecorded, TradeSettled, TradeDisputed, TradeResolved, TradeCancelled:
 		return true
 	}
 	return false
@@ -362,7 +363,34 @@ func (s TradeState) Valid() bool {
 
 func (s TradeState) Terminal() bool {
 	switch s {
-	case TradeRecorded, TradeSettled, TradeDisputed, TradeCancelled:
+	case TradeRecorded, TradeSettled, TradeDisputed, TradeResolved, TradeCancelled:
+		return true
+	}
+	return false
+}
+
+// Resolution is an operator's verdict on a disputed trade, recorded on the
+// resolving event. It does not direct money, because a dispute is closed by hand
+// rather than by the state machine: the operator is ending the trade, not
+// reversing a settlement that already happened. Both outcomes are terminal and
+// both release the buyer's reservation, because the cap bounds what a key
+// commits to and the trade is no longer a live commitment. The verdict is what
+// distinguishes them, for the audit and for whoever reads the trade later.
+type Resolution string
+
+const (
+	// ResolutionReleased closes the trade against the seller: the dispute stood
+	// and the buyer is not held to it.
+	ResolutionReleased Resolution = "released"
+	// ResolutionUpheld closes the trade for the seller: the dispute was found
+	// unfounded. The reservation is still released; the cap is a limit on
+	// commitments, not a penalty.
+	ResolutionUpheld Resolution = "upheld"
+)
+
+func (r Resolution) Valid() bool {
+	switch r {
+	case ResolutionReleased, ResolutionUpheld:
 		return true
 	}
 	return false
@@ -400,6 +428,7 @@ const (
 	EventSettled           TradeEventType = "settled"
 	EventCancelled         TradeEventType = "cancelled"
 	EventDisputed          TradeEventType = "disputed"
+	EventResolved          TradeEventType = "resolved"
 	EventExpired           TradeEventType = "expired"
 )
 

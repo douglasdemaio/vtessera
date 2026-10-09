@@ -454,6 +454,14 @@ var transitions = map[domain.TradeState]map[domain.TradeState]domain.TradeEventT
 		domain.TradeDisputed:  domain.EventDisputed,
 		domain.TradeCancelled: domain.EventCancelled,
 	},
+	// disputed is terminal for the parties and has exactly one way out, and it is
+	// the operator's. It does not go to cancelled directly: a resolution records a
+	// verdict, and an event log that read the same for a dispute the operator
+	// voided and one they refused to void would be worth less than the token it
+	// took to file it.
+	domain.TradeDisputed: {
+		domain.TradeResolved: domain.EventResolved,
+	},
 }
 
 func canTransition(from, to domain.TradeState) (domain.TradeEventType, bool) {
@@ -614,6 +622,32 @@ func (s *Service) Dispute(ctx context.Context, actorID, tradeID, reason string) 
 		return tr, nil
 	}
 	return s.apply(ctx, tr, actorID, domain.TradeDisputed, reasonDetail(reason))
+}
+
+// Resolve closes a disputed trade on the operator's authority and records the
+// verdict. It is deliberately not party-gated: the whole point of a dispute is
+// that the two parties disagree, so the one actor who can end it is the one who
+// is neither of them. The route that calls it is behind the operator token.
+//
+// Resolving an already-resolved trade is a no-op rather than a conflict, the
+// same way Dispute is, so a retried operator request cannot fail on its own
+// success. Any other state is refused: the state machine, not the caller, owns
+// which trades are open to review.
+func (s *Service) Resolve(ctx context.Context, operatorID, tradeID string, outcome domain.Resolution, reason string) (domain.Trade, error) {
+	if !outcome.Valid() {
+		return domain.Trade{}, fmt.Errorf("%w: unknown resolution %q", domain.ErrInvalid, outcome)
+	}
+	tr, err := s.store.GetTrade(ctx, tradeID)
+	if err != nil {
+		return domain.Trade{}, err
+	}
+	if tr.State == domain.TradeResolved {
+		return tr, nil
+	}
+	if tr.State != domain.TradeDisputed {
+		return domain.Trade{}, fmt.Errorf("%w: trade %s is %s, not disputed", ErrIllegalState, tradeID, tr.State)
+	}
+	return s.applyAs(ctx, tr, operatorID, domain.TradeResolved, resolutionDetail(outcome, reason), domain.EventResolved)
 }
 
 func (s *Service) Accept(ctx context.Context, actorID, tradeID string) (domain.Trade, error) {
@@ -777,6 +811,17 @@ func reasonDetail(reason string) json.RawMessage {
 		return nil
 	}
 	detail, err := json.Marshal(map[string]string{"reason": reason})
+	if err != nil {
+		return nil
+	}
+	return detail
+}
+
+func resolutionDetail(outcome domain.Resolution, reason string) json.RawMessage {
+	detail, err := json.Marshal(map[string]string{
+		"outcome": string(outcome),
+		"reason":  reason,
+	})
 	if err != nil {
 		return nil
 	}

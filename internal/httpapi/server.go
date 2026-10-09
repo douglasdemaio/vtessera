@@ -131,6 +131,12 @@ func (s *Server) routes() {
 		// that could trigger it at will could use this service as a way to send
 		// traffic to hosts the marketplace can reach and it cannot.
 		s.mux.HandleFunc("POST /v1/admin/agents/{id}/probe", s.requireAdmin(s.handleProbeAgent))
+		// The parties to a dispute disagree by definition, so neither can end
+		// it; the operator is the one actor who is neither of them. Filing a
+		// dispute is open to a party through its session, but resolving one is
+		// not, or a buyer could un-dispute its own trade and a seller could
+		// sweep a complaint away.
+		s.mux.HandleFunc("POST /v1/admin/trades/{id}/resolve", s.requireAdmin(s.handleResolveTrade))
 	}
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	s.mux.HandleFunc("GET /v1/agents/{id}", s.handleGetAgent)
@@ -1024,6 +1030,30 @@ func (s *Server) handleGetRetirement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, retirement)
+}
+
+func (s *Server) handleResolveTrade(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Outcome string `json:"outcome"`
+		Reason  string `json:"reason"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	outcome := domain.Resolution(body.Outcome)
+	if !outcome.Valid() {
+		// Both are named so the operator does not have to read the source to
+		// learn the vocabulary. An empty outcome is the common typo and this is
+		// the only place it can be caught.
+		writeError(w, fmt.Errorf("%w: outcome must be %q or %q", domain.ErrInvalid, domain.ResolutionReleased, domain.ResolutionUpheld))
+		return
+	}
+	tr, err := s.trades.Resolve(r.Context(), adminActor(r), r.PathValue("id"), outcome, body.Reason)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tr)
 }
 
 // adminActor names who performed an operator action in the audit row. It is the
