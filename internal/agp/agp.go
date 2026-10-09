@@ -213,8 +213,9 @@ func (t Table) Route(intent Intent) (RouteResult, error) {
 	}
 	compliantRoutes := make([]RouteEntry, 0, len(candidates))
 	rejected := map[string]int{}
+	constraintKeys := sortedKeys(intent.PolicyConstraints)
 	for _, entry := range candidates {
-		if err := CheckPolicy(entry.Policy, intent.PolicyConstraints); err != nil {
+		if err := checkPolicy(entry.Policy, intent.PolicyConstraints, constraintKeys); err != nil {
 			if entry.OfferID != "" {
 				rejected[entry.OfferID]++
 			}
@@ -258,7 +259,11 @@ func lessCost(a, b RouteEntry) bool {
 }
 
 func CheckPolicy(announced, constraints map[string]any) error {
-	for _, key := range sortedKeys(constraints) {
+	return checkPolicy(announced, constraints, sortedKeys(constraints))
+}
+
+func checkPolicy(announced, constraints map[string]any, keys []string) error {
+	for _, key := range keys {
 		want := constraints[key]
 		have, ok := announced[key]
 		if !ok {
