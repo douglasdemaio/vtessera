@@ -321,26 +321,38 @@ is not the buyer or the seller. Closing an offer is checked in the service,
 because the offer names its owner in a column.
 
 The threat model is `docs/specs/2026-10-04-settlement-auth-threat-model.md`. It
-lists what is still open, and the three that matter are a cap per identity when
-identities are free, a marketplace signing key with no rotation path, and an
-operator retirement token with no identity behind it. Rate limiting was the
-fourth and is now in place: two in-memory token buckets in `internal/httpapi`,
-one per authenticated agent and one per client address, both on by default and
-both configurable with `--rate-limit-*`. The per-address bucket keys on the
-header the proxy sets (`--rate-limit-ip-header`, default `Fly-Client-IP`),
-because behind Fly every connection shares the proxy's address; keying on
-`RemoteAddr` there would throttle every caller together. The buckets are
+lists what is still open, and the two that matter are a cap per identity when
+identities are free, and a marketplace signing key with no rotation path. Rate
+limiting was a third and is now in place: two in-memory token buckets in
+`internal/httpapi`, one per authenticated agent and one per client address, both
+on by default and both configurable with `--rate-limit-*`. The per-address bucket
+keys on the header the proxy sets (`--rate-limit-ip-header`, default
+`Fly-Client-IP`), because behind Fly every connection shares the proxy's address;
+keying on `RemoteAddr` there would throttle every caller together. The buckets are
 in-memory and reset on restart, which is fine while this is one machine, and the
-threat model records it as a known limit rather than implying otherwise.
+threat model records it as a known limit rather than implying otherwise. Operator
+attribution and rotation are the fourth and are now in place too — see constraint
+9; what remains there is notification and scope.
 
 ### 9. The retirement routes take a token, not an agent session
 
 `POST /v1/admin/agents/{id}/retire` is the only route that removes a principal's
-ability to trade without that principal asking. It is gated on
-`--admin-token` / `VTESSERA_ADMIN_TOKEN`, compared in constant time, and
-deliberately does not accept an agent session: an agent that could authenticate
-there could withdraw every other agent. With no token configured the routes are
-not registered at all, and answer `404` rather than `403`.
+ability to trade without that principal asking. It is gated on an operator
+credential compared in constant time and deliberately does not accept an agent
+session: an agent that could authenticate there could withdraw every other agent.
+With no credential configured the routes are not registered at all, and answer
+`404` rather than `403`.
+
+The credential is either `--admin-token` / `VTESSERA_ADMIN_TOKEN`, the unnamed
+single-token form treated as an operator named `operator`, or one or more named
+entries in `--admin-operators` / `VTESSERA_ADMIN_OPERATORS` as comma-separated
+`name=token` pairs. The name bound to the token that was presented is what the
+audit row records; it is carried on the request context by `requireAdmin` and read
+by `adminActor`. The caller-supplied `X-Operator` header is **not** consulted and
+must not be reintroduced: a name from the request records what was claimed, not
+who acted, which is the defect naming operators exists to close. Several tokens
+may be live at once, which is the rotation path — add the new one, remove the old
+one, and the trail spans the change.
 
 The same gate covers `POST /v1/admin/trades/{id}/resolve`, which closes a dispute.
 It takes the token and not a session on purpose: the two parties disagree by

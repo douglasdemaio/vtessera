@@ -88,6 +88,7 @@ type serverBuild struct {
 	acceptTTL       time.Duration
 	clock           func() time.Time
 	adminToken      string
+	adminOperators  []httpapi.Operator
 	requireOfferSig bool
 	// rateLimit configures the request limits. Zero leaves both layers off, so
 	// every test that is not about limiting behaves as it did before.
@@ -179,6 +180,7 @@ func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Led
 	if build.adminToken != "" {
 		opts.AdminToken = []byte(build.adminToken)
 	}
+	opts.AdminOperators = build.adminOperators
 	opts.RateLimit = build.rateLimit
 	api := httpapi.New(opts)
 	server := httptest.NewServer(api)

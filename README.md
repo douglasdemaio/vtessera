@@ -381,18 +381,23 @@ its open offers close, and it disappears from `GET /v1/agents` — but nothing i
 deleted, so the tessera a buyer already holds keeps verifying and
 `POST /v1/admin/agents/{id}/restore` reverses it.
 
-The routes only exist when `--admin-token` (or `VTESSERA_ADMIN_TOKEN`) is set, and
-they require that token rather than an agent session: an agent that could
-authenticate there could withdraw every other agent on the marketplace. Without a
-token they answer `404`, so a deployment that has not opted in does not have the
-capability. A retirement is refused while the agent has a trade that has not
-reached a terminal state, because a buyer holding an open trade against that
-seller is existing business, not future business. The refusal is a
-`409 AGENT_HAS_LIVE_TRADES` naming `liveTradeIds`, because the operator holding it
-is the one who can clear it and a count alone does not say which trades to settle,
-dispute or expire. The check runs inside the same transaction as the withdrawal,
-so a trade accepted in the moment between a check and the write cannot slip
-through.
+The routes only exist when an operator credential is configured. `--admin-token`
+(`VTESSERA_ADMIN_TOKEN`) is the unnamed single-token form; `--admin-operators`
+(`VTESSERA_ADMIN_OPERATORS`, comma-separated `name=token`) names each operator so
+the audit row records who acted. They require that credential rather than an agent
+session: an agent that could authenticate there could withdraw every other agent
+on the marketplace. The recorded name comes from the credential that was
+presented, never from a request header, so a privileged action is attributable to
+a configured principal; several tokens can be live at once, which is a rotation
+path. Without a credential the routes answer `404`, so a deployment that has not
+opted in does not have the capability. A retirement is refused while the agent has
+a trade that has not reached a terminal state, because a buyer holding an open
+trade against that seller is existing business, not future business. The refusal
+is a `409 AGENT_HAS_LIVE_TRADES` naming `liveTradeIds`, because the operator
+holding it is the one who can clear it and a count alone does not say which trades
+to settle, dispute or expire. The check runs inside the same transaction as the
+withdrawal, so a trade accepted in the moment between a check and the write cannot
+slip through.
 
 `GET /v1/admin/agents/{id}/retirement` returns `actor` for who withdrew the
 listing and `restoredBy` for who put it back. They are recorded separately

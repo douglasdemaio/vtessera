@@ -124,10 +124,15 @@ func run(args []string) error {
 	} else {
 		logger.Warn("unsigned offers are accepted: a buyer is told a listing is unvouched-for, but the terms are not verified by anyone but the seller")
 	}
-	if len(cfg.AdminToken) > 0 {
-		logger.Info("admin routes enabled: an operator token can retire and restore agent listings")
+	if len(cfg.AdminToken) > 0 || len(cfg.AdminOperators) > 0 {
+		names := make([]string, 0, len(cfg.AdminOperators))
+		for _, op := range cfg.AdminOperators {
+			names = append(names, op.Name)
+		}
+		logger.Info("admin routes enabled: an operator credential can retire and restore agent listings",
+			"operators", names)
 	} else {
-		logger.Warn("no admin token configured: the retirement routes are absent, so no agent listing can be withdrawn through the API")
+		logger.Warn("no admin credential configured: the admin routes are absent, so no agent listing can be withdrawn through the API")
 	}
 
 	logger.Info("spending caps active",
@@ -261,17 +266,18 @@ func run(args []string) error {
 	}
 
 	api := httpapi.New(httpapi.Options{
-		Registry:      registrySvc,
-		Trades:        trades,
-		Auth:          authSvc,
-		Ledger:        led,
-		Tokens:        mints,
-		Version:       cfg.Version,
-		PublicBaseURL: cfg.PublicBaseURL,
-		Cluster:       cfg.Solana.Cluster,
-		GenesisHash:   preflightGenesis,
-		Sandbox:       cfg.Sandbox,
-		AdminToken:    cfg.AdminToken,
+		Registry:       registrySvc,
+		Trades:         trades,
+		Auth:           authSvc,
+		Ledger:         led,
+		Tokens:         mints,
+		Version:        cfg.Version,
+		PublicBaseURL:  cfg.PublicBaseURL,
+		Cluster:        cfg.Solana.Cluster,
+		GenesisHash:    preflightGenesis,
+		Sandbox:        cfg.Sandbox,
+		AdminToken:     cfg.AdminToken,
+		AdminOperators: namedOperators(cfg.AdminOperators),
 		RateLimit: httpapi.RateLimitOptions{
 			AgentRPS:   cfg.RateLimit.AgentRPS,
 			AgentBurst: cfg.RateLimit.AgentBurst,
@@ -390,4 +396,15 @@ func capCeiling(v money.Amount) string {
 		return "unset"
 	}
 	return v.String()
+}
+
+// namedOperators adapts the configured named credentials to the http layer's
+// type. The legacy single token is passed separately and is treated there as an
+// operator named "operator".
+func namedOperators(ops []config.AdminOperator) []httpapi.Operator {
+	out := make([]httpapi.Operator, 0, len(ops))
+	for _, op := range ops {
+		out = append(out, httpapi.Operator{Name: op.Name, Token: op.Token})
+	}
+	return out
 }

@@ -256,3 +256,72 @@ func TestTheAdminTokenCanComeFromTheEnvironment(t *testing.T) {
 		t.Errorf("admin token length = %d, want 48", len(cfg.AdminToken))
 	}
 }
+
+func TestNamedOperatorTokensCarryTheirNameAndToken(t *testing.T) {
+	alice := strings.Repeat("a", 32)
+	bob := strings.Repeat("b", 32)
+	cfg, err := Parse([]string{
+		"--session-secret", goodSecret,
+		"--admin-operators", "alice=" + alice + ",bob=" + bob,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.AdminOperators) != 2 {
+		t.Fatalf("operators = %d, want 2", len(cfg.AdminOperators))
+	}
+	if cfg.AdminOperators[0].Name != "alice" || string(cfg.AdminOperators[0].Token) != alice {
+		t.Errorf("first operator = %+v, want alice bound to its token", cfg.AdminOperators[0])
+	}
+	if cfg.AdminOperators[1].Name != "bob" || string(cfg.AdminOperators[1].Token) != bob {
+		t.Errorf("second operator = %+v, want bob bound to its token", cfg.AdminOperators[1])
+	}
+}
+
+func TestNamedOperatorTokensCanComeFromTheEnvironment(t *testing.T) {
+	// On Fly the credential is a secret, so the named form must work from the
+	// environment rather than only from the process arguments.
+	t.Setenv("VTESSERA_ADMIN_OPERATORS", "release="+strings.Repeat("c", 40))
+	cfg, err := Parse([]string{"--session-secret", goodSecret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.AdminOperators) != 1 || cfg.AdminOperators[0].Name != "release" {
+		t.Errorf("operators = %+v, want the named one from the environment", cfg.AdminOperators)
+	}
+}
+
+func TestAnOperatorEntryWithoutANameOrTokenIsRefused(t *testing.T) {
+	// A credential with no name is the header-trust problem over again, and a
+	// credential with no token is a route nobody can use, so both are refused at
+	// boot rather than half-configured.
+	for _, entry := range []string{"alice", "=" + strings.Repeat("a", 32), "alice="} {
+		if _, err := Parse([]string{"--session-secret", goodSecret, "--admin-operators", entry}); err == nil {
+			t.Errorf("admin-operators %q was accepted", entry)
+		}
+	}
+}
+
+func TestAShortNamedOperatorTokenIsAStartupRefusal(t *testing.T) {
+	_, err := Parse([]string{"--session-secret", goodSecret, "--admin-operators", "alice=hunter2"})
+	if err == nil {
+		t.Fatal("a short named operator token was accepted")
+	}
+}
+
+func TestDuplicateOperatorNamesOrTokensAreRefused(t *testing.T) {
+	tok := strings.Repeat("d", 32)
+	_, err := Parse([]string{"--session-secret", goodSecret, "--admin-operators", "alice=" + tok + ",alice=" + strings.Repeat("e", 32)})
+	if err == nil || !strings.Contains(err.Error(), "unique") {
+		t.Errorf("a repeated name was accepted: %v", err)
+	}
+	_, err = Parse([]string{"--session-secret", goodSecret, "--admin-operators", "alice=" + tok + ",bob=" + tok})
+	if err == nil || !strings.Contains(err.Error(), "unique") {
+		t.Errorf("a repeated token was accepted: %v", err)
+	}
+	// The legacy token is an operator too, so a named entry cannot reuse it.
+	_, err = Parse([]string{"--session-secret", goodSecret, "--admin-token", tok, "--admin-operators", "alice=" + tok})
+	if err == nil || !strings.Contains(err.Error(), "unique") {
+		t.Errorf("a named token colliding with the legacy token was accepted: %v", err)
+	}
+}
