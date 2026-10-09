@@ -340,6 +340,14 @@ definition, so the only actor who can end the dispute is the one who is neither 
 them, and a party that could authenticate there could un-dispute its own trade or
 sweep away a complaint against it.
 
+`GET /v1/admin/trades/{id}`, the operator's read of a trade and its event history,
+sits behind that same token for the same reason: it is what lets an operator see a
+dispute's reason and verdict without reading the database, and a party has no
+business holding it. It must stay on `requireAdmin` and keep taking the token, not
+a session. The service method `AdminTrade` deliberately does no party check — the
+route's token is the gate — and is separate from `Get` so the party check cannot
+be dropped from `Get` by accident.
+
 Do not add a default token, a fallback to the session secret, or an agent-session
 path into `requireAdmin`. Do not retire an agent to make a test pass, and do not
 retire one on the live deployment without saying so first. `RetireAgent` is

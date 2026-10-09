@@ -240,7 +240,18 @@ not a verdict. Resolving an already-resolved trade is a no-op; any other state i
 `/v1/metrics`, so the public count cannot be lowered by resolving one.
 
 To find a disputed trade, read `/v1/metrics` for the count and the seller it is
-attributed to, then `GET /v1/trades/{id}` as a party to see the reason.
+attributed to. Then read the dispute itself with the operator token:
+
+```bash
+curl https://vtessera.fly.dev/v1/admin/trades/$TRADE \
+  -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN"
+```
+
+That returns the trade and its full event history — the buyer's reason, the
+verdict if one was recorded, and who did what — so reviewing a dispute does not
+mean opening the SQLite file on the volume. It takes the token and not a session
+for the same reason the resolve does, and the parties keep their own scoped view
+through `GET /v1/trades/{id}`.
 
 ## Fly.io
 

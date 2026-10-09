@@ -1,7 +1,7 @@
 # Failure and Dispute Classification — Draft
 
 **Date:** 2026-10-08
-**Status:** Draft for review. Gap 1 was fixed on 2026-10-09 (`POST /v1/admin/trades/{id}/resolve` closes a dispute with an operator-recorded verdict); gaps 2 and 3 were fixed on 2026-10-09 as well (open trades and abandoned settlement builds now expire and release their reservation). Gaps 4–8 in §7 still need sign-off under Rule 2 before any fix.
+**Status:** Draft for review. Gap 1 was fixed on 2026-10-09 (`POST /v1/admin/trades/{id}/resolve` closes a dispute with an operator-recorded verdict); gaps 2 and 3 were fixed on 2026-10-09 as well (open trades and abandoned settlement builds now expire and release their reservation); gap 4's expiry half, gap 6 and gap 7 were fixed the same day. Gap 4's failed-probe half, gap 5 and gap 8 are the remaining decisions, and gap 5 still needs sign-off under Rule 2.
 **Method:** every claim below was read out of the code at the cited `file:line`, as of the report's date. The gap 1 fix added lines to `trade.go` and `domain.go`, so some citations there have drifted; the prose, not the bare number, is what to trust.
 **Operating assumption:** disputes are resolved by the operator by hand. There is no automated arbitration, and this document does not propose any.
 
@@ -296,10 +296,15 @@ fixed; the rest are open.
    refusal, so an agent can see what a hanging or disputed trade is holding
    without reading SQLite. The figure is the session's own agent, and a
    cancelled or resolved trade releases its reservation.
-7. **Dispute detail is invisible above the parties.** The public sees counts;
-   the reason lives in the trade event and is visible only to the two parties
-   (`trade.go:692-696`). Operational/audit review of a dispute needs a
-   deliberate DB read.
+7. ~~**Dispute detail is invisible above the parties.**~~ **Fixed 2026-10-09.**
+   The public saw counts and the reason lived in the trade event, visible only to
+   the two parties; operational review meant a deliberate DB read. `GET
+   /v1/admin/trades/{id}`, behind the operator token and not a session, now
+   returns the trade and its full event history — the reason, the verdict, and who
+   did what — so a review is a route rather than a `sqlite3` session. The parties'
+   own scoped view through `GET /v1/trades/{id}` is unchanged; this adds no
+   exposure to them, only reaches around the disagreement the operator exists to
+   settle.
 8. **`README.md:184` says the accepted-trade deadline is "24 hours by
    default"; the flag table (`:235`) and the code (`config.go:176`) say 72h.**
    The prose is stale. (Corrected in the same change as this draft.)

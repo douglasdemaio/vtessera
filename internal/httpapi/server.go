@@ -137,6 +137,11 @@ func (s *Server) routes() {
 		// not, or a buyer could un-dispute its own trade and a seller could
 		// sweep a complaint away.
 		s.mux.HandleFunc("POST /v1/admin/trades/{id}/resolve", s.requireAdmin(s.handleResolveTrade))
+		// A dispute's reason and the resolution live in the trade's event log,
+		// which a party reads through its own session. An operator reviewing one
+		// has no session here, and the report's gap 7 was that the only way to
+		// read it was SQLite. This view is that read, behind the same token.
+		s.mux.HandleFunc("GET /v1/admin/trades/{id}", s.requireAdmin(s.handleAdminTrade))
 	}
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	s.mux.HandleFunc("GET /v1/agents/{id}", s.handleGetAgent)
@@ -1049,6 +1054,18 @@ func (s *Server) handleResolveTrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tr, err := s.trades.Resolve(r.Context(), adminActor(r), r.PathValue("id"), outcome, body.Reason)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tr)
+}
+
+// handleAdminTrade returns a trade and its full event history for an operator.
+// It takes no agent session: the operator is neither party, which is what lets
+// them read a dispute the two parties cannot agree on.
+func (s *Server) handleAdminTrade(w http.ResponseWriter, r *http.Request) {
+	tr, err := s.trades.AdminTrade(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
 		return
