@@ -93,7 +93,10 @@ func (s *Store) AddTradeAcceptance(ctx context.Context, tradeID, agentID string,
 // deadline: false, not an error, because "not yet accepted" is a state and not a
 // fault.
 func (s *Store) TradeAcceptance(ctx context.Context, tradeID string) (time.Time, bool, error) {
-	var at int64
+	// MIN() over zero matching rows still returns one row, with a NULL value, so
+	// sql.ErrNoRows never fires here; a NullInt64 is what tells "no acceptance yet"
+	// apart from "accepted at nanosecond zero".
+	var at sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT MIN(created_at) FROM trade_acceptances WHERE trade_id = ?`, tradeID).Scan(&at)
 	switch {
@@ -101,10 +104,10 @@ func (s *Store) TradeAcceptance(ctx context.Context, tradeID string) (time.Time,
 		return time.Time{}, false, nil
 	case err != nil:
 		return time.Time{}, false, fmt.Errorf("trade acceptance: %w", err)
-	case at == 0:
+	case !at.Valid:
 		return time.Time{}, false, nil
 	}
-	return fromNanos(at), true, nil
+	return fromNanos(at.Int64), true, nil
 }
 
 // AcceptedBefore returns accepted trades whose acceptance deadline falls before
