@@ -1144,6 +1144,87 @@ func TestAFinishedTradeDoesNotBlockARetirement(t *testing.T) {
 	}
 }
 
+// LiveTradesForAgent is what the operator reads to see which counterparty
+// trades a retirement would refuse against. It must return the full trade
+// record for each unfinished trade naming the agent as either party, oldest
+// first, and leave out both finished trades and trades the agent is not a
+// party to.
+func TestLiveTradesForAgentReturnsUnfinishedTradesForEitherParty(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	for _, id := range []string{"alice", "bob", "carol"} {
+		if err := s.CreateAgent(ctx, testAgent(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateOffer(ctx, testOffer("o1", "alice"), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOffer(ctx, testOffer("o2", "carol"), ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+
+	asSeller := domain.Trade{
+		ID: "t-as-seller", OfferID: "o1", BuyerAgentID: "bob", SellerAgentID: "alice",
+		Description: "alice sells to bob", Amount: money.MustParse("10"), Mint: validMint,
+		SettlementMode: domain.SettlementOffchain, State: domain.TradeAccepted, CreatedAt: now,
+	}
+	if err := s.CreateTrade(ctx, asSeller, "key-as-seller"); err != nil {
+		t.Fatal(err)
+	}
+	asBuyer := domain.Trade{
+		ID: "t-as-buyer", OfferID: "o2", BuyerAgentID: "alice", SellerAgentID: "carol",
+		Description: "alice buys from carol", Amount: money.MustParse("5"), Mint: validMint,
+		SettlementMode: domain.SettlementOffchain, State: domain.TradeNegotiating,
+		CreatedAt: now.Add(time.Minute),
+	}
+	if err := s.CreateTrade(ctx, asBuyer, "key-as-buyer"); err != nil {
+		t.Fatal(err)
+	}
+	finished := domain.Trade{
+		ID: "t-finished", OfferID: "o1", BuyerAgentID: "bob", SellerAgentID: "alice",
+		Description: "already settled", Amount: money.MustParse("10"), Mint: validMint,
+		SettlementMode: domain.SettlementOffchain, State: domain.TradeSettled, CreatedAt: now,
+	}
+	if err := s.CreateTrade(ctx, finished, "key-finished"); err != nil {
+		t.Fatal(err)
+	}
+	notAParty := domain.Trade{
+		ID: "t-not-a-party", OfferID: "o2", BuyerAgentID: "bob", SellerAgentID: "carol",
+		Description: "bob buys from carol", Amount: money.MustParse("5"), Mint: validMint,
+		SettlementMode: domain.SettlementOffchain, State: domain.TradeAccepted, CreatedAt: now,
+	}
+	if err := s.CreateTrade(ctx, notAParty, "key-not-a-party"); err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := s.LiveTradesForAgent(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 2 {
+		t.Fatalf("live = %d trades, want 2: %+v", len(live), live)
+	}
+	if live[0].ID != "t-as-seller" || live[1].ID != "t-as-buyer" {
+		t.Errorf("live ids = [%s %s], want oldest first [t-as-seller t-as-buyer]", live[0].ID, live[1].ID)
+	}
+	if live[0].Description != "alice sells to bob" || live[0].Amount.String() != "10" {
+		t.Errorf("live[0] = %+v, want the full stored trade record", live[0])
+	}
+	if live[1].Description != "alice buys from carol" || live[1].Amount.String() != "5" {
+		t.Errorf("live[1] = %+v, want the full stored trade record", live[1])
+	}
+
+	empty, err := s.LiveTradesForAgent(ctx, "unknown-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("live trades for an agent with none = %+v, want empty", empty)
+	}
+}
+
 // Restoring records who reversed the withdrawal, separately from who made it.
 func TestRestoringRecordsTheOperatorWhoReversedTheWithdrawal(t *testing.T) {
 	ctx := context.Background()
