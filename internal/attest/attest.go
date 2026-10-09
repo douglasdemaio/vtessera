@@ -119,6 +119,35 @@ func Verify(payload []byte, sig Signature, expectedKeyID string) error {
 	return nil
 }
 
+// VerifyAny accepts a signature made by any key in a trusted set.
+//
+// It exists for a marketplace that has rotated its signing key: an attestation
+// made by a retired key must keep verifying while that key is published as one of
+// the marketplace's, and the signature's own KeyID says which one made it. The set
+// is the caller's, so trusting a key is always a decision made where the keys are
+// known.
+func VerifyAny(payload []byte, sig Signature, keyIDs []string) error {
+	for _, id := range keyIDs {
+		if sig.KeyID == id {
+			return Verify(payload, sig, id)
+		}
+	}
+	return fmt.Errorf("%w: signed by %s, which is not among the %d trusted keys",
+		ErrInvalid, sig.KeyID, len(keyIDs))
+}
+
+// VerifyCardAttestedByAny checks a third-party card attestation against a set of
+// trusted attester keys.
+func VerifyCardAttestedByAny(card Card, sig Signature, keyIDs []string) error {
+	return VerifyAny(CardBytes(card, sig.SignedAt), sig, keyIDs)
+}
+
+// VerifyProbeAttestedByAny checks a probe attestation against a set of trusted
+// attester keys.
+func VerifyProbeAttestedByAny(probe Probe, sig Signature, keyIDs []string) error {
+	return VerifyAny(ProbeBytes(probe, sig.SignedAt), sig, keyIDs)
+}
+
 // Sign produces a detached signature over payload.
 //
 // It is a method rather than a free function so a key cannot be passed where a

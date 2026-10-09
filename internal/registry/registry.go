@@ -118,6 +118,11 @@ type Service struct {
 	// card it published, and a listing with no marketplace signature would be a
 	// listing a directory has no way to attribute to anybody.
 	market *attest.SigningKey
+	// marketRetired is the public keys this marketplace signed with before a
+	// rotation, and marketKeys is the current key followed by them: the set every
+	// card and probe attestation is verified against.
+	marketRetired []string
+	marketKeys    []string
 }
 
 // Pricer reports whether a mint has a declared USD rate. It is an interface so
@@ -148,6 +153,13 @@ type Option func(*Service)
 // currency the spending cap cannot be measured against cannot be offered at all.
 func WithPricer(p Pricer) Option {
 	return func(s *Service) { s.priced = p }
+}
+
+// WithRetiredMarketplaceKeys trusts public keys this marketplace signed with
+// before a rotation, so a card or probe attested under them still verifies. The
+// keys are verification-only: this service never signs with them.
+func WithRetiredMarketplaceKeys(ids []string) Option {
+	return func(s *Service) { s.marketRetired = append([]string(nil), ids...) }
 }
 
 // WithOfferTTL sets how long a published offer stays open before the sweep
@@ -193,6 +205,9 @@ func New(store Store, mints tokens.Registry, market *attest.SigningKey, opts ...
 	s := &Service{store: store, mints: mints, market: market, now: func() time.Time { return time.Now().UTC() }}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if market != nil {
+		s.marketKeys = append([]string{market.PublicKeyBase58()}, s.marketRetired...)
 	}
 	return s
 }
@@ -328,6 +343,13 @@ func (s *Service) MarketplaceKeyID() string {
 		return ""
 	}
 	return s.market.PublicKeyBase58()
+}
+
+// MarketplaceKeyIDs is every key a card or probe this marketplace published may
+// be verified under, the current one first. It is the set /healthz publishes and
+// the reason a rotation does not invalidate a listing made under the old key.
+func (s *Service) MarketplaceKeyIDs() []string {
+	return append([]string(nil), s.marketKeys...)
 }
 
 // CardAttestation returns an agent's stored card signatures and whether an
@@ -606,8 +628,8 @@ func (s *Service) VerifyProbe(report probe.Report) error {
 	if report.Signature == nil {
 		return fmt.Errorf("%w: probe result is unsigned", ErrAttestationRefused)
 	}
-	return attest.VerifyProbeAttestedBy(probe.Statement(report), *report.Signature,
-		s.market.PublicKeyBase58())
+	return attest.VerifyProbeAttestedByAny(probe.Statement(report), *report.Signature,
+		s.marketKeys)
 }
 
 // challenge is the nonce a probe answer has to echo.
