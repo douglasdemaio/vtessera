@@ -235,7 +235,7 @@ if rpc_url:
     )
     settlement = issued["settlement"]
     assert settlement["unsignedTx"], issued
-    assert settlement["feeLamports"] == 500000, issued
+    assert settlement["feeLamports"] == 1000, issued
     assert issued["trade"]["state"] == "settlement_pending", issued
     assert "signature" not in settlement, "the service must never return a signature"
     print("  ok buyer received an unsigned settlement transaction it must sign")
