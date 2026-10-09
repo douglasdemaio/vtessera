@@ -2,6 +2,8 @@ package ledger
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/money"
 	"github.com/douglasdemaio/vtessera/internal/store"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/mr-tron/base58"
 )
 
 const mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -278,7 +281,7 @@ func TestLoadOrCreateSignerRejectsUndersizedKey(t *testing.T) {
 
 func (l *Ledger) sign(t *testing.T, claims TesseraClaims) string {
 	t.Helper()
-	signed, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(l.signer.private)
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(l.signer.CurrentPrivate())
 	if err != nil {
 		t.Fatalf("sign test claims: %v", err)
 	}
@@ -509,4 +512,199 @@ func TestATesseraClaimingAnotherClusterIsReportedNotAccepted(t *testing.T) {
 	if claims.Settlement.Cluster == "mainnet-beta" {
 		t.Error("a devnet receipt must not read as a mainnet-beta one")
 	}
+}
+
+func TestReceiptNamesItsSigningKey(t *testing.T) {
+	l, _ := newLedger(t)
+	receipt, err := l.Record(context.Background(), completedTrade("t1"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := jwt.NewParser().ParseUnverified(receipt.JWS, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("parse receipt: %v", err)
+	}
+	if got := token.Header["kid"]; got != l.VerificationKey() {
+		t.Errorf("kid = %v, want the signing key %q", got, l.VerificationKey())
+	}
+}
+
+func TestRotationKeepsEarlierReceiptsVerifiable(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "signing.key")
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "vtessera.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	before, _, err := LoadOrCreateSigner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLedger := New(st, before)
+	oldReceipt, err := oldLedger.Record(ctx, completedTrade("t1"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newKey, err := RotateSigner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, created, err := LoadOrCreateSigner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("rotation must not report the key as newly generated")
+	}
+	if after.PublicKeyBase58() != newKey {
+		t.Fatalf("reloaded key = %q, want the rotated key %q", after.PublicKeyBase58(), newKey)
+	}
+	if got, want := after.VerificationKeyIDs(), []string{newKey, before.PublicKeyBase58()}; !equalStrings(got, want) {
+		t.Fatalf("verification keys = %v, want %v", got, want)
+	}
+
+	rotated := New(st, after)
+	if _, err := rotated.Verify(oldReceipt.JWS); err != nil {
+		t.Fatalf("a receipt issued before rotation must still verify: %v", err)
+	}
+	if got := rotated.SignerKeyID(oldReceipt.JWS); got != before.PublicKeyBase58() {
+		t.Errorf("old receipt names key %q, want the retired key %q", got, before.PublicKeyBase58())
+	}
+
+	freshReceipt, err := rotated.Record(ctx, completedTrade("t2"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rotated.SignerKeyID(freshReceipt.JWS); got != newKey {
+		t.Errorf("fresh receipt names key %q, want the current key %q", got, newKey)
+	}
+	if oldReceipt.JWS == freshReceipt.JWS {
+		t.Error("a rotated key must produce a different signature")
+	}
+}
+
+func TestRotationAccumulatesRetiredKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signing.key")
+	first, _, err := LoadOrCreateSigner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := RotateSigner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := RotateSigner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, _, err := LoadOrCreateSigner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{third, second, first.PublicKeyBase58()}
+	if got := reloaded.VerificationKeyIDs(); !equalStrings(got, want) {
+		t.Errorf("verification keys = %v, want %v", got, want)
+	}
+}
+
+func TestLegacySignerFileLoadsAsCurrentKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signing.key")
+	legacy, err := GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := base64.StdEncoding.EncodeToString(legacy.CurrentPrivate())
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, created, err := LoadOrCreateSigner(path)
+	if err != nil {
+		t.Fatalf("a legacy single-key file must load: %v", err)
+	}
+	if created {
+		t.Error("a legacy file must not be reported as generated")
+	}
+	if loaded.PublicKeyBase58() != legacy.PublicKeyBase58() {
+		t.Error("the legacy key must be loaded as the current one")
+	}
+	if got := loaded.RetiredKeyIDs(); len(got) != 0 {
+		t.Errorf("retired keys = %v, want none", got)
+	}
+}
+
+func TestRotateMigratesLegacyFileToKeyring(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signing.key")
+	legacy, err := GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := base64.StdEncoding.EncodeToString(legacy.CurrentPrivate())
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RotateSigner(path); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body[0] != '{' {
+		t.Errorf("rotated file = %q, want a JSON keyring", body)
+	}
+	reloaded, _, err := LoadOrCreateSigner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.RetiredKeyIDs(); !equalStrings(got, []string{legacy.PublicKeyBase58()}) {
+		t.Errorf("retired keys = %v, want the legacy key retired", got)
+	}
+}
+
+func TestNewSignerWithRetiredRejectsMalformedKeys(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewSigner(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string][]string{
+		"not base58":      {"not-base58!!"},
+		"wrong length":    {base58.Encode([]byte("short"))},
+		"current key":     {signer.PublicKeyBase58()},
+		"empty id":        {""},
+		"duplicate entry": {signer.PublicKeyBase58()},
+	}
+	for name, retired := range cases {
+		if _, err := NewSignerWithRetired(private, retired); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+func TestLoadOrCreateSignerRejectsCorruptKeyring(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signing.key")
+	if err := os.WriteFile(path, []byte(`{"version":1,"current":"not-base64!!"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadOrCreateSigner(path); err == nil {
+		t.Fatal("expected an error loading a keyring with an undecodable current key")
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -314,9 +314,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// deployment that settles on mainnet-beta and one that settles on devnet
 	// would otherwise look identical from outside.
 	body := map[string]any{
-		"status":          "ok",
-		"version":         s.version,
-		"verificationKey": s.ledger.VerificationKey(),
+		"status":           "ok",
+		"version":          s.version,
+		"verificationKey":  s.ledger.VerificationKey(),
+		"verificationKeys": s.ledger.VerificationKeys(),
 		"agp": map[string]any{
 			"version":   agp.Version,
 			"extension": agp.ExtensionURI,
@@ -413,7 +414,7 @@ func (s *Server) handleGetCardAttestation(w http.ResponseWriter, r *http.Request
 		// the agent being described, the signature names who vouched, and checking
 		// the wrong one of those against the other would refuse every genuine
 		// marketplace attestation.
-		market["valid"] = attest.VerifyCardAttestedBy(statement, found.Market, s.registry.MarketplaceKeyID()) == nil
+		market["valid"] = attest.VerifyCardAttestedByAny(statement, found.Market, s.registry.MarketplaceKeyIDs()) == nil
 		market["signature"] = found.Market
 	}
 	if found.Agent != nil {
@@ -840,9 +841,14 @@ func (s *Server) handleTessera(w http.ResponseWriter, r *http.Request) {
 }
 
 func tesseraPayload(led *ledger.Ledger, jws string) map[string]any {
+	// verificationKey names the key that actually signed this receipt, read from
+	// its kid. After a rotation that is a retired key for every receipt issued
+	// before it, and advertising the current key instead would hand a verifier a
+	// key that does not verify the thing it is attached to.
 	payload := map[string]any{
 		"jws":              jws,
-		"verificationKey":  led.VerificationKey(),
+		"verificationKey":  led.SignerKeyID(jws),
+		"verificationKeys": led.VerificationKeys(),
 		"signingAlgorithm": "EdDSA",
 		"keyEncoding":      "base58",
 	}
@@ -859,9 +865,10 @@ func (s *Server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"genesis":         domain.GenesisHash,
-		"entries":         entries,
-		"verificationKey": s.ledger.VerificationKey(),
+		"genesis":          domain.GenesisHash,
+		"entries":          entries,
+		"verificationKey":  s.ledger.VerificationKey(),
+		"verificationKeys": s.ledger.VerificationKeys(),
 	})
 }
 

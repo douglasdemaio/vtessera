@@ -478,9 +478,10 @@ func TestHealthReportsVerificationKey(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var health struct {
-		Status          string `json:"status"`
-		VerificationKey string `json:"verificationKey"`
-		AGP             struct {
+		Status           string   `json:"status"`
+		VerificationKey  string   `json:"verificationKey"`
+		VerificationKeys []string `json:"verificationKeys"`
+		AGP              struct {
 			Version string `json:"version"`
 		} `json:"agp"`
 	}
@@ -490,6 +491,9 @@ func TestHealthReportsVerificationKey(t *testing.T) {
 	}
 	if health.VerificationKey != led.VerificationKey() {
 		t.Errorf("verification key = %s, want %s", health.VerificationKey, led.VerificationKey())
+	}
+	if len(health.VerificationKeys) == 0 || health.VerificationKeys[0] != health.VerificationKey {
+		t.Errorf("verificationKeys = %v, want the current key first", health.VerificationKeys)
 	}
 	if health.AGP.Version != agp.Version {
 		t.Errorf("agp version = %s, want %s", health.AGP.Version, agp.Version)

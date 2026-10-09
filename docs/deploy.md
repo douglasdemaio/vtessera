@@ -334,7 +334,9 @@ fly ssh console -C 'ls /data'      # expect vtessera.db, -wal, -shm, signer.key
 
 The `verificationKey` in the health output is the marketplace identity. It must
 be identical after every deploy. If it ever changes, the volume is gone and so
-is every tessera the service has issued.
+is every tessera the service has issued — except after a deliberate
+[rotation](#rotating-the-marketplace-signing-key), which retires the old key
+into `verificationKeys` rather than discarding it.
 
 ### Backup on Fly
 
@@ -342,6 +344,44 @@ is every tessera the service has issued.
 copying the `.db` alone is not enough), or snapshot the volume with
 `fly volumes snapshots`. The signing key is the part that cannot be recreated —
 consider retrieving it once and storing it somewhere other than the volume.
+
+### Rotating the marketplace signing key
+
+Rotation is for planned replacement and for key loss: a lost key — not a stolen
+one — is what it rescues. It is an offline operator action on a stopped machine,
+and it is **not** a response to compromise (a retired key is still trusted, so a
+stolen one keeps its forgeries valid; see the threat model).
+
+```bash
+# 1. stop the machine, or accept that the running process still signs with the old key
+fly scale count 0        # then the one-line process shut down
+
+# 2. rotate where the keyring lives (default /data/signer.key in the image)
+fly ssh console -C 'vtessera key rotate --signer-key /data/signer.key'
+
+# 3. start again and record the new identity
+fly scale count 1
+curl -fsS https://vtessera.fly.dev/healthz   # verificationKey = the new key
+make fly-verify                              # prints the marketplace verificationKey
+```
+
+Confirmation, the part a rotation is bought with:
+
+- `/healthz` reports the **new** `verificationKey` and both keys under
+  `verificationKeys` (current first, the retired key after it).
+- An old tessera still verifies, and its response names the retired key it was
+  actually signed by — receipts carry a `kid` header, and the ledger response
+  advertises that key, not the current one.
+- A new tessera is signed by the new key.
+
+The file format changes in place: a legacy raw-base64 key is upgraded to the JSON
+keyring on the first rotation, and the old private key is **never** written or
+kept after it. The directory stays `0700` and the file `0600`.
+
+A rotation does not touch the database, and the old public key stays in
+`verificationKeys` forever so untouched old receipts keep verifying. Do not prune
+the retired keys to tidy the health output — that is how a valid old receipt
+turns into an apparent forgery.
 
 ## Settlement: on when a cluster is configured, off otherwise
 
@@ -521,8 +561,10 @@ curl -fsS https://<host>/.well-known/agent-card.json | \
 
 The health output carries `verificationKey`. Record it: it is the marketplace
 identity, and it must be identical after every deploy and restart. If it changes,
-`/data` was not persisted. The container image was verified against exactly that
-failure — stop, restart, confirm the key is unchanged.
+`/data` was not persisted — unless you rotated it on purpose (see
+[Rotating the marketplace signing key](#rotating-the-marketplace-signing-key)),
+which retires the old key instead of losing it. The container image was verified
+against exactly that failure — stop, restart, confirm the key is unchanged.
 
 When settlement is enabled, `/healthz` also carries `cluster` and `genesisHash`.
 Those are the chain this deployment settled on, and a tessera is only meaningful
@@ -541,7 +583,9 @@ podman exec vtessera ls /data     # expect vtessera.db, -wal, -shm, signer.key
 
 The signing key **is** the marketplace. Losing it invalidates every tessera the
 service has ever issued, and it cannot be regenerated — a new key is a new
-identity. Back up `/data/signer.key` separately, and treat it as a secret.
+identity, and the verified-and-backup copy is the only thing that tells a
+rotation from a reset. Back up `/data/signer.key` separately, and treat it as a
+secret.
 
 The database runs in WAL mode, so it is three files: `vtessera.db`,
 `vtessera.db-wal`, `vtessera.db-shm`. Copying only `vtessera.db` while the

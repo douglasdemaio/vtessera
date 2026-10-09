@@ -12,6 +12,7 @@ import (
 	"github.com/douglasdemaio/vtessera/internal/attest"
 	"github.com/douglasdemaio/vtessera/internal/cluster"
 	"github.com/douglasdemaio/vtessera/internal/domain"
+	"github.com/douglasdemaio/vtessera/internal/probe"
 	"github.com/douglasdemaio/vtessera/internal/registry"
 	"github.com/douglasdemaio/vtessera/internal/store"
 	"github.com/douglasdemaio/vtessera/internal/tokens"
@@ -851,5 +852,49 @@ func TestNoOfferDeadlineMeansNoOfferSweep(t *testing.T) {
 	expired, err := svc.ExpireOffers(context.Background(), 100)
 	if err != nil || expired != 0 {
 		t.Fatalf("ExpireOffers = %d, %v, want 0 with no deadline", expired, err)
+	}
+}
+
+func TestAProbeSignedBeforeRotationStillVerifies(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "rotation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	oldSigner := marketSigner(t)
+	newSigner := marketSigner(t)
+	svc := registry.New(db, mainnetMints(t), newSigner,
+		registry.WithRetiredMarketplaceKeys([]string{oldSigner.PublicKeyBase58()}))
+
+	keys := svc.MarketplaceKeyIDs()
+	if len(keys) != 2 || keys[0] != newSigner.PublicKeyBase58() || keys[1] != oldSigner.PublicKeyBase58() {
+		t.Fatalf("marketplace keys = %v, want the current key first and the retired key second", keys)
+	}
+
+	report := probe.Report{
+		AgentID:   aliceKey,
+		Target:    "https://agent.example",
+		CheckedAt: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC),
+		Results:   []probe.Result{{Capability: "summarize", Status: probe.StatusPass}},
+	}
+	sig, err := oldSigner.SignProbe(probe.Statement(report), report.CheckedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.Signature = &sig
+	if err := svc.VerifyProbe(report); err != nil {
+		t.Fatalf("a probe attested before rotation must verify under the retired key: %v", err)
+	}
+
+	stranger := marketSigner(t)
+	strangerSig, err := stranger.SignProbe(probe.Statement(report), report.CheckedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.Signature = &strangerSig
+	if err := svc.VerifyProbe(report); err == nil {
+		t.Error("a probe signed by a key this marketplace never published must be refused")
 	}
 }

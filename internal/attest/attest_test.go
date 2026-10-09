@@ -679,3 +679,28 @@ func TestAProbeStatementIsBoundToItsAgentAndTarget(t *testing.T) {
 		t.Error("a result verified against a key that did not sign it")
 	}
 }
+
+func TestAKeyRetiredByRotationKeepsAttestationsVerifying(t *testing.T) {
+	agent := newKey(t)
+	current := newKey(t)
+	retired := newKey(t)
+	other := newKey(t)
+	card := cardFor(agent)
+	at := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+
+	oldSig, err := retired.AttestCard(card, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := []string{current.PublicKeyBase58(), retired.PublicKeyBase58()}
+
+	if err := attest.VerifyCardAttestedByAny(card, oldSig, trusted); err != nil {
+		t.Fatalf("an attestation made before rotation must verify once the old key is trusted: %v", err)
+	}
+	if err := attest.VerifyCardAttestedByAny(card, oldSig, []string{current.PublicKeyBase58()}); err == nil {
+		t.Error("an attestation must be refused when its key is not in the trusted set")
+	}
+	if err := attest.VerifyCardAttestedByAny(card, oldSig, []string{current.PublicKeyBase58(), other.PublicKeyBase58()}); err == nil {
+		t.Error("an attestation from a key the marketplace never published must be refused")
+	}
+}

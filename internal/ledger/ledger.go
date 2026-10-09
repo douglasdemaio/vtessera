@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,6 +52,13 @@ func New(store Store, signer *Signer) *Ledger {
 
 func (l *Ledger) VerificationKey() string {
 	return l.signer.PublicKeyBase58()
+}
+
+// VerificationKeys is every key a verifier may accept, the current one first. A
+// receipt signed before a rotation verifies under a retired key, so a reader
+// needs the whole set rather than just the key signing today.
+func (l *Ledger) VerificationKeys() []string {
+	return l.signer.VerificationKeyIDs()
 }
 
 type TradeRecord struct {
@@ -153,9 +161,9 @@ func (l *Ledger) Record(ctx context.Context, t domain.Trade, solanaSignature, cl
 			Cluster:         clusterName,
 		},
 	}
-	signed, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(l.signer.private)
+	signed, err := l.signClaims(claims)
 	if err != nil {
-		return domain.Receipt{}, fmt.Errorf("sign tessera: %w", err)
+		return domain.Receipt{}, err
 	}
 
 	receipt := domain.Receipt{ID: claims.ID, TradeID: t.ID, JWS: signed, IssuedAt: now}
@@ -196,13 +204,69 @@ func (l *Ledger) Entries(ctx context.Context) ([]domain.LedgerEntry, error) {
 	return l.store.ListLedgerEntries(ctx)
 }
 
-func (l *Ledger) Verify(jws string) (*TesseraClaims, error) {
-	publicKey := l.signer.PublicKey()
-	claims := &TesseraClaims{}
-	if _, err := jwt.ParseWithClaims(jws, claims, func(token *jwt.Token) (any, error) {
-		return publicKey, nil
-	}, jwt.WithValidMethods([]string{jwt.SigningMethodEdDSA.Alg()})); err != nil {
+// signClaims signs a tessera and names the signing key in the JOSE header.
+//
+// The kid is what lets a receipt be verified after the key that made it has been
+// retired: the signature alone does not say which key to use, and the current key
+// is the wrong answer for every receipt issued before a rotation.
+func (l *Ledger) signClaims(claims TesseraClaims) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	token.Header["kid"] = l.signer.PublicKeyBase58()
+	signed, err := token.SignedString(l.signer.CurrentPrivate())
+	if err != nil {
+		return "", fmt.Errorf("sign tessera: %w", err)
+	}
+	return signed, nil
+}
+
+// candidateKeys picks the keys a tessera may be checked against. A receipt that
+// names its key is checked against that key alone; a receipt predating the kid
+// header is tried against every trusted key, which are all this marketplace's.
+func (l *Ledger) candidateKeys(jws string) ([]ed25519.PublicKey, error) {
+	token, _, err := jwt.NewParser().ParseUnverified(jws, jwt.MapClaims{})
+	if err != nil {
 		return nil, fmt.Errorf("verify tessera: %w", err)
+	}
+	if kid, _ := token.Header["kid"].(string); kid != "" {
+		key, ok := l.signer.PublicKeyForID(kid)
+		if !ok {
+			return nil, fmt.Errorf("verify tessera: no trusted key %q", kid)
+		}
+		return []ed25519.PublicKey{key}, nil
+	}
+	return l.signer.PublicKeys(), nil
+}
+
+func (l *Ledger) Verify(jws string) (*TesseraClaims, error) {
+	keys, err := l.candidateKeys(jws)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, key := range keys {
+		claims, err := verifyTesseraUnder(jws, key)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return claims, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no trusted key verified the tessera")
+	}
+	return nil, fmt.Errorf("verify tessera: %w", lastErr)
+}
+
+func verifyTesseraUnder(jws string, key ed25519.PublicKey) (*TesseraClaims, error) {
+	claims := &TesseraClaims{}
+	token, err := jwt.ParseWithClaims(jws, claims, func(*jwt.Token) (any, error) {
+		return key, nil
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodEdDSA.Alg()}))
+	if err != nil {
+		return nil, err
+	}
+	if !token.Valid {
+		return nil, errors.New("tessera signature is not valid")
 	}
 	switch {
 	case claims.Trade.TradeID == "":
@@ -215,6 +279,28 @@ func (l *Ledger) Verify(jws string) (*TesseraClaims, error) {
 		return nil, fmt.Errorf("tessera carries invalid settlement mode %q", claims.Trade.Mode)
 	}
 	return claims, nil
+}
+
+// SignerKeyID is the key that signed a tessera, as named by its kid header. For a
+// receipt issued before kid existed it is the trusted key the signature verifies
+// under, and for one that verifies under none it falls back to the current key so
+// a caller always has a string to advertise.
+func (l *Ledger) SignerKeyID(jws string) string {
+	if token, _, err := jwt.NewParser().ParseUnverified(jws, jwt.MapClaims{}); err == nil {
+		if kid, _ := token.Header["kid"].(string); kid != "" {
+			if _, ok := l.signer.PublicKeyForID(kid); ok {
+				return kid
+			}
+		}
+	}
+	for _, key := range l.signer.PublicKeys() {
+		if _, err := jwt.Parse(jws, func(*jwt.Token) (any, error) {
+			return key, nil
+		}, jwt.WithValidMethods([]string{jwt.SigningMethodEdDSA.Alg()})); err == nil {
+			return l.signer.KeyID(key)
+		}
+	}
+	return l.VerificationKey()
 }
 
 // A receipt issued before Phase 3 carries no cluster claim, and the design
