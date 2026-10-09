@@ -152,6 +152,45 @@ func (s *Store) AcceptedBefore(ctx context.Context, deadline time.Time, limit in
 	return out, nil
 }
 
+func (s *Store) OpenTradesBefore(ctx context.Context, cutoff time.Time, limit int) ([]domain.Trade, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT t.id FROM trades t
+		 WHERE t.state IN (?, ?)
+		   AND t.updated_at <= ?
+		 ORDER BY t.updated_at ASC
+		 LIMIT ?`,
+		string(domain.TradeProposed), string(domain.TradeNegotiating), nanos(cutoff), limit)
+	if err != nil {
+		return nil, fmt.Errorf("expiring open trades: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("expiring open trades scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("expiring open trades rows: %w", err)
+	}
+	// The state predicate above is the index-friendly filter; the rows are read
+	// through GetTrade so a caller sees the same shape it gets everywhere else.
+	out := make([]domain.Trade, 0, len(ids))
+	for _, id := range ids {
+		tr, err := s.GetTrade(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tr)
+	}
+	return out, nil
+}
+
 func (s *Store) SetTradeState(ctx context.Context, tradeID string, from, to domain.TradeState, at time.Time) (bool, error) {
 	changed := false
 	err := s.write(ctx, func(tx *sql.Tx) error {

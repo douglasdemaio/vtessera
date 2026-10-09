@@ -270,9 +270,18 @@ An accepted trade carries a deadline (`--trade-accept-ttl`, default `72h`) and c
 be cancelled only once it passes. This is what lets the off-chain commit re-check
 the cap: without somewhere to go, a refused commit would strand the buyer holding
 a trade they can neither complete nor abandon. A sweep cancels expired trades so
-their reserved budget comes back. The service refuses to boot without a deadline,
-because running with a cap that cannot be enforced at the commit is a weaker cap
-than the one the operator configured, reached by a setting they never touched.
+their reserved budget comes back. A proposed or negotiating trade carries its own
+deadline (`--trade-open-ttl`, default `24h`, from the trade's last move) and is
+swept the same way, because a trade reserves its amount from creation, not from
+acceptance. The service refuses to boot without either deadline, because running
+with a cap that cannot be enforced is a weaker cap than the one the operator
+configured, reached by a setting they never touched.
+
+A settlement build that is never signed or submitted is bounded the same way by
+the reconciler: once its blockhash lapses with the request still `issued`, the
+trade is cancelled and the reservation released. A build the chain resolved as a
+failed execution keeps the trade `settlement_pending` so the buyer can retry; do
+not collapse the two, or a retry becomes impossible.
 
 What is left is bypassable by registering a new agent, and documented in
 `docs/deploy.md`. Closing that means identity attestation or a deposit.

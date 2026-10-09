@@ -54,6 +54,11 @@ type Config struct {
 	// unenforceable at the off-chain commit and is therefore only safe when caps
 	// are off.
 	AcceptTTL time.Duration
+	// OpenTTL is how long a proposed or negotiating trade may sit untouched
+	// before it is cancelled. Creating a trade reserves its amount against the
+	// buyer's cap, so without this an offer nobody answers holds that budget
+	// forever.
+	OpenTTL time.Duration
 	// ExpirySweepEvery is how often expired accepted trades are swept.
 	ExpirySweepEvery time.Duration
 	// ExpirySweepBatch bounds one sweep.
@@ -174,6 +179,7 @@ func Parse(args []string) (Config, error) {
 		spendWindow     = fs.String("spend-cap-window", env("VTESSERA_SPEND_CAP_WINDOW", "24h"), "rolling window the daily cap is measured over")
 		spendRates      = fs.String("spend-rates", os.Getenv("VTESSERA_SPEND_RATES"), "extra USD rates as a comma-separated list of mint=usd@decimals; the governed stablecoins are built in at par")
 		acceptTTL       = fs.String("trade-accept-ttl", env("VTESSERA_TRADE_ACCEPT_TTL", "72h"), "how long an accepted trade may wait to be committed before either party may cancel it")
+		openTTL         = fs.String("trade-open-ttl", env("VTESSERA_TRADE_OPEN_TTL", "24h"), "how long a proposed or negotiating trade may sit untouched before it is cancelled and its reservation released")
 		sweepEvery      = fs.String("trade-expiry-sweep-interval", env("VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL", "5m"), "how often to sweep expired accepted trades")
 		sweepBatch      = fs.Int("trade-expiry-sweep-batch", 100, "how many expired accepted trades one sweep may cancel")
 		probeTimeout    = fs.String("probe-timeout", env("VTESSERA_PROBE_TIMEOUT", "5s"), "how long one capability probe may take before it is abandoned")
@@ -242,6 +248,10 @@ func Parse(args []string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("trade-accept-ttl %q is not a duration: %w", *acceptTTL, err)
 	}
+	openTTLDur, err := time.ParseDuration(unset(*openTTL))
+	if err != nil {
+		return Config{}, fmt.Errorf("trade-open-ttl %q is not a duration: %w", *openTTL, err)
+	}
 	probeTimeoutDur, err := time.ParseDuration(unset(*probeTimeout))
 	if err != nil {
 		return Config{}, fmt.Errorf("probe-timeout %q is not a duration: %w", *probeTimeout, err)
@@ -261,6 +271,7 @@ func Parse(args []string) (Config, error) {
 	}
 	cfg := Config{
 		AcceptTTL:        acceptTTLDur,
+		OpenTTL:          openTTLDur,
 		ExpirySweepEvery: sweepEveryDur,
 		ExpirySweepBatch: *sweepBatch,
 
@@ -583,6 +594,13 @@ func (c Config) Validate() error {
 	// it is a startup error rather than a note in a log.
 	if c.AcceptTTL <= 0 {
 		return errors.New("trade-accept-ttl must be positive: an accepted trade with no deadline cannot be cancelled, and a trade that cannot be cancelled means the daily spending cap cannot be enforced when the buyer commits")
+	}
+	// A proposed or negotiating trade reserves its amount from creation, so a
+	// zero deadline is a reservation that never comes back. It is refused for the
+	// same reason as a zero acceptance deadline: a cap that is quietly not
+	// enforced is weaker than the one the operator configured.
+	if c.OpenTTL <= 0 {
+		return errors.New("trade-open-ttl must be positive: a proposed trade with no deadline holds its buyer's reservation forever, which means the daily spending cap cannot be enforced")
 	}
 	// Zero would disable the sweep, which leaves an accepted trade that nobody
 	// acts on holding its buyer's budget until someone notices. That is a weaker

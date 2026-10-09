@@ -427,6 +427,33 @@ func TestAnAcceptanceDeadlineDefaultsToThreeDays(t *testing.T) {
 	}
 }
 
+func TestAnOpenDeadlineIsRequired(t *testing.T) {
+	// A proposed trade reserves its buyer's budget from creation, so a service
+	// with no open deadline could hold that reservation forever. Like the
+	// acceptance deadline, that is refused at boot rather than left to a note.
+	dir := t.TempDir()
+	t.Setenv("VTESSERA_TRADE_OPEN_TTL", "0")
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err == nil {
+		t.Fatalf("Load with no open deadline = %+v, want an error", cfg)
+	}
+	if !strings.Contains(err.Error(), "trade-open-ttl") {
+		t.Errorf("error = %v, want it to name trade-open-ttl", err)
+	}
+}
+
+func TestAnOpenDeadlineDefaultsToADay(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("VTESSERA_TRADE_OPEN_TTL", "")
+	cfg, err := Parse([]string{"--session-secret", goodSecret, "--db", filepath.Join(dir, "c.db")})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OpenTTL != 24*time.Hour {
+		t.Errorf("OpenTTL = %s, want 24h", cfg.OpenTTL)
+	}
+}
+
 func TestTheExpirySweepMustRun(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL", "0")

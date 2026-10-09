@@ -73,6 +73,9 @@ type Store interface {
 	TradeAcceptance(ctx context.Context, tradeID string) (time.Time, bool, error)
 	// AcceptedBefore returns accepted trades whose deadline has passed, bounded.
 	AcceptedBefore(ctx context.Context, deadline time.Time, limit int) ([]domain.Trade, error)
+	// OpenTradesBefore returns proposed and negotiating trades with no activity
+	// since the cutoff, bounded.
+	OpenTradesBefore(ctx context.Context, cutoff time.Time, limit int) ([]domain.Trade, error)
 	SetTradeState(ctx context.Context, tradeID string, from, to domain.TradeState, at time.Time) (bool, error)
 	AppendTradeEvent(ctx context.Context, e domain.TradeEvent) (int64, error)
 	ListTradeEvents(ctx context.Context, tradeID string) ([]domain.TradeEvent, error)
@@ -125,6 +128,12 @@ type Service struct {
 	// Record. Zero means no deadline, which is the safe direction for an operator
 	// who has not chosen one.
 	acceptTTL time.Duration
+
+	// openTTL is how long a proposed or negotiating trade may sit untouched before
+	// it is cancelled. A trade reserves its buyer's budget from the moment it is
+	// created, so an offer nobody answers would hold that budget forever. Zero
+	// means no deadline.
+	openTTL time.Duration
 
 	// reserveMu serialises the read-a-cap-then-reserve-a-cap sequence in
 	// Create. Checking a daily cap and then inserting the reservation that
@@ -183,6 +192,18 @@ func (s *Service) WithAcceptanceTTL(ttl time.Duration) *Service {
 
 // AcceptanceTTL reports the configured deadline length, zero when there is none.
 func (s *Service) AcceptanceTTL() time.Duration { return s.acceptTTL }
+
+// WithOpenTTL bounds how long a proposed or negotiating trade may sit untouched.
+// Without it an unanswered offer reserves its buyer's budget indefinitely, which
+// is a reservation that never returns rather than a cap.
+func (s *Service) WithOpenTTL(ttl time.Duration) *Service {
+	s.openTTL = ttl
+	return s
+}
+
+// OpenTTL reports the configured open-trade deadline length, zero when there is
+// none.
+func (s *Service) OpenTTL() time.Duration { return s.openTTL }
 
 // Limits returns the active cap policy, or false when caps are not in force.
 func (s *Service) Limits() (limits.Policy, bool) {
@@ -316,7 +337,7 @@ func (s *Service) ExpireAccepted(ctx context.Context, limit int) (int, error) {
 // is deliberately a plain loop on an interval: an expired trade is not urgent, it
 // is a budget that ought to come back.
 func (s *Service) RunExpirySweeper(ctx context.Context, every time.Duration, limit int) {
-	if s.acceptTTL <= 0 || every <= 0 {
+	if (s.acceptTTL <= 0 && s.openTTL <= 0) || every <= 0 {
 		return
 	}
 	ticker := time.NewTicker(every)
@@ -331,8 +352,49 @@ func (s *Service) RunExpirySweeper(ctx context.Context, every time.Duration, lim
 			// budget. Silent by design, not by oversight; the deadline bounds how
 			// long a stuck sweep can delay anything.
 			_, _ = s.ExpireAccepted(ctx, limit)
+			_, _ = s.ExpireOpen(ctx, limit)
 		}
 	}
+}
+
+// ExpireOpen cancels proposed and negotiating trades that nobody has touched for
+// longer than openTTL. Creating a trade reserves its amount against the buyer's
+// cap, so an offer that is never answered would otherwise hold that budget for
+// good; this is the sweep that makes the reservation return.
+//
+// Like ExpireAccepted it is safe to run concurrently with agents: the cancel is
+// conditional on the trade still being open and still stale, so an agent that
+// moves the trade at the same moment wins the race and the stale read loses.
+func (s *Service) ExpireOpen(ctx context.Context, limit int) (int, error) {
+	if s.openTTL <= 0 {
+		return 0, nil
+	}
+	cutoff := s.now().UTC().Add(-s.openTTL)
+	trades, err := s.store.OpenTradesBefore(ctx, cutoff, limit)
+	if err != nil {
+		return 0, err
+	}
+	expired := 0
+	for _, tr := range trades {
+		// Re-checked per trade rather than trusted from the query: an agent may
+		// have moved the trade on while the batch was being read, and cancelling a
+		// trade that is being negotiated is not recoverable from here.
+		if tr.State != domain.TradeProposed && tr.State != domain.TradeNegotiating {
+			continue
+		}
+		if tr.UpdatedAt.After(cutoff) {
+			continue
+		}
+		detail := reasonDetail("the open-trade deadline passed before anyone answered this trade")
+		if _, err := s.applyAs(ctx, tr, "", domain.TradeCancelled, detail, domain.EventExpired); err != nil {
+			if errors.Is(err, ErrIllegalState) {
+				continue
+			}
+			return expired, err
+		}
+		expired++
+	}
+	return expired, nil
 }
 
 // checkSpend refuses a trade that would take its buyer past a cap.
