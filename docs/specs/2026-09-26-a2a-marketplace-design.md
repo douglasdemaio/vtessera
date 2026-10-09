@@ -113,7 +113,7 @@ The gateway participates in the [A2A AGP routing extension](https://github.com/a
 ## 4. Data model (logical)
 
 - **Agent** — `id (pubkey)`, agent card JSON, display name, created_at, status.
-- **Offer** — `id`, agent_id, direction (ask/bid), description, capability tags, price_amount, price_mint (registry ref), settlement_modes (offchain/onchain/both), status (open/closed), idempotency_key, timestamps.
+- **Offer** — `id`, agent_id, direction (ask/bid), description, capability tags, price_amount, price_mint (registry ref), settlement_modes (offchain/onchain/both), status (open/closed), idempotency_key, timestamps. An open offer carries `expires_at`, set from the deployment's offer TTL; a sweep closes it once the deadline passes. The deadline is marketplace policy, not part of the offer's signed terms.
 - **Trade** — `id (UUID)`, offer_id, buyer_agent_id, seller_agent_id, terms (amount, mint, description), settlement_mode (`offchain`|`onchain`), state (§5), idempotency_key, timestamps.
 - **LedgerEntry** — `seq`, trade_id, prev_hash, payload hash, ledger signature — hash-chained append-only log.
 - **Receipt (tessera)** — trade_id, parties, terms, settlement_mode, solana_signature (nullable), issued_at, service Ed25519 signature (JWS).

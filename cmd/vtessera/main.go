@@ -115,7 +115,8 @@ func run(args []string) error {
 	registrySvc := registry.New(db, mints, marketSigner,
 		registry.WithPricer(spendPolicy),
 		registry.WithRequiredOfferAttestation(cfg.RequireOfferAttestation),
-		registry.WithProbeRunner(prober))
+		registry.WithProbeRunner(prober),
+		registry.WithOfferTTL(cfg.OfferTTL))
 	led := ledger.New(db, signer)
 	trades := trade.New(db, db, db, led).WithLimits(spendPolicy, db).WithAcceptanceTTL(cfg.AcceptTTL).WithOpenTTL(cfg.OpenTTL)
 	if cfg.RequireOfferAttestation {
@@ -166,7 +167,8 @@ func run(args []string) error {
 		registrySvc = registry.New(db, mints, marketSigner,
 			registry.WithPricer(spendPolicy),
 			registry.WithRequiredOfferAttestation(cfg.RequireOfferAttestation),
-			registry.WithProbeRunner(prober))
+			registry.WithProbeRunner(prober),
+			registry.WithOfferTTL(cfg.OfferTTL))
 
 		client := settlement.NewRPCClient(cfg.Solana.RPCURL)
 		logger.Info("preflight passed",
@@ -226,6 +228,18 @@ func run(args []string) error {
 	logger.Info("accepted trades expire",
 		"ttl", cfg.AcceptTTL.String(),
 		"openTtl", cfg.OpenTTL.String(),
+		"sweepEvery", cfg.ExpirySweepEvery.String(),
+		"sweepBatch", cfg.ExpirySweepBatch,
+	)
+
+	// A listing nobody refreshes is one a buyer cannot tell from a seller that has
+	// stopped answering. The offer sweep is what removes it from discovery.
+	go func() {
+		registrySvc.RunOfferExpirySweeper(ctx, cfg.ExpirySweepEvery, cfg.ExpirySweepBatch)
+		logger.Info("offer expiry sweeper stopped")
+	}()
+	logger.Info("offers expire",
+		"ttl", cfg.OfferTTL.String(),
 		"sweepEvery", cfg.ExpirySweepEvery.String(),
 		"sweepBatch", cfg.ExpirySweepBatch,
 	)

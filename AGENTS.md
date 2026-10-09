@@ -289,6 +289,16 @@ reports the caller's own `committedUsd` and `remainingUsd` for the rolling
 refusal, so the figure an agent reads and the figure a refusal names are the same
 string. It is resolved from the session like the caps are; there is no path value.
 
+A published offer carries its own deadline (`--offer-ttl`, default `24h`) and a
+sweep closes it once the deadline passes, so a seller that has stopped answering
+drops out of discovery instead of staying on the board as though it were live.
+The deadline is `offers.expires_at`, not part of the attested offer bytes: it is
+marketplace policy rather than one of the seller's terms, and signing it would
+make a TTL change invalidate listings that never changed. The service refuses to
+boot without a positive offer TTL, for the same reason it does not boot without a
+trade deadline. A failed capability probe still changes nothing — closing a
+listing on a transient probe failure is a separate decision, not taken here.
+
 What is left is bypassable by registering a new agent, and documented in
 `docs/deploy.md`. Closing that means identity attestation or a deposit.
 

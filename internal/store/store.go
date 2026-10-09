@@ -202,6 +202,38 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 6,
+		name:    "offer_expiry",
+		apply: func(ctx context.Context, tx *sql.Tx) error {
+			// A listing with no deadline is a listing a silent seller leaves on
+			// the board forever. The column is the deadline the sweeper enforces;
+			// it is NOT part of the attested offer bytes, because it is the
+			// marketplace's policy rather than one of the seller's terms, and a
+			// signature over it would make a policy change invalidate listings
+			// that never changed.
+			//
+			// Existing rows are backfilled from their creation time with the
+			// historical default of 24h, the same default the flag ships. That is
+			// deliberate and not silently extended: a listing older than a day at
+			// the moment this migration runs is exactly the stale listing this
+			// exists to remove, and it expires on the next sweep. An operator who
+			// wants a longer grace period for legacy rows should export and
+			// republish them.
+			if _, err := tx.ExecContext(ctx,
+				`ALTER TABLE offers ADD COLUMN expires_at INTEGER`); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE offers SET expires_at = created_at + ? WHERE expires_at IS NULL`,
+				int64(24*time.Hour)); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx,
+				`CREATE INDEX IF NOT EXISTS offers_expiry_idx ON offers (status, expires_at)`)
+			return err
+		},
+	},
 }
 
 type Store struct {

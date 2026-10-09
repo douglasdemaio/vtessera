@@ -665,6 +665,63 @@ func TestOfferLookupsAndStatus(t *testing.T) {
 	}
 }
 
+func TestAnOfferWithNoDeadlineIsStoredNull(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if err := s.CreateAgent(ctx, testAgent("alice")); err != nil {
+		t.Fatal(err)
+	}
+	// A zero ExpiresAt must be SQL NULL, not the zero time's nanosecond value,
+	// which lands in the distant past and would be swept by a later deployment
+	// that configured a positive offer TTL.
+	if err := s.CreateOffer(ctx, testOffer("o1", "alice"), ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetOffer(ctx, "o1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ExpiresAt.IsZero() {
+		t.Errorf("expiresAt = %s, want zero for an offer published with no deadline", got.ExpiresAt)
+	}
+	expired, err := s.OpenOffersBefore(ctx, time.Now().UTC().Add(100*time.Hour), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 0 {
+		t.Errorf("an offer with no deadline was selected as expired: %v", ids(expired))
+	}
+}
+
+func TestOpenOffersBeforeReturnsOnlyPassedDeadlines(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if err := s.CreateAgent(ctx, testAgent("alice")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	past := testOffer("old", "alice")
+	past.CreatedAt = now.Add(-2 * time.Hour)
+	past.ExpiresAt = now.Add(-time.Hour)
+	if err := s.CreateOffer(ctx, past, ""); err != nil {
+		t.Fatal(err)
+	}
+	fresh := testOffer("fresh", "alice")
+	fresh.CreatedAt = now
+	fresh.ExpiresAt = now.Add(time.Hour)
+	if err := s.CreateOffer(ctx, fresh, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.OpenOffersBefore(ctx, now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "old" {
+		t.Errorf("OpenOffersBefore = %v, want [old]: only a passed deadline is swept", ids(got))
+	}
+}
+
 func TestGetTradeByIdempotencyKey(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)

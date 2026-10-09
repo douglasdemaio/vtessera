@@ -256,6 +256,7 @@ wants that bounded declares a rate above par.
 | `--spend-cap-per-day` | `VTESSERA_SPEND_CAP_PER_DAY` | `10.00` |
 | `--trade-accept-ttl` | `VTESSERA_TRADE_ACCEPT_TTL` | `72h` |
 | `--trade-open-ttl` | `VTESSERA_TRADE_OPEN_TTL` | `24h` |
+| `--offer-ttl` | `VTESSERA_OFFER_TTL` | `24h` |
 | `--spend-cap-window` | `VTESSERA_SPEND_CAP_WINDOW` | `24h` |
 | `--spend-cap-max-per-trade` | `VTESSERA_SPEND_CAP_MAX_PER_TRADE` | unset, so raising is refused |
 | `--spend-cap-max-per-day` | `VTESSERA_SPEND_CAP_MAX_PER_DAY` | unset, so raising is refused |
@@ -355,6 +356,17 @@ and reported, because that is an answer; an agent that has never been probed is
 `404 NOT_PROBED`, because that is the absence of one. A probe that could not run
 at all — no declared target, a retired agent, a target the marketplace will not
 dial — stores nothing, because nothing was learned about the agent.
+
+## Offers expire
+
+A published offer carries a deadline, `expiresAt`, set from `--offer-ttl`
+(default `24h`). A sweep closes offers whose deadline has passed, so a seller that
+has stopped answering drops out of `GET /v1/offers`, `/agp/table` and search
+instead of staying on the board forever. A seller that wants a longer listing
+republishes it. The deadline is marketplace policy, not one of the seller's
+terms: it is not covered by an offer's Ed25519 signature, so changing the TTL does
+not invalidate a signed listing. The service refuses to boot with a non-positive
+offer TTL, the same way it does for a trade deadline.
 
 ## Retiring a listing
 

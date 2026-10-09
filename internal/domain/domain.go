@@ -285,6 +285,11 @@ type Offer struct {
 	Status          OfferStatus      `json:"status"`
 	CreatedAt       time.Time        `json:"createdAt"`
 	UpdatedAt       time.Time        `json:"updatedAt"`
+	// ExpiresAt is when a sweeper may close this offer. It is marketplace
+	// policy, not a signed term: it is set from the deployment's offer TTL and
+	// is deliberately absent from the attested offer bytes, so changing the TTL
+	// does not invalidate a seller's signature.
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 // Validate wraps every field failure in ErrInvalid, for the same reason as

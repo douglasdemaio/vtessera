@@ -25,10 +25,10 @@ func (s *Store) CreateOffer(ctx context.Context, o domain.Offer, idempotencyKey 
 	}
 	return s.write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO offers (id, agent_id, direction, description, capabilities, price_amount, price_mint, settlement_modes, status, idempotency_key, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO offers (id, agent_id, direction, description, capabilities, price_amount, price_mint, settlement_modes, status, idempotency_key, created_at, updated_at, expires_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			o.ID, o.AgentID, string(o.Direction), o.Description, string(caps), o.PriceAmount.String(),
-			o.PriceMint, string(modes), string(o.Status), nullString(idempotencyKey), nanos(o.CreatedAt), nanos(o.UpdatedAt))
+			o.PriceMint, string(modes), string(o.Status), nullString(idempotencyKey), nanos(o.CreatedAt), nanos(o.UpdatedAt), expiryColumn(o.ExpiresAt))
 		return mapErr(err)
 	})
 }
@@ -106,6 +106,32 @@ func (s *Store) ListOpenOffers(ctx context.Context) ([]domain.Offer, error) {
 	return s.SearchOffers(ctx, domain.OfferQuery{Status: domain.OfferOpen})
 }
 
+// OpenOffersBefore returns open offers whose deadline has passed, oldest first.
+// It is the read side of the offer sweep: the registry closes each one with
+// SetOfferStatus after re-checking that it is still open, because a seller can
+// close a listing between the batch being read and the close being applied.
+func (s *Store) OpenOffersBefore(ctx context.Context, cutoff time.Time, limit int) ([]domain.Offer, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		offerSelect+` WHERE status = ? AND expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at, id LIMIT ?`,
+		string(domain.OfferOpen), nanos(cutoff), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.Offer{}
+	for rows.Next() {
+		o, err := scanOffer(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) SetOfferStatus(ctx context.Context, id string, status domain.OfferStatus, at time.Time) error {
 	return s.write(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
@@ -122,20 +148,21 @@ func (s *Store) GetOfferByIdempotencyKey(ctx context.Context, key string) (domai
 	return scanOffer(row)
 }
 
-const offerSelect = `SELECT id, agent_id, direction, description, capabilities, price_amount, price_mint, settlement_modes, status, created_at, updated_at FROM offers`
+const offerSelect = `SELECT id, agent_id, direction, description, capabilities, price_amount, price_mint, settlement_modes, status, created_at, updated_at, expires_at FROM offers`
 
 func scanOffer(row rowScanner) (domain.Offer, error) {
 	var (
-		o      domain.Offer
-		dir    string
-		caps   string
-		amount string
-		modes  string
-		status string
-		crea   int64
-		upda   int64
+		o       domain.Offer
+		dir     string
+		caps    string
+		amount  string
+		modes   string
+		status  string
+		crea    int64
+		upda    int64
+		expires sql.NullInt64
 	)
-	if err := row.Scan(&o.ID, &o.AgentID, &dir, &o.Description, &caps, &amount, &o.PriceMint, &modes, &status, &crea, &upda); err != nil {
+	if err := row.Scan(&o.ID, &o.AgentID, &dir, &o.Description, &caps, &amount, &o.PriceMint, &modes, &status, &crea, &upda, &expires); err != nil {
 		return domain.Offer{}, mapErr(err)
 	}
 	parsed, err := money.Parse(amount)
@@ -153,6 +180,9 @@ func scanOffer(row rowScanner) (domain.Offer, error) {
 	o.Status = domain.OfferStatus(status)
 	o.CreatedAt = fromNanos(crea)
 	o.UpdatedAt = fromNanos(upda)
+	if expires.Valid {
+		o.ExpiresAt = fromNanos(expires.Int64)
+	}
 	return o, nil
 }
 
@@ -167,6 +197,17 @@ func nullString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// expiryColumn maps a zero deadline to SQL NULL. An offer with no configured
+// deadline must not be stored as the zero time's nanosecond value, which is a
+// time in the distant past that a later deployment with a positive TTL would
+// sweep on its first tick.
+func expiryColumn(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return nanos(t)
 }
 
 func nonNil[T any](s []T) []T {

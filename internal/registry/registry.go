@@ -91,6 +91,7 @@ type Store interface {
 	GetOfferByIdempotencyKey(ctx context.Context, key string) (domain.Offer, error)
 	SearchOffers(ctx context.Context, q domain.OfferQuery) ([]domain.Offer, error)
 	ListOpenOffers(ctx context.Context) ([]domain.Offer, error)
+	OpenOffersBefore(ctx context.Context, cutoff time.Time, limit int) ([]domain.Offer, error)
 	SetOfferStatus(ctx context.Context, id string, status domain.OfferStatus, at time.Time) error
 	RetireAgent(ctx context.Context, id, reason, actor string, at time.Time) (domain.Agent, error)
 	RestoreAgent(ctx context.Context, id, actor string, at time.Time) (domain.Agent, error)
@@ -109,6 +110,9 @@ type Service struct {
 	requireOfferSig bool
 	prober          Prober
 	now             func() time.Time
+	// offerTTL is how long a published offer stays open before the sweep closes
+	// it. It is deployment policy, so it is not part of the attested offer.
+	offerTTL time.Duration
 	// market signs every card this marketplace publishes. It is a required
 	// dependency rather than an option, because a card this service accepts is a
 	// card it published, and a listing with no marketplace signature would be a
@@ -144,6 +148,24 @@ type Option func(*Service)
 // currency the spending cap cannot be measured against cannot be offered at all.
 func WithPricer(p Pricer) Option {
 	return func(s *Service) { s.priced = p }
+}
+
+// WithOfferTTL sets how long a published offer stays open before the sweep
+// closes it. A zero TTL disables both setting a deadline and the sweep, which is
+// only correct for a deployment that has not configured one; the config layer
+// refuses to boot without a positive value, so a zero here means "not wired".
+func WithOfferTTL(ttl time.Duration) Option {
+	return func(s *Service) { s.offerTTL = ttl }
+}
+
+// WithClock overrides the service's clock. It exists so the offer sweep can be
+// driven deterministically rather than by sleeping on wall time.
+func WithClock(now func() time.Time) Option {
+	return func(s *Service) {
+		if now != nil {
+			s.now = now
+		}
+	}
 }
 
 // WithRequiredOfferAttestation refuses to publish an offer the seller has not
@@ -457,6 +479,9 @@ func (s *Service) PublishOffer(ctx context.Context, agentID string, in NewOffer,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
+	if s.offerTTL > 0 {
+		offer.ExpiresAt = now.Add(s.offerTTL)
+	}
 	if err := offer.Validate(); err != nil {
 		return domain.Offer{}, false, err
 	}
@@ -658,6 +683,62 @@ func (s *Service) Offer(ctx context.Context, id string) (domain.Offer, error) {
 
 func (s *Service) Search(ctx context.Context, q domain.OfferQuery) ([]domain.Offer, error) {
 	return s.store.SearchOffers(ctx, q)
+}
+
+// ExpireOffers closes up to limit open offers whose deadline has passed. It is
+// the sweeper's unit of work and is safe to call by hand.
+//
+// Each close re-reads the offer before applying: a seller can close a listing
+// between the batch being read and the update, and re-closing an already closed
+// offer would overwrite the time the seller actually closed it.
+func (s *Service) ExpireOffers(ctx context.Context, limit int) (int, error) {
+	if s.offerTTL <= 0 {
+		return 0, nil
+	}
+	cutoff := s.now().UTC()
+	offers, err := s.store.OpenOffersBefore(ctx, cutoff, limit)
+	if err != nil {
+		return 0, err
+	}
+	expired := 0
+	for _, offer := range offers {
+		current, err := s.store.GetOffer(ctx, offer.ID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				continue
+			}
+			return expired, err
+		}
+		if current.Status != domain.OfferOpen || current.ExpiresAt.IsZero() || current.ExpiresAt.After(cutoff) {
+			continue
+		}
+		if err := s.store.SetOfferStatus(ctx, offer.ID, domain.OfferClosed, cutoff); err != nil {
+			return expired, err
+		}
+		expired++
+	}
+	return expired, nil
+}
+
+// RunOfferExpirySweeper closes expired offers until the context is done. Like the
+// trade sweep it is a plain interval loop: a stale listing is not urgent, it is a
+// listing a buyer should stop being offered.
+func (s *Service) RunOfferExpirySweeper(ctx context.Context, every time.Duration, limit int) {
+	if s.offerTTL <= 0 || every <= 0 {
+		return
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// A failed sweep is retried on the next tick; there is nothing to
+			// escalate to, and the next tick still delists the stale offer.
+			_, _ = s.ExpireOffers(ctx, limit)
+		}
+	}
 }
 
 type AnnouncementSource struct {
