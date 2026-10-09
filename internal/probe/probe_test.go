@@ -64,10 +64,12 @@ type echoAgent struct {
 	status    int
 	raw       string
 	hits      int
+	userAgent string
 }
 
 func (a *echoAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.hits++
+	a.userAgent = r.Header.Get("User-Agent")
 	if a.status != 0 && a.status != http.StatusOK {
 		w.WriteHeader(a.status)
 		return
@@ -123,6 +125,24 @@ func TestAProbeOfAnAgentThatAnswersReportsItsCapabilities(t *testing.T) {
 	}
 	if agent.hits != 1 {
 		t.Errorf("the agent was called %d times, want once", agent.hits)
+	}
+}
+
+// A probe carries the marketplace's identity so the agent being checked can see
+// who called it. An agent that is probed anonymously cannot tell the marketplace
+// apart from anything else hitting its endpoint, which is the opposite of the
+// transparency this service claims elsewhere.
+func TestAProbeAnnouncesTheMarketplaceToTheAgent(t *testing.T) {
+	agent := &echoAgent{results: results(true)}
+	srv := httptest.NewTLSServer(agent)
+	defer srv.Close()
+
+	if _, err := loopbackRunner(t, srv).Run(context.Background(),
+		probeTarget(srv, "/probe"), "agent-1", claimed(), "chal-1"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(agent.userAgent, "vtessera-probe/") {
+		t.Errorf("User-Agent = %q, want it to name vtessera", agent.userAgent)
 	}
 }
 
