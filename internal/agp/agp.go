@@ -318,13 +318,11 @@ func matchAnyOf(key string, want, have any) error {
 	if err != nil {
 		return err
 	}
-	haveSet := map[string]bool{}
-	for _, h := range haves {
-		haveSet[strings.ToLower(h)] = true
-	}
 	for _, w := range wants {
-		if haveSet[strings.ToLower(w)] {
-			return nil
+		for _, h := range haves {
+			if strings.EqualFold(w, h) {
+				return nil
+			}
 		}
 	}
 	return fmt.Errorf("policy %q requires one of %v, route offers %v", key, wants, haves)
