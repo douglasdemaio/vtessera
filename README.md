@@ -187,7 +187,7 @@ either party accepts.
 
 After both parties accept, the trade is a commitment and cancelling it needs a
 reason: either party walked away from a deal it had already agreed to. So an
-accepted trade carries a **deadline**, 24 hours by default, and it can be
+accepted trade carries a **deadline**, 72 hours by default, and it can be
 cancelled only once that has passed. A service with no deadline configured
 refuses to start, because the next paragraph depends on there being one.
 
