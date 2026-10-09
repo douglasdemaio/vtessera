@@ -93,6 +93,7 @@ caller's would have no way to notice, and the listing would still change.
 | Compromise the marketplace signing key | Forges receipts for every trade in the ledger. **Not rotatable.** Recovery is a new deployment. |
 | Repoint the RPC endpoint at another chain | Genesis hash and every governed mint's existence, program, decimals, and authorities are verified at boot, per request, and per tick. |
 | Race two trade creations to take the same dollar | Refused: `Create` holds a lock across reading the cap and writing the reservation. |
+| Flood the API to exhaust the machine | 429 with a `Retry-After` once the caller's bucket empties, per agent and per client address. |
 
 ## Accepted risks
 
@@ -119,11 +120,22 @@ That is bounded and self-releasing, and it is a liveness cost rather than a way
 around the cap — the amount is one trade inside a cap the buyer has already
 passed.
 
-**Rate limiting is absent.** Every route is unauthenticated-capable reads and
-unauthenticated writes are cheap to attempt. The service is behind a TLS
-terminator on one Fly machine; there is no per-agent request quota. Brute-force
-against the challenge endpoint is bounded by challenge expiry and single use, not
-by a limit.
+**Rate limiting is in place, but in-memory.** Two token buckets in
+`internal/httpapi` bound requests: one charged to an authenticated agent's key,
+one to the client address for everything else, both on by default and both
+tunable with `--rate-limit-*`. The handshake start that stores a pending
+challenge is bounded by the address bucket, so brute force is bounded by both
+the bucket and the challenge's expiry and single use. What remains is the shape
+of the buckets rather than their absence: they live in one process and are lost
+on restart or redeploy, so a burst that spans a restart is not counted, and they
+are not shared between machines, so this holds only while the deployment is the
+single machine it is today. The per-address bucket keys on the client address
+the proxy supplies (`Fly-Client-IP`, configurable via `--rate-limit-ip-header`),
+not the connection's address, because behind Fly every visitor would otherwise
+look like the proxy and be throttled together. Trusting that header assumes all
+traffic arrives through the proxy, which Fly states is the case because the
+service port is not directly reachable; a deployment that stops holding that
+assumption must change the header setting with it.
 
 **The database has no at-rest encryption.** Anyone who can read the volume has
 every trade, card, and agent ID. It is a public marketplace, so most of this is

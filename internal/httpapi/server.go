@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/agp"
 	"github.com/douglasdemaio/vtessera/internal/attest"
@@ -51,6 +52,14 @@ type Server struct {
 	// registered, which is checked at routing rather than here so a missing token
 	// cannot leave a route mounted and unguarded.
 	adminToken []byte
+	// agentLimiter and ipLimiter bound request rates. Either is nil when its
+	// burst is zero, which is how an operator disables one layer. The IP limiter
+	// runs before routing so a request with no session is still bounded; the
+	// agent limiter runs inside authed, once the session names who to charge.
+	agentLimiter *rateLimiter
+	ipLimiter    *rateLimiter
+	ipHeader     string
+	now          func() time.Time
 }
 
 type Options struct {
@@ -82,6 +91,10 @@ type Options struct {
 	// /healthz and /v1/tokens so an agent can tell before it commits to
 	// something that cannot be unwound.
 	Sandbox bool
+	// RateLimit bounds request rates per agent and per client address. A zero
+	// burst leaves that layer off, which is how a caller of New that does not
+	// configure limits (a test, an embedder) gets the behaviour it had before.
+	RateLimit RateLimitOptions
 }
 
 // SettlementTier is the maturity label reported wherever on-chain settlement is
@@ -103,7 +116,15 @@ func New(opts Options) *Server {
 		publicBaseURL: strings.TrimRight(opts.PublicBaseURL, "/"),
 		sandbox:       opts.Sandbox,
 		adminToken:    opts.AdminToken,
+		ipHeader:      opts.RateLimit.IPHeader,
+		now:           time.Now,
 		mux:           http.NewServeMux(),
+	}
+	if opts.RateLimit.AgentBurst > 0 {
+		s.agentLimiter = newRateLimiter(opts.RateLimit.AgentRPS, opts.RateLimit.AgentBurst)
+	}
+	if opts.RateLimit.IPBurst > 0 {
+		s.ipLimiter = newRateLimiter(opts.RateLimit.IPRPS, opts.RateLimit.IPBurst)
 	}
 	s.agentCardBody = s.buildAgentCard()
 	s.routes()
@@ -112,6 +133,12 @@ func New(opts Options) *Server {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Vtessera-Version", s.version)
+	if s.ipLimiter != nil {
+		if ok, retry := s.ipLimiter.allow(clientAddress(r, s.ipHeader), s.now()); !ok {
+			writeRateLimited(w, retry)
+			return
+		}
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -945,6 +972,12 @@ func (s *Server) authed(next func(http.ResponseWriter, *http.Request)) http.Hand
 		if err != nil {
 			writeError(w, err)
 			return
+		}
+		if s.agentLimiter != nil {
+			if ok, retry := s.agentLimiter.allow(agentID, s.now()); !ok {
+				writeRateLimited(w, retry)
+				return
+			}
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), agentContextKey{}, agentID)))
 	}

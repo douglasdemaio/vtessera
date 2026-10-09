@@ -67,6 +67,10 @@ type Config struct {
 	// it. Zero means no deadline, which leaves a silent seller's listing
 	// discoverable indefinitely — the state gap 4 exists to remove.
 	OfferTTL time.Duration
+	// RateLimit bounds how often one caller may hit the API. It is on by
+	// default because the alternative the threat model recorded was no limit at
+	// all; a zero burst disables one layer for an operator who wants to.
+	RateLimit RateLimit
 	// RequireOfferAttestation makes a seller-signed offer the only kind that can
 	// be published. It is off by default because an agent that predates
 	// attestations publishes unsigned offers, and turning this on is how an
@@ -110,6 +114,20 @@ type Spend struct {
 	// missing from this table makes the deployment refuse to start, because a cap
 	// that cannot be priced is not a cap.
 	Rates limits.Rates
+}
+
+// RateLimit bounds request rates. The two layers are independent:
+// authenticated requests are charged to the agent's key, and everything else to
+// the client address the proxy supplies.
+type RateLimit struct {
+	AgentRPS   float64
+	AgentBurst int
+	IPRPS      float64
+	IPBurst    int
+	// IPHeader is the proxy header carrying the client address. Empty uses the
+	// connection's own address, which behind a proxy is the proxy's, so
+	// deployments behind one should name the header their proxy sets.
+	IPHeader string
 }
 
 // Solana configures non-custodial on-chain settlement.
@@ -191,6 +209,11 @@ func Parse(args []string) (Config, error) {
 		probeBodyBytes  = fs.Int64("probe-max-response-bytes", envInt64("VTESSERA_PROBE_MAX_RESPONSE_BYTES", 65536), "largest capability probe response this service will read")
 		requireOfferSig = fs.Bool("require-offer-attestation", env("VTESSERA_REQUIRE_OFFER_ATTESTATION", "") == "1", "refuse to publish an offer the seller has not signed, so every live listing is verifiable")
 		sandbox         = fs.Bool("sandbox", env("VTESSERA_SANDBOX", "") == "1", "refuse on-chain settlement and advertise this deployment as a sandbox where no real value moves")
+		rateAgentRPS    = fs.Float64("rate-limit-agent-rps", envFloat("VTESSERA_RATE_LIMIT_AGENT_RPS", 30), "requests per second allowed to one authenticated agent; 0 means the bucket never refills")
+		rateAgentBurst  = fs.Int("rate-limit-agent-burst", envInt("VTESSERA_RATE_LIMIT_AGENT_BURST", 60), "burst an authenticated agent may spend at once; 0 disables the per-agent limit")
+		rateIPRPS       = fs.Float64("rate-limit-ip-rps", envFloat("VTESSERA_RATE_LIMIT_IP_RPS", 20), "requests per second allowed to one client address; 0 means the bucket never refills")
+		rateIPBurst     = fs.Int("rate-limit-ip-burst", envInt("VTESSERA_RATE_LIMIT_IP_BURST", 40), "burst one client address may spend at once; 0 disables the per-address limit")
+		rateIPHeader    = fs.String("rate-limit-ip-header", env("VTESSERA_RATE_LIMIT_IP_HEADER", "Fly-Client-IP"), "header the proxy sets to the client address; empty uses the connection address")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "vtessera: A2A marketplace gateway with AGP routing and virtual tessera receipts\n\n")
@@ -304,6 +327,13 @@ func Parse(args []string) (Config, error) {
 		Spend:                 spendCfg,
 		Sandbox:               *sandbox,
 		Solana:                solanaCfg,
+		RateLimit: RateLimit{
+			AgentRPS:   *rateAgentRPS,
+			AgentBurst: *rateAgentBurst,
+			IPRPS:      *rateIPRPS,
+			IPBurst:    *rateIPBurst,
+			IPHeader:   unset(*rateIPHeader),
+		},
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -560,6 +590,32 @@ func envInt64(key string, fallback int64) int64 {
 	return fallback
 }
 
+// envInt reads an integer setting from the environment, falling back to the
+// declared default when it is unset. A malformed value returns -1 so the
+// operator finds out at boot rather than running with a limit they did not
+// choose.
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		return -1
+	}
+	return fallback
+}
+
+// envFloat reads a decimal setting from the environment, falling back to the
+// declared default when it is unset.
+func envFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+		return -1
+	}
+	return fallback
+}
+
 func splitList(v string) []string {
 	raw := unset(v)
 	if raw == "" {
@@ -624,6 +680,21 @@ func (c Config) Validate() error {
 	}
 	if c.RequestTimeout <= 0 {
 		return errors.New("request-timeout must be positive")
+	}
+	if c.RateLimit.AgentRPS < 0 || c.RateLimit.IPRPS < 0 {
+		return errors.New("rate-limit rps must not be negative")
+	}
+	if c.RateLimit.AgentBurst < 0 || c.RateLimit.IPBurst < 0 {
+		return errors.New("rate-limit burst must not be negative")
+	}
+	// A rate with no tokens is a limit that never allows anything, which is not
+	// what an operator setting a rate means. A burst with no rate is a fixed
+	// quota rather than a rate, which is a deliberate configuration and allowed.
+	if c.RateLimit.AgentRPS > 0 && c.RateLimit.AgentBurst == 0 {
+		return errors.New("rate-limit-agent-burst must be positive when rate-limit-agent-rps is set")
+	}
+	if c.RateLimit.IPRPS > 0 && c.RateLimit.IPBurst == 0 {
+		return errors.New("rate-limit-ip-burst must be positive when rate-limit-ip-rps is set")
 	}
 	if c.ShutdownGrace < 0 {
 		return errors.New("shutdown-grace must not be negative")
