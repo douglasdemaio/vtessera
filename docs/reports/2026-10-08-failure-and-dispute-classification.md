@@ -94,9 +94,13 @@ trade creation (`trade.go:532-538`, under `reserveMu`), the on-chain build
 (the last moment before the buyer holds a signable transaction,
 `trade/settlement.go:266`), and the off-chain commit (`trade.go:667`).
 
-`GET /v1/limits` reports the **caps** only — `perTradeUsd`, `perDayUsd`,
-`raised`, `currency` and any ceiling — and deliberately exposes **no spend or
-reservation figure** (`httpapi/limits.go:16-30`).
+`GET /v1/limits` reports the **caps** — `perTradeUsd`, `perDayUsd`,
+`raised`, `currency` and any ceiling — and, since gap 6 was fixed, the buyer's
+own consumed budget: `committedUsd` (everything the rolling window is holding)
+and `remainingUsd` (`perDayUsd` minus committed, floored at zero), plus the
+`window`. It is the caller's own figure, resolved from the session, and a
+cancelled or resolved trade releases its reservation as before
+(`httpapi/limits.go`).
 
 ## 5. The five cases
 
@@ -278,9 +282,12 @@ fixed; the rest are open.
    (`limits.go:112-115`), a dispute open longer than a day no longer constrains
    the buyer at all. That may be acceptable — the cap is not KYC — but it is a
    decision, not an accident, and should be stated.
-6. **No consumed-budget read.** `GET /v1/limits` shows caps, never spend or
-   reservations (`httpapi/limits.go:16-30`); an operator cannot see how much of
-   a buyer's day a hanging or disputed trade is holding without reading SQLite.
+6. ~~**No consumed-budget read.**~~ **Fixed 2026-10-09.** `GET /v1/limits`
+   now reports the caller's own `committedUsd` and `remainingUsd` for the
+   rolling `window`, priced at USD micro precision like the `SPEND_CAP_EXCEEDED`
+   refusal, so an agent can see what a hanging or disputed trade is holding
+   without reading SQLite. The figure is the session's own agent, and a
+   cancelled or resolved trade releases its reservation.
 7. **Dispute detail is invisible above the parties.** The public sees counts;
    the reason lives in the trade event and is visible only to the two parties
    (`trade.go:692-696`). Operational/audit review of a dispute needs a

@@ -484,6 +484,41 @@ func (s *Service) committedSpend(ctx context.Context, buyerAgentID string, windo
 	return rows, nil
 }
 
+// CommittedSpendUSD returns the value, in micro-USD, of every engagement this
+// buyer holds inside the rolling window — the same figure checkSpend refuses
+// against. It is a read: it reserves nothing and changes nothing. It exists so
+// an agent can see how much of its day a hanging or disputed trade is holding
+// rather than discovering it only by being refused.
+//
+// A committed mint that no longer has a rate is an error rather than a zero,
+// for the same reason checkSpend refuses one: counting it as nothing would
+// understate the buyer's spend.
+func (s *Service) CommittedSpendUSD(ctx context.Context, buyerAgentID string) (uint64, error) {
+	if s.limits == nil {
+		return 0, nil
+	}
+	policy := *s.limits
+	rows, err := s.committedSpend(ctx, buyerAgentID, policy.Window, "")
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, row := range rows {
+		value, err := policy.USDValue(row.Amount, row.Mint)
+		if err != nil {
+			if errors.Is(err, limits.ErrNoRate) {
+				return 0, fmt.Errorf("%w: this agent has committed spend in %s, which has no rate", ErrMintUnpriced, row.Mint)
+			}
+			return 0, fmt.Errorf("price this agent's committed spend: %w", err)
+		}
+		total += value
+		if total < value {
+			return 0, fmt.Errorf("%w: this agent's committed spend exceeds the representable range", ErrSpendCapExceeded)
+		}
+	}
+	return total, nil
+}
+
 func (s *Service) UsageMetrics(ctx context.Context) (domain.UsageMetrics, error) {
 	m, err := s.store.UsageMetrics(ctx)
 	if err != nil {

@@ -283,6 +283,12 @@ trade is cancelled and the reservation released. A build the chain resolved as a
 failed execution keeps the trade `settlement_pending` so the buyer can retry; do
 not collapse the two, or a retry becomes impossible.
 
+A cap an agent cannot measure is a number, not a budget. `GET /v1/limits`
+reports the caller's own `committedUsd` and `remainingUsd` for the rolling
+`window`, priced at the same USD micro precision as a `SPEND_CAP_EXCEEDED`
+refusal, so the figure an agent reads and the figure a refusal names are the same
+string. It is resolved from the session like the caps are; there is no path value.
+
 What is left is bypassable by registering a new agent, and documented in
 `docs/deploy.md`. Closing that means identity attestation or a deposit.
 
