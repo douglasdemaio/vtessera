@@ -341,6 +341,112 @@ func TestTradeLifecycleStorage(t *testing.T) {
 	}
 }
 
+func TestTradeAcceptanceReportsTheEarliestAcceptanceOrNone(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	for _, id := range []string{"alice", "bob"} {
+		if err := s.CreateAgent(ctx, testAgent(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateOffer(ctx, testOffer("o1", "alice"), ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	tr := domain.Trade{
+		ID: "t1", OfferID: "o1", BuyerAgentID: "bob", SellerAgentID: "alice",
+		Description: "sentiment dataset", Amount: money.MustParse("25"), Mint: validMint,
+		SettlementMode: domain.SettlementOffchain, State: domain.TradeProposed, CreatedAt: now,
+	}
+	if err := s.CreateTrade(ctx, tr, "trade-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, found, err := s.TradeAcceptance(ctx, "t1"); err != nil || found {
+		t.Fatalf("TradeAcceptance before any acceptance: found=%v err=%v, want false, nil", found, err)
+	}
+
+	later := now.Add(time.Hour)
+	if _, err := s.AddTradeAcceptance(ctx, "t1", "bob", later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTradeAcceptance(ctx, "t1", "alice", now); err != nil {
+		t.Fatal(err)
+	}
+
+	at, found, err := s.TradeAcceptance(ctx, "t1")
+	if err != nil || !found {
+		t.Fatalf("TradeAcceptance after two acceptances: found=%v err=%v, want true, nil", found, err)
+	}
+	if !at.Equal(now) {
+		t.Errorf("TradeAcceptance = %v, want the earliest acceptance %v", at, now)
+	}
+}
+
+func TestAcceptedBeforeFiltersByStateDeadlineAndOrdersOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	for _, id := range []string{"alice", "bob"} {
+		if err := s.CreateAgent(ctx, testAgent(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	deadline := now.Add(time.Hour)
+
+	// t1: accepted well before the deadline, moved to accepted first so it is the
+	// oldest by updated_at.
+	// t2: accepted exactly at the deadline, which must still count ("<=").
+	// t3: accepted after the deadline, which must not be returned.
+	// t4: never moved out of proposed, which must not be returned even though it
+	// has an acceptance row.
+	cases := []struct {
+		id, offer    string
+		acceptedAt   time.Time
+		moveAccepted bool
+	}{
+		{"t1", "o1", now.Add(-time.Hour), true},
+		{"t2", "o2", deadline, true},
+		{"t3", "o3", deadline.Add(time.Hour), true},
+		{"t4", "o4", now.Add(-time.Hour), false},
+	}
+	for i, c := range cases {
+		if err := s.CreateOffer(ctx, testOffer(c.offer, "alice"), ""); err != nil {
+			t.Fatal(err)
+		}
+		tr := domain.Trade{
+			ID: c.id, OfferID: c.offer, BuyerAgentID: "bob", SellerAgentID: "alice",
+			Description: "sentiment dataset", Amount: money.MustParse("25"), Mint: validMint,
+			SettlementMode: domain.SettlementOffchain, State: domain.TradeProposed,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if err := s.CreateTrade(ctx, tr, "trade-key-"+c.id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.AddTradeAcceptance(ctx, c.id, "bob", c.acceptedAt); err != nil {
+			t.Fatal(err)
+		}
+		if c.moveAccepted {
+			// Stagger updated_at so t1 is unambiguously the oldest row.
+			moveAt := now.Add(time.Duration(i) * time.Minute)
+			if _, err := s.SetTradeState(ctx, c.id, domain.TradeProposed, domain.TradeAccepted, moveAt); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	got, err := s.AcceptedBefore(ctx, deadline, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("AcceptedBefore returned %d trades, want 2 (t1, t2): %+v", len(got), got)
+	}
+	if got[0].ID != "t1" || got[1].ID != "t2" {
+		t.Errorf("AcceptedBefore = [%s, %s], want [t1, t2] oldest first", got[0].ID, got[1].ID)
+	}
+}
+
 func TestLedgerChainAndReceipt(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
