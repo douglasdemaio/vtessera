@@ -34,7 +34,13 @@ type Config struct {
 	// Unset means those routes are absent rather than open. There is no default
 	// token to guess and no way to mint one, so a deployment that has not chosen
 	// to have this capability does not have it.
-	AdminToken     []byte
+	AdminToken []byte
+	// AdminOperators are named operator credentials. Each authorises the same
+	// routes as AdminToken, but the name is a principal: the audit row records
+	// the name bound to the token that was presented, not a header the caller
+	// typed. Several can be configured at once, which is a rotation path — add
+	// the new token, retire the old one, and the trail spans both.
+	AdminOperators []AdminOperator
 	ChallengeTTL   time.Duration
 	SessionTTL     time.Duration
 	RequestTimeout time.Duration
@@ -130,6 +136,14 @@ type RateLimit struct {
 	IPHeader string
 }
 
+// AdminOperator is a named operator credential. The name is the principal the
+// audit row records, so it has to come from the credential rather than from the
+// request; see the threat model.
+type AdminOperator struct {
+	Name  string
+	Token []byte
+}
+
 // Solana configures non-custodial on-chain settlement.
 type Solana struct {
 	// Cluster is the chain this deployment settles against. It is required
@@ -176,6 +190,7 @@ func Parse(args []string) (Config, error) {
 		dbURL     = fs.String("db", env("VTESSERA_DB", "file:vtessera.db"), "SQLite database DSN (Postgres is a planned target, not yet supported)")
 		signerKey = fs.String("signer-key", env("VTESSERA_SIGNER_KEY", "data/signer.key"), "path to the Ed25519 marketplace signing key")
 		adminTok  = fs.String("admin-token", os.Getenv("VTESSERA_ADMIN_TOKEN"), "operator token authorising agent retirement; unset removes the admin routes entirely")
+		adminOps  = fs.String("admin-operators", env("VTESSERA_ADMIN_OPERATORS", ""), "named operator tokens as name=token entries separated by commas; the name is recorded in the audit row")
 		secret    = fs.String("session-secret", os.Getenv("VTESSERA_SESSION_SECRET"), "session signing secret, at least 32 bytes (hex or base64)")
 		challenge = fs.Duration("challenge-ttl", 5*time.Minute, "auth challenge lifetime")
 		session   = fs.Duration("session-ttl", 24*time.Hour, "session token lifetime")
@@ -272,6 +287,10 @@ func Parse(args []string) (Config, error) {
 		}
 		adminToken = []byte(tok)
 	}
+	adminOperators, err := parseAdminOperators(*adminOps, adminToken)
+	if err != nil {
+		return Config{}, err
+	}
 	acceptTTLDur, err := time.ParseDuration(unset(*acceptTTL))
 	if err != nil {
 		return Config{}, fmt.Errorf("trade-accept-ttl %q is not a duration: %w", *acceptTTL, err)
@@ -317,6 +336,7 @@ func Parse(args []string) (Config, error) {
 		SignerKeyPath:         *signerKey,
 		SessionSecret:         decoded,
 		AdminToken:            adminToken,
+		AdminOperators:        adminOperators,
 		ChallengeTTL:          *challenge,
 		SessionTTL:            *session,
 		RequestTimeout:        *timeout,
@@ -614,6 +634,40 @@ func envFloat(key string, fallback float64) float64 {
 		return -1
 	}
 	return fallback
+}
+
+// parseAdminOperators reads the name=token list and refuses a misconfiguration
+// at boot rather than an operator discovering at the moment of an incident that
+// the credential they are holding carries no name. It also checks the named
+// tokens against the legacy single token so the two forms cannot collide.
+func parseAdminOperators(raw string, legacyToken []byte) ([]AdminOperator, error) {
+	names := map[string]bool{}
+	tokens := map[string]bool{}
+	if len(legacyToken) > 0 {
+		names["operator"] = true
+		tokens[string(legacyToken)] = true
+	}
+	var ops []AdminOperator
+	for _, entry := range splitList(raw) {
+		name, token, ok := strings.Cut(entry, "=")
+		name, token = strings.TrimSpace(name), strings.TrimSpace(token)
+		if !ok || name == "" || token == "" {
+			return nil, fmt.Errorf("admin-operators entry %q must be name=token", entry)
+		}
+		if len(token) < 32 {
+			return nil, fmt.Errorf("admin-operators token for %q must be at least 32 characters", name)
+		}
+		if names[name] {
+			return nil, fmt.Errorf("admin-operators names must be unique: %q is configured twice", name)
+		}
+		if tokens[token] {
+			return nil, fmt.Errorf("admin-operators tokens must be unique: the token for %q is already configured", name)
+		}
+		names[name] = true
+		tokens[token] = true
+		ops = append(ops, AdminOperator{Name: name, Token: []byte(token)})
+	}
+	return ops, nil
 }
 
 func splitList(v string) []string {

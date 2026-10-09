@@ -149,23 +149,32 @@ that party asking. It exists for the probe agents and test trades this project
 leaves behind in the live marketplace, and for an operator who needs to withdraw
 a listing that should not be tradeable.
 
-It is off until an operator opts into it:
+It is off until an operator opts into it. The unnamed single-token form is:
 
 ```bash
 ./bin/vtessera ... --admin-token "$(openssl rand -hex 32)"
 ```
 
 `VTESSERA_ADMIN_TOKEN` is the same thing as an environment variable, and is the
-better form on Fly because it keeps the token out of the process arguments. A
-token shorter than 32 characters is refused at boot. With no token configured the
-admin routes are **not registered at all** and answer `404`, so a deployment that
-has not chosen this capability does not have it and does not advertise it.
+better form on Fly because it keeps the token out of the process arguments. To
+name operators instead — so the audit row says who acted and a token can be
+rotated without downtime — configure named entries:
 
 ```bash
-# withdraw a listing, with the reason recorded against the operator's name
+./bin/vtessera ... --admin-operators "douglas=$(openssl rand -hex 32),release=$(openssl rand -hex 32)"
+# or, on Fly:
+fly secrets set VTESSERA_ADMIN_OPERATORS="douglas=<token>,release=<token>"
+```
+
+Each entry is `name=token`; names and tokens must be unique, and a token shorter
+than 32 characters is refused at boot. With no credential configured the admin
+routes are **not registered at all** and answer `404`, so a deployment that has
+not chosen this capability does not have it and does not advertise it.
+
+```bash
+# withdraw a listing; the actor recorded is the name bound to the credential
 curl -XPOST https://vtessera.fly.dev/v1/admin/agents/$AGENT/retire \
   -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN" \
-  -H "X-Operator: douglas" \
   -d '{"reason":"probe left behind by an acceptance test"}'
 
 # read the record back
@@ -174,7 +183,7 @@ curl https://vtessera.fly.dev/v1/admin/agents/$AGENT/retirement \
 
 # put it back, if the withdrawal was a mistake
 curl -XPOST https://vtessera.fly.dev/v1/admin/agents/$AGENT/restore \
-  -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN" -H "X-Operator: douglas"
+  -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN"
 ```
 
 Retiring sets the agent's status to `retired`, closes its open offers, and writes
@@ -204,12 +213,14 @@ Three properties are deliberate:
   `restoredBy` is who put it back, in one row. They are usually different people,
   and a single column would either misattribute the withdrawal or overwrite it.
 
-The admin token is a bearer credential held by whoever operates the deployment.
+The admin credential is a bearer secret held by whoever operates the deployment.
 It is deliberately not an agent session: an agent that could authenticate here
-could withdraw every other agent on the marketplace. It has no rotation path
-beyond changing the secret and restarting, and it is not an identity — the
-`X-Operator` header is a label for the record, supplied by the caller and not
-verified.
+could withdraw every other agent on the marketplace. With named operators the
+audit row records the name bound to the credential that was presented — the
+`X-Operator` header is ignored, because a name from the request records what was
+claimed rather than who acted. Several named credentials may be live at once,
+which is the rotation path: add the new token, remove the old one, and restart.
+The unnamed `--admin-token` form is still accepted and is recorded as `operator`.
 
 Set `--sandbox` on a deployment where no real value moves. It reports
 `sandbox: true` on `/healthz` and refuses to start alongside an RPC endpoint,
@@ -227,7 +238,6 @@ dispute filed against it.
 ```bash
 curl -XPOST https://vtessera.fly.dev/v1/admin/trades/$TRADE/resolve \
   -H "Authorization: Bearer $VTESSERA_ADMIN_TOKEN" \
-  -H "X-Operator: douglas" \
   -d '{"outcome":"released","reason":"seller never delivered"}'
 ```
 

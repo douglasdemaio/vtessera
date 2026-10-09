@@ -149,16 +149,19 @@ from an RPC query or a second independent provider.
 
 **An operator can withdraw an agent, and only an operator.** The admin routes are
 the one place the service acts on a principal that did not ask to be acted on.
-They are absent unless a token is configured, they take that token rather than an
-agent session, the token is compared in constant time, and a retirement is refused
-while a trade is live. What remains: the token is a bearer secret with no
-identity behind it, so the `X-Operator` label on the audit row is whatever the
-caller typed and is not verified. The row records what was claimed, not who did
-it. Anyone who obtains the token can withdraw any listing, including the real
-marketplace's own entry, and there is no second approval and no notification to
-the affected agent. A retrieval mechanism without a rotation path and without
-attribution is the weak part, and it should be replaced with something that has
-both before the route is used on a deployment anybody cares about.
+They are absent unless a credential is configured, they take that credential
+rather than an agent session, and it is compared in constant time. Attribution
+and rotation are now in place: the audit row records the name bound to the
+credential that was presented, never the caller-supplied `X-Operator` header, and
+several named credentials (`--admin-operators`, `name=token`) may be live at once,
+which is a rotation path. What remains: the credential is a bearer secret, so
+anyone who obtains one can withdraw any listing, including the real marketplace's
+own entry; there is no second approval, no notification to the affected agent, and
+no expiry or per-operator scope. The unnamed `--admin-token` form is still
+accepted and is recorded as the shared principal `operator`, so a deployment that
+wants attribution must use the named form. Until notification and scoping exist, a
+named credential is an accountable identifier on a bearer secret rather than an
+authenticated person.
 
 **A card is self-describing and unauthenticated content.** Ownership is now
 enforced, but nothing verifies that the agent behind a card actually offers the

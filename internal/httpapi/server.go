@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -48,10 +49,10 @@ type Server struct {
 	// correct state for the live deployment rather than a missing field.
 	cluster cluster.Cluster
 	genesis string
-	// adminToken authorises the operator routes. Empty means they were never
-	// registered, which is checked at routing rather than here so a missing token
-	// cannot leave a route mounted and unguarded.
-	adminToken []byte
+	// adminOperators authorises the operator routes and names who acted. Empty
+	// means they were never registered, which is checked at routing rather than
+	// here so a missing credential cannot leave a route mounted and unguarded.
+	adminOperators []operatorToken
 	// agentLimiter and ipLimiter bound request rates. Either is nil when its
 	// burst is zero, which is how an operator disables one layer. The IP limiter
 	// runs before routing so a request with no session is still bounded; the
@@ -85,8 +86,16 @@ type Options struct {
 	PublicBaseURL string
 	// AdminToken authorises the operator routes. Empty means those routes are not
 	// registered at all, so a deployment without a token has no way to retire
-	// anybody rather than a way anybody can try.
+	// anybody rather than a way anybody can try. It is the unnamed single-token
+	// form; AdminOperators is the named form and is preferred where attribution
+	// matters.
 	AdminToken []byte
+	// AdminOperators are named operator credentials. The name bound to the token
+	// a caller presented is what the audit row records, so a privileged action is
+	// attributable to a configured principal rather than to a header the caller
+	// typed. Several tokens give a rotation path. AdminToken, if also set, is
+	// treated as an operator named "operator".
+	AdminOperators []Operator
 	// Sandbox marks a deployment where no real value moves. It is carried into
 	// /healthz and /v1/tokens so an agent can tell before it commits to
 	// something that cannot be unwound.
@@ -102,23 +111,56 @@ type Options struct {
 // service does not get to declare itself out of beta.
 const SettlementTier = "beta"
 
+// Operator is a named operator credential. The name is the principal recorded
+// in the audit row, so it must come from the credential and not from a header.
+type Operator struct {
+	Name  string
+	Token []byte
+}
+
+// operatorToken is a credential reduced to the name it carries and a fixed-size
+// digest of the token, so the comparison is constant time regardless of length
+// and the plaintext token is not held after construction.
+type operatorToken struct {
+	name string
+	sum  [sha256.Size]byte
+}
+
+func newOperatorTokens(legacy []byte, named []Operator) []operatorToken {
+	out := make([]operatorToken, 0, len(named)+1)
+	for _, op := range named {
+		if len(op.Token) == 0 {
+			continue
+		}
+		name := op.Name
+		if name == "" {
+			name = "operator"
+		}
+		out = append(out, operatorToken{name: name, sum: sha256.Sum256(op.Token)})
+	}
+	if len(legacy) > 0 {
+		out = append(out, operatorToken{name: "operator", sum: sha256.Sum256(legacy)})
+	}
+	return out
+}
+
 func New(opts Options) *Server {
 	s := &Server{
-		registry:      opts.Registry,
-		trades:        opts.Trades,
-		auth:          opts.Auth,
-		agp:           agp.NewRouting(),
-		ledger:        opts.Ledger,
-		tokens:        opts.Tokens,
-		version:       opts.Version,
-		cluster:       opts.Cluster,
-		genesis:       opts.GenesisHash,
-		publicBaseURL: strings.TrimRight(opts.PublicBaseURL, "/"),
-		sandbox:       opts.Sandbox,
-		adminToken:    opts.AdminToken,
-		ipHeader:      opts.RateLimit.IPHeader,
-		now:           time.Now,
-		mux:           http.NewServeMux(),
+		registry:       opts.Registry,
+		trades:         opts.Trades,
+		auth:           opts.Auth,
+		agp:            agp.NewRouting(),
+		ledger:         opts.Ledger,
+		tokens:         opts.Tokens,
+		version:        opts.Version,
+		cluster:        opts.Cluster,
+		genesis:        opts.GenesisHash,
+		publicBaseURL:  strings.TrimRight(opts.PublicBaseURL, "/"),
+		sandbox:        opts.Sandbox,
+		adminOperators: newOperatorTokens(opts.AdminToken, opts.AdminOperators),
+		ipHeader:       opts.RateLimit.IPHeader,
+		now:            time.Now,
+		mux:            http.NewServeMux(),
 	}
 	if opts.RateLimit.AgentBurst > 0 {
 		s.agentLimiter = newRateLimiter(opts.RateLimit.AgentRPS, opts.RateLimit.AgentBurst)
@@ -148,7 +190,7 @@ func (s *Server) routes() {
 	// Registered only with a token configured. Absent routes 404 rather than
 	// refusing, because a capability a deployment did not opt into should not be
 	// advertised to anybody scanning the surface.
-	if len(s.adminToken) > 0 {
+	if len(s.adminOperators) > 0 {
 		s.mux.HandleFunc("POST /v1/admin/agents/{id}/retire", s.requireAdmin(s.handleRetireAgent))
 		s.mux.HandleFunc("POST /v1/admin/agents/{id}/restore", s.requireAdmin(s.handleRestoreAgent))
 		s.mux.HandleFunc("GET /v1/admin/agents/{id}/retirement", s.requireAdmin(s.handleGetRetirement))
@@ -966,6 +1008,11 @@ func rpcError(id json.RawMessage, code int, message string) map[string]any {
 
 type agentContextKey struct{}
 
+// operatorContextKey carries the name bound to the operator credential that
+// authorised the request. Only requireAdmin sets it, so an operator action
+// cannot be attributed to a name the caller supplied.
+type operatorContextKey struct{}
+
 func (s *Server) authed(next func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		agentID, err := s.authenticate(r)
@@ -991,19 +1038,34 @@ func (s *Server) authed(next func(http.ResponseWriter, *http.Request)) http.Hand
 // a separate credential precisely so that the two cannot be confused.
 func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if len(s.adminToken) == 0 {
+		if len(s.adminOperators) == 0 {
 			// Unreachable through the mux, because the routes are not registered
-			// without a token. Checked anyway so that a future caller wiring one of
-			// these handlers up by hand cannot create an open route.
+			// without a credential. Checked anyway so that a future caller wiring
+			// one of these handlers up by hand cannot create an open route.
 			writeErrorStatus(w, http.StatusNotFound, "NOT_FOUND", "no such route")
 			return
 		}
 		presented, err := adminTokenFrom(r.Header.Get("Authorization"))
-		if err != nil || subtle.ConstantTimeCompare(presented, s.adminToken) != 1 {
+		if err != nil {
 			writeErrorStatus(w, http.StatusUnauthorized, "UNAUTHORIZED", "a valid operator token is required")
 			return
 		}
-		next(w, r)
+		sum := sha256.Sum256(presented)
+		name := ""
+		// Every configured credential is compared, with no early return, so the
+		// work does not reveal which operator was tried. The name comes from the
+		// credential that matched and is carried in the context; the request
+		// cannot choose it.
+		for _, op := range s.adminOperators {
+			if subtle.ConstantTimeCompare(sum[:], op.sum[:]) == 1 {
+				name = op.name
+			}
+		}
+		if name == "" {
+			writeErrorStatus(w, http.StatusUnauthorized, "UNAUTHORIZED", "a valid operator token is required")
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), operatorContextKey{}, name)))
 	}
 }
 
@@ -1107,14 +1169,12 @@ func (s *Server) handleAdminTrade(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminActor names who performed an operator action in the audit row. It is the
-// operator's own label for the deployment rather than an agent id, because
-// nobody is accountable as an Ed25519 key for a withdrawal an agent did not ask
-// for.
+// name bound to the credential the caller presented, set by requireAdmin, not a
+// header: a name the caller typed would record what was claimed rather than who
+// did it.
 func adminActor(r *http.Request) string {
-	if actor := strings.TrimSpace(r.Header.Get("X-Operator")); actor != "" {
-		return actor
-	}
-	return "operator"
+	name, _ := r.Context().Value(operatorContextKey{}).(string)
+	return name
 }
 
 func agentFrom(r *http.Request) string {
