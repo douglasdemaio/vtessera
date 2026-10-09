@@ -260,3 +260,107 @@ func TestReconcileStopsAtTheBatchLimit(t *testing.T) {
 		t.Errorf("examined = %d, want the batch limit of 2 so one pass cannot starve the request path", stats.Examined)
 	}
 }
+
+func TestReconcileCancelsAStaleSignatureThatNeverLanded(t *testing.T) {
+	ctx := context.Background()
+	chain := &fakeChain{} // every poll reports the signature as not yet on chain
+	h, _ := reconcilingHarness(t, withChain(chain))
+	tr := pendingWithSignature(t, h)
+
+	// Advance past the blockhash the transaction was built against. It can no
+	// longer be submitted, so "not visible yet" has stopped being a thing that
+	// will resolve and waiting longer only holds the buyer's budget.
+	h.svc = h.svc.WithClock(func() time.Time {
+		return time.Now().Add(settlement.DefaultBlockhashTTL + time.Minute)
+	})
+
+	stats, err := h.svc.ReconcileOutstanding(ctx, trade.DefaultReconcilePolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Expired != 1 || stats.Settled != 0 {
+		t.Errorf("stats = %+v, want one expired trade", stats)
+	}
+	after, err := h.svc.Get(ctx, buyerKey, tr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != domain.TradeCancelled {
+		t.Fatalf("state = %s, want cancelled: an unlandable transaction must not hold a reservation forever", after.State)
+	}
+	requests, err := h.db.ListSettlementRequests(ctx, tr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests[0].Status != domain.SettlementExpired {
+		t.Errorf("request status = %s, want expired so its partial unique index is released", requests[0].Status)
+	}
+}
+
+func TestReconcileCancelsAStaleUnsignedRequest(t *testing.T) {
+	ctx := context.Background()
+	chain := &fakeChain{}
+	h, _ := reconcilingHarness(t, withChain(chain))
+	accepted := acceptedOnchainTrade(t, h)
+	if _, err := h.svc.BuildSettlement(ctx, buyerKey, accepted.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A build the buyer never signed or submitted. Once its blockhash lapses
+	// there is nothing to wait for, so the trade is cancelled rather than
+	// reserving the buyer's budget for good.
+	h.svc = h.svc.WithClock(func() time.Time {
+		return time.Now().Add(settlement.DefaultBlockhashTTL + time.Minute)
+	})
+
+	stats, err := h.svc.ReconcileOutstanding(ctx, trade.DefaultReconcilePolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Expired != 1 {
+		t.Errorf("stats = %+v, want the abandoned build expired", stats)
+	}
+	if chain.calls != 0 {
+		t.Errorf("chain calls = %d, want none: an unsigned request has nothing to poll", chain.calls)
+	}
+	after, err := h.svc.Get(ctx, buyerKey, accepted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != domain.TradeCancelled {
+		t.Errorf("state = %s, want cancelled", after.State)
+	}
+}
+
+func TestReconcileLeavesAFailedAttemptRebuildableAcrossPasses(t *testing.T) {
+	ctx := context.Background()
+	// The first pass sees the failed transaction; a later pass, after the
+	// request has been marked expired, sees the signature as unknown, as it
+	// would once the failed transaction is pruned from the node's history.
+	chain := (&fakeChain{}).
+		add(settlement.Fetched{Transaction: &solana.Transaction{}, ExecErr: errors.New("insufficient funds")}, nil).
+		add(settlement.Fetched{}, settlement.ErrTransactionNotFound)
+	h, _ := reconcilingHarness(t, withChain(chain))
+	tr := pendingWithSignature(t, h)
+
+	if _, err := h.svc.ReconcileOutstanding(ctx, trade.DefaultReconcilePolicy()); err != nil {
+		t.Fatal(err)
+	}
+	h.svc = h.svc.WithClock(func() time.Time {
+		return time.Now().Add(settlement.DefaultBlockhashTTL + time.Minute)
+	})
+	stats, err := h.svc.ReconcileOutstanding(ctx, trade.DefaultReconcilePolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Pending != 1 || stats.Expired != 0 {
+		t.Errorf("stats = %+v, want the failed attempt left pending for a rebuild", stats)
+	}
+	after, err := h.svc.Get(ctx, buyerKey, tr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != domain.TradeSettlementPending {
+		t.Errorf("state = %s, want settlement_pending so the buyer can rebuild against the same trade", after.State)
+	}
+}

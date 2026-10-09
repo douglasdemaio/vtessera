@@ -183,7 +183,11 @@ a buyer that can open unlimited negotiations against a budget it has already
 spent has no cap at all, and the alternative — checking only at the moment the
 trade settles — lets a buyer walk past a limit by having several trades in flight
 at once. Cancelling is the escape from that, and it is always available before
-either party accepts.
+either party accepts. A trade should not have to wait for that either: a
+proposed or negotiating trade carries an **open deadline**, 24 hours by default
+and measured from the trade's last move, after which the sweep cancels it. A
+service with no open deadline refuses to start, because the reservation a trade
+takes at creation would otherwise never come back.
 
 After both parties accept, the trade is a commitment and cancelling it needs a
 reason: either party walked away from a deal it had already agreed to. So an
@@ -205,8 +209,12 @@ the refusal and the way out have to arrive together: a refused commit leaves the
 trade `accepted`, and it can be cancelled once its deadline passes.
 
 Expired trades do not wait for someone to notice. A background sweep cancels
-them, which is what returns their reserved budget to the buyer — a budget that
-never comes back is not a cap, it is a queue.
+both stale open trades and expired accepted ones, which is what returns their
+reserved budget to the buyer — a budget that never comes back is not a cap, it is
+a queue. On-chain, a settlement build that is never signed and submitted is
+handled the same way by the reconciler: once its blockhash lapses the trade is
+cancelled and the reservation released, while a build the chain rejected for a
+failed execution stays open for the buyer to retry.
 
 ### Prices
 
@@ -239,6 +247,7 @@ wants that bounded declares a rate above par.
 | `--spend-cap-per-trade` | `VTESSERA_SPEND_CAP_PER_TRADE` | `10.00` |
 | `--spend-cap-per-day` | `VTESSERA_SPEND_CAP_PER_DAY` | `10.00` |
 | `--trade-accept-ttl` | `VTESSERA_TRADE_ACCEPT_TTL` | `72h` |
+| `--trade-open-ttl` | `VTESSERA_TRADE_OPEN_TTL` | `24h` |
 | `--spend-cap-window` | `VTESSERA_SPEND_CAP_WINDOW` | `24h` |
 | `--spend-cap-max-per-trade` | `VTESSERA_SPEND_CAP_MAX_PER_TRADE` | unset, so raising is refused |
 | `--spend-cap-max-per-day` | `VTESSERA_SPEND_CAP_MAX_PER_DAY` | unset, so raising is refused |

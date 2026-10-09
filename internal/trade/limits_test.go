@@ -626,3 +626,138 @@ func TestNoDeadlineMeansNoCancellation(t *testing.T) {
 		t.Errorf("sweep with no deadline = %d, %v, want 0 and no error", n, err)
 	}
 }
+
+// openClockSetup is clockSetup plus an open-trade deadline, which is what it
+// takes to put a proposed or negotiating trade on either side of its deadline.
+func openClockSetup(t *testing.T, ttl time.Duration) (harness, *time.Time) {
+	t.Helper()
+	h, now := clockSetup(t, 24*time.Hour, nil)
+	h.svc = h.svc.WithOpenTTL(ttl)
+	return h, now
+}
+
+// proposeAt creates a proposed trade at the harness clock's current instant.
+func proposeAt(t *testing.T, h harness, amount string) domain.Trade {
+	t.Helper()
+	ctx := context.Background()
+	tr, _, err := h.svc.Create(ctx, buyerKey, offerFor(t, h, amount), domain.SettlementOffchain, "")
+	if err != nil {
+		t.Fatalf("Create at %s: %v", amount, err)
+	}
+	return tr
+}
+
+func TestAnUntouchedProposedTradeIsSweptAndReleasesItsBudget(t *testing.T) {
+	ctx := context.Background()
+	h, now := openClockSetup(t, time.Hour)
+
+	// A trade reserves its amount from the moment it is created, before either
+	// party commits. If nobody answers it the reservation has to come back, or a
+	// buyer who opens negotiations they abandon can exhaust their own cap.
+	stale := proposeAt(t, h, "4.00")
+
+	*now = now.Add(2 * time.Hour)
+	expired, err := h.svc.ExpireOpen(ctx, 100)
+	if err != nil {
+		t.Fatalf("ExpireOpen: %v", err)
+	}
+	if expired != 1 {
+		t.Errorf("expired = %d, want 1", expired)
+	}
+	swept, err := h.svc.Get(ctx, buyerKey, stale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swept.State != domain.TradeCancelled {
+		t.Errorf("state = %s, want the stale proposed trade cancelled", swept.State)
+	}
+	// The reason is recorded as an expiry, not a cancellation by a party, so an
+	// operator reading the event log can tell why the trade went away.
+	events, err := h.db.ListTradeEvents(ctx, stale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := events[len(events)-1]
+	if last.Type != domain.EventExpired || last.ToState != domain.TradeCancelled {
+		t.Errorf("last event = %+v, want an expiry into cancelled", last)
+	}
+
+	// The released budget is the point: a budget that never comes back is a
+	// queue, not a cap.
+	reused := proposeAt(t, h, "4.00")
+	if reused.State != domain.TradeProposed {
+		t.Errorf("state = %s, want the buyer able to reserve the released budget again", reused.State)
+	}
+}
+
+func TestTheOpenSweepLeavesYoungAndMovingTradesAlone(t *testing.T) {
+	ctx := context.Background()
+	h, now := openClockSetup(t, time.Hour)
+
+	stale := proposeAt(t, h, "2.00")
+
+	*now = now.Add(30 * time.Minute)
+	fresh := proposeAt(t, h, "2.00")
+
+	// A trade that was moved on recently is not abandoned even though it was
+	// created long ago, so its deadline is measured from its last activity.
+	moving := proposeAt(t, h, "2.00")
+	if _, err := h.svc.BeginNegotiation(ctx, buyerKey, moving.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	*now = now.Add(45 * time.Minute)
+	expired, err := h.svc.ExpireOpen(ctx, 100)
+	if err != nil {
+		t.Fatalf("ExpireOpen: %v", err)
+	}
+	if expired != 1 {
+		t.Errorf("expired = %d, want only the untouched trade", expired)
+	}
+	swept, _ := h.svc.Get(ctx, buyerKey, stale.ID)
+	if swept.State != domain.TradeCancelled {
+		t.Errorf("stale state = %s, want cancelled", swept.State)
+	}
+	kept, _ := h.svc.Get(ctx, buyerKey, fresh.ID)
+	if kept.State != domain.TradeProposed {
+		t.Errorf("fresh state = %s, want proposed", kept.State)
+	}
+	moved, _ := h.svc.Get(ctx, buyerKey, moving.ID)
+	if moved.State != domain.TradeNegotiating {
+		t.Errorf("moving state = %s, want negotiating: a recently moved trade is not stale", moved.State)
+	}
+}
+
+func TestTheOpenSweepIsBounded(t *testing.T) {
+	ctx := context.Background()
+	h, now := openClockSetup(t, time.Hour)
+
+	for range 5 {
+		proposeAt(t, h, "1.00")
+	}
+	*now = now.Add(2 * time.Hour)
+
+	// A large backlog is swept over several ticks rather than in one write, so a
+	// sweep cannot hold the database lock for as long as the backlog is large.
+	first, err := h.svc.ExpireOpen(ctx, 2)
+	if err != nil || first != 2 {
+		t.Errorf("first sweep = %d, %v, want 2 and no error", first, err)
+	}
+	if rest, err := h.svc.ExpireOpen(ctx, 100); err != nil || rest != 3 {
+		t.Errorf("rest sweep = %d, %v, want 3 and no error", rest, err)
+	}
+}
+
+func TestNoOpenDeadlineMeansNoOpenCancellation(t *testing.T) {
+	ctx := context.Background()
+	h := capSetup(t, nil)
+
+	proposeAt(t, h, "2.00")
+
+	// Like the acceptance deadline, a zero open deadline is not a request to
+	// sweep everything: it is the absence of a deadline, and the service refuses
+	// to boot configured that way.
+	if n, err := h.svc.ExpireOpen(ctx, 100); err != nil || n != 0 {
+		t.Errorf("sweep with no open deadline = %d, %v, want 0 and no error", n, err)
+	}
+}

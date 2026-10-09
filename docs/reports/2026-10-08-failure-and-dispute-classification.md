@@ -1,7 +1,7 @@
 # Failure and Dispute Classification — Draft
 
 **Date:** 2026-10-08
-**Status:** Draft for review. Originally documentation only; gap 1 has since been fixed (2026-10-09) — `POST /v1/admin/trades/{id}/resolve` closes a dispute with an operator-recorded verdict, and both §5.4 and §5.5 now have a handhold. The remaining gaps in §7 still need sign-off under Rule 2 before any fix.
+**Status:** Draft for review. Gap 1 was fixed on 2026-10-09 (`POST /v1/admin/trades/{id}/resolve` closes a dispute with an operator-recorded verdict); gaps 2 and 3 were fixed on 2026-10-09 as well (open trades and abandoned settlement builds now expire and release their reservation). Gaps 4–8 in §7 still need sign-off under Rule 2 before any fix.
 **Method:** every claim below was read out of the code at the cited `file:line`, as of the report's date. The gap 1 fix added lines to `trade.go` and `domain.go`, so some citations there have drifted; the prose, not the bare number, is what to trust.
 **Operating assumption:** disputes are resolved by the operator by hand. There is no automated arbitration, and this document does not propose any.
 
@@ -51,26 +51,29 @@ reader might expect (`cmd/vtessera/main.go:211-228`):
 
 | Worker | Cadence | Applies to | Source |
 |---|---|---|---|
-| Expiry sweeper | `5m`, batch `100` | `accepted` trades whose acceptance deadline passed | `trade/` `RunExpirySweeper`, `trade.go:318-336`; `config.go:177-178` |
-| Reconciler | `15s`, batch `50` | `settlement_pending` trades | `trade/reconcile.go:26-28,120-134` |
+| Expiry sweeper | `5m`, batch `100` | `proposed`/`negotiating` trades past the open deadline, and `accepted` trades whose acceptance deadline passed | `trade/` `RunExpirySweeper`, `trade.go` `ExpireAccepted`/`ExpireOpen`; `config.go` open/accept TTLs |
+| Reconciler | `15s`, batch `50` | `settlement_pending` trades, including cancelling builds whose blockhash has lapsed | `trade/reconcile.go` |
 
 The acceptance deadline is **derived, not stored**. There is no deadline
-column (`internal/store/schema.sql:35-48`); it is recomputed as
+column (`internal/store/schema.sql`); it is recomputed as
 `min(first acceptance) + acceptTTL`, and it is only non-zero while the state
-is `accepted` (`trade.go:244-256`, anchor read at `store/trades.go:95-108`).
-The default TTL is **72h** (`config.go:176`), and the service refuses to boot
-without one.
+is `accepted` (`trade.go` `acceptanceDeadline`, anchor read at
+`store/trades.go` `TradeAcceptance`).
+The default acceptance TTL is **72h** (`config.go:176`); the open-trade default
+is **24h** (`--trade-open-ttl`), measured from the last move so a trade being
+negotiated is not swept out from under the parties. The service refuses to boot
+without either.
 
-**What has no deadline at all** (this is the heart of §7):
+**What has no deadline now** (the heart of §7):
 
-- `proposed` and `negotiating` trades — never swept (`acceptanceDeadline`
-  returns zero for non-`accepted`, `trade.go:245-247`; the sweep selects
-  `state='accepted'` only, `store/trades.go:121`).
-- `settlement_pending` trades — no trade-level clock; only the settlement
-  *request*'s blockhash window (90s, `settlement.DefaultBlockhashTTL`).
-- Open offers — the `offers` table has no expiry column
-  (`schema.sql:16-33`).
-- `disputed` trades — terminal forever.
+- Open offers — the `offers` table has no expiry column.
+- `disputed` trades — terminal forever until the operator resolves them (§5.4/§5.5).
+
+`settlement_pending` gained a layer rather than a column: the reconciler cancels
+a build whose request is still `issued` and whose blockhash window (90s,
+`settlement.DefaultBlockhashTTL`) has lapsed, so the trade no longer hangs. A
+build the chain resolved as a failed execution stays `settlement_pending` so the
+buyer may rebuild.
 
 ## 4. How the buyer's budget actually works
 
@@ -82,7 +85,7 @@ There are no reservation rows. Exposure is *computed* on every check by
   (`:112-115`).
 - `committedStates` = `settlement_pending`, `recorded`, `settled`, `disputed`
   (`:71-76`) — note that `disputed` is charged.
-- `releasedStates` = `cancelled` only (`:60`, `:119-124`).
+- `releasedStates` = `cancelled`, `resolved` (`:60`, `:119-124`) — a resolved dispute releases the reservation even though it still counts as `disputed` in `/v1/metrics`.
 - Trades in `proposed`/`negotiating`/`accepted` are *not* released; they simply
   age out of the rolling window once they fall outside it.
 
@@ -108,28 +111,31 @@ change `agents.status`, close an offer, or touch a trade
 (`registry/registry.go:524-569`).
 
 - **Trade state:** a trade with an unreachable seller sits in
-  `proposed`/`negotiating` and stays there. Its offers stay `open` and
-  discoverable forever.
-- **Buyer's budget:** charged from `created_at` and ages out of the window
-  after 24h (`limits.go:112-115`); it is not "released" — no cancellation
-  happened.
-- **Public stats:** invisible. It is neither `disputed` nor `cancelled`, and it
-  has no receipt, so `/v1/metrics` does not count it.
-- **Who resolves it:** the buyer, by hand, with `Cancel` — always available
-  before acceptance (`trade.go:572-605`; the deadline gate only exists inside
-  `if tr.State == accepted`, `:586`).
+  `proposed`/`negotiating` until the open deadline (`24h` by default) passes;
+  the sweeper then cancels it (`event=expired`, actor `""`). Its offers still
+  stay `open` and discoverable — that is gap 4, unchanged.
+- **Buyer's budget:** charged from `created_at`, and **released** when the
+  sweeper cancels the stale trade (`cancelled` is a released state); under the
+  open deadline a trade that simply ages out of the window stops counting too.
+- **Public stats:** invisible until the sweep, then counted as `cancelled`.
+- **Who resolves it:** the service, automatically, once the open deadline
+  passes. The buyer may still `Cancel` by hand at any time before acceptance.
 
 ### 5.2 Seller never accepts
 
 Mechanically the same as 5.1 for the state, with one addition worth stating: a
 trade needs **two** acceptances (`trade.go:619-646`), and the deadline anchors
-on the **first** one (`store/trades.go:95-108`). So a seller who never accepts
-leaves the trade in `negotiating` with no deadline and nothing to sweep.
+on the **first** one (`store/trades.go` `TradeAcceptance`). A seller who never
+accepts therefore leaves the trade in `negotiating` until the open deadline
+passes; the sweeper then cancels it, so it is no longer deadline-free. The open
+deadline is measured from the trade's last move, so a negotiation that is still
+active is not swept.
 
-- **Trade state:** `negotiating`, indefinitely.
-- **Buyer's budget:** charged, ages out of the window; not released.
-- **Public stats:** no.
-- **Who resolves it:** the buyer, by hand (`Cancel`), or an eventual deal.
+- **Trade state:** `negotiating`, until the open deadline; then `cancelled`.
+- **Buyer's budget:** charged, then released by the sweep.
+- **Public stats:** no until the sweep, then `cancelled`.
+- **Who resolves it:** the service, automatically; or the buyer by hand
+  (`Cancel`), or an eventual deal.
 
 ### 5.3 Seller accepts and stalls past the deadline
 
@@ -236,7 +242,7 @@ so even that is a deliberate operation rather than a query.
 
 ## 7. Gaps found
 
-Each needs approval under Rule 2 before any code moves. Gap 1 has since been
+Each needs approval under Rule 2 before any code moves. Gaps 1–3 have since been
 fixed; the rest are open.
 
 1. ~~**`disputed` is terminal with no resolution path.**~~ **Fixed 2026-10-09.**
@@ -250,14 +256,19 @@ fixed; the rest are open.
    buyer's reservation, and a resolved dispute still counts as `disputed` in
    `/v1/metrics` so a review cannot bury it. This was the gap that mattered most,
    because §5.4 and §5.5 both ended there.
-2. **`proposed` and `negotiating` never expire.** A buyer who opens a trade
-   against a silent seller holds a hanging record forever; only the buyer's own
-   `Cancel` clears it, and the reserved budget is bounded solely by the 24h
-   window age-out, not by any deadline. (§5.1, §5.2.)
-3. **`settlement_pending` has no trade-level deadline.** Only the per-request
-   blockhash window (90s) bounds it; a buyer who abandons after a build leaves
-   the reconciler examining a trade that nothing ever finishes. Cancellation is
-   available to the buyer once the blockhash lapses, but it is manual.
+2. ~~**`proposed` and `negotiating` never expire.**~~ **Fixed 2026-10-09.**
+   A buyer who opens a trade against a silent seller held a hanging record
+   forever. `--trade-open-ttl` (default `24h`, measured from the trade's last
+   move) now bounds it: `ExpireOpen` cancels a stale open trade with
+   `event=expired`, releasing the buyer's reservation. The service refuses to
+   boot without a positive open deadline, for the same reason it refuses without
+   an acceptance one. (§5.1, §5.2.)
+3. ~~**`settlement_pending` has no trade-level deadline.**~~ **Fixed 2026-10-09.**
+   The reconciler now cancels a trade whose settlement request is still `issued`
+   and whose blockhash window (90s) has lapsed, and expires the request so its
+   partial unique index is released. A request the chain resolved as a failed
+   execution is left `settlement_pending` so the buyer may rebuild. The buyer is
+   no longer the only one who can clear an abandoned build.
 4. **Offers never expire, and a failed probe changes nothing.** A silent
    seller's listing stays `open` and discoverable with no expiry column
    (`schema.sql:16-33`); the probe is the one signal an operator has, and it is

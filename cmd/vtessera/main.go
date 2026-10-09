@@ -117,7 +117,7 @@ func run(args []string) error {
 		registry.WithRequiredOfferAttestation(cfg.RequireOfferAttestation),
 		registry.WithProbeRunner(prober))
 	led := ledger.New(db, signer)
-	trades := trade.New(db, db, db, led).WithLimits(spendPolicy, db).WithAcceptanceTTL(cfg.AcceptTTL)
+	trades := trade.New(db, db, db, led).WithLimits(spendPolicy, db).WithAcceptanceTTL(cfg.AcceptTTL).WithOpenTTL(cfg.OpenTTL)
 	if cfg.RequireOfferAttestation {
 		logger.Info("offer attestation required: an unsigned offer will be refused")
 	} else {
@@ -215,15 +215,17 @@ func run(args []string) error {
 		logger.Warn("on-chain settlement disabled: no cluster or RPC endpoint, on-chain trades are refused")
 	}
 
-	// An accepted trade that is never committed holds its buyer's reservation
-	// indefinitely. The sweep is what makes the daily cap mean what it says: a
-	// budget that never comes back is not a cap, it is a queue.
+	// A trade that is never moved on holds its buyer's reservation: proposed and
+	// negotiating from creation, accepted from the moment it is accepted. The
+	// sweep is what makes the daily cap mean what it says: a budget that never
+	// comes back is not a cap, it is a queue.
 	go func() {
 		trades.RunExpirySweeper(ctx, cfg.ExpirySweepEvery, cfg.ExpirySweepBatch)
 		logger.Info("trade expiry sweeper stopped")
 	}()
 	logger.Info("accepted trades expire",
 		"ttl", cfg.AcceptTTL.String(),
+		"openTtl", cfg.OpenTTL.String(),
 		"sweepEvery", cfg.ExpirySweepEvery.String(),
 		"sweepBatch", cfg.ExpirySweepBatch,
 	)

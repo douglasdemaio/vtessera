@@ -105,11 +105,19 @@ Three rules to understand before changing any of it:
 An **accepted** trade is no longer cancellable on request: acceptance is a
 commitment, and letting either party walk away from it the moment they regret it
 would leave the counterparty no way to plan. Instead it carries a deadline,
-`--trade-accept-ttl` (default `24h`), after which either party may cancel it and
+`--trade-accept-ttl` (default `72h`), after which either party may cancel it and
 a sweep (`--trade-expiry-sweep-interval`, default `5m`) cancels it whether or not
 anyone asks. The sweep is what makes the daily cap mean what it says: without it
 an accepted trade that is never committed holds its buyer's budget forever, and
 a budget that never comes back is a queue rather than a cap.
+
+The same sweep bounds a trade **before** it is accepted. A proposed or
+negotiating trade reserves its amount from creation, so it carries
+`--trade-open-ttl` (default `24h`, from the later of creation and the trade's
+last move); once that passes the sweep cancels it and releases the reservation.
+Without it a buyer could exhaust its own cap by opening negotiations it never
+finishes. The service refuses to boot without a positive open deadline as well as
+a positive acceptance one.
 
 The deadline is also what lets the cap be enforced at the off-chain commit. That
 refusal would otherwise strand the buyer, so the service refuses to boot without

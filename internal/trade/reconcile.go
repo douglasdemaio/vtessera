@@ -147,7 +147,11 @@ const (
 
 // reconcileTrade settles one trade if its recorded signature has landed. It is
 // deliberately conservative: a signature that is not visible yet is not a
-// dispute, and a request with no signature is the buyer's to submit.
+// dispute, and a request with no signature is the buyer's to submit. It is not
+// quite a no-op, though: a settlement request has a finite life, and once that
+// life is over the trade cannot settle by that transaction. At that point the
+// trade is cancelled so its buyer's reservation comes back instead of hanging
+// forever.
 func (s *Service) reconcileTrade(ctx context.Context, tr domain.Trade) (reconcileOutcome, error) {
 	if tr.SettlementMode != domain.SettlementOnchain {
 		return reconcilePending, nil
@@ -156,8 +160,17 @@ func (s *Service) reconcileTrade(ctx context.Context, tr domain.Trade) (reconcil
 	if err != nil {
 		return reconcilePending, err
 	}
+	now := s.now().UTC()
 	signed, ok := latestSignedRequest(requests)
 	if !ok {
+		// Nothing was ever submitted. If the last request's transaction is past
+		// its blockhash lifetime it can no longer be submitted either, so the
+		// trade is cancelled rather than left to reserve the buyer's budget for
+		// good. This cannot strand a buyer who paid: a payment the service can
+		// see is a recorded signature, and that case is handled below.
+		if last, ok := latestRequest(requests); ok && last.Status == domain.SettlementIssued && !now.Before(last.ExpiresAt) {
+			return s.reconcileLapsed(ctx, tr, now)
+		}
 		return reconcilePending, nil
 	}
 	// Withdraw a request built for another cluster instead of polling for it.
@@ -171,7 +184,7 @@ func (s *Service) reconcileTrade(ctx context.Context, tr domain.Trade) (reconcil
 		if !errors.Is(err, ErrClusterMismatch) {
 			return reconcilePending, err
 		}
-		if err := s.settlement.Store.ExpireSettlementRequests(ctx, tr.ID, s.now().UTC()); err != nil {
+		if err := s.settlement.Store.ExpireSettlementRequests(ctx, tr.ID, now); err != nil {
 			return reconcilePending, err
 		}
 		return reconcileExpiredClusterMismatch, nil
@@ -185,6 +198,15 @@ func (s *Service) reconcileTrade(ctx context.Context, tr domain.Trade) (reconcil
 	// storm across every pending trade.
 	fetched, err := s.settlement.Chain.Transaction(ctx, sig)
 	if errors.Is(err, settlement.ErrTransactionNotFound) {
+		// The chain does not know this transaction. If the request is still
+		// issued and the blockhash it was built against has lapsed, the
+		// transaction can no longer be submitted and waiting longer only holds
+		// the buyer's budget. A request the chain already resolved as expired is
+		// left alone: that is the failed-execution case, where the buyer may
+		// rebuild against the same trade rather than losing it.
+		if signed.Status == domain.SettlementIssued && !now.Before(signed.ExpiresAt) {
+			return s.reconcileLapsed(ctx, tr, now)
+		}
 		return reconcilePending, nil
 	}
 	if err != nil {
@@ -207,6 +229,26 @@ func (s *Service) reconcileTrade(ctx context.Context, tr domain.Trade) (reconcil
 	return reconcileSettled, nil
 }
 
+// reconcileLapsed cancels a settlement_pending trade whose settlement
+// transaction can no longer land and expires its outstanding requests so a
+// partial unique index does not outlive the attempt. It is reported as an
+// expiry rather than a dispute: nobody is at fault when a blockhash runs out
+// before a transaction is submitted. A trade another path has already moved
+// past settlement_pending is left alone.
+func (s *Service) reconcileLapsed(ctx context.Context, tr domain.Trade, now time.Time) (reconcileOutcome, error) {
+	if err := s.settlement.Store.ExpireSettlementRequests(ctx, tr.ID, now); err != nil {
+		return reconcilePending, err
+	}
+	detail := reasonDetail("the settlement transaction's blockhash lapsed before it landed")
+	if _, err := s.applyAs(ctx, tr, "", domain.TradeCancelled, detail, domain.EventExpired); err != nil {
+		if errors.Is(err, ErrIllegalState) {
+			return reconcilePending, nil
+		}
+		return reconcilePending, err
+	}
+	return reconcileExpired, nil
+}
+
 // latestSignedRequest returns the most recent request that carries a signature.
 // Older requests are evidence, not the current attempt.
 func latestSignedRequest(requests []domain.SettlementRequest) (domain.SettlementRequest, bool) {
@@ -216,6 +258,16 @@ func latestSignedRequest(requests []domain.SettlementRequest) (domain.Settlement
 		}
 	}
 	return domain.SettlementRequest{}, false
+}
+
+// latestRequest returns the most recent request of any kind. It is what an
+// unsigned request's expiry is read from: the signature is absent, but the
+// deadline the request was built with is not.
+func latestRequest(requests []domain.SettlementRequest) (domain.SettlementRequest, bool) {
+	if len(requests) == 0 {
+		return domain.SettlementRequest{}, false
+	}
+	return requests[len(requests)-1], true
 }
 
 // settleFetched applies the verdict for a transaction that has landed and

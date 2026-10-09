@@ -51,6 +51,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS trades_idempotency_idx ON trades (idempotency_
 CREATE INDEX IF NOT EXISTS trades_buyer_idx ON trades (buyer_agent_id, state);
 CREATE INDEX IF NOT EXISTS trades_seller_idx ON trades (seller_agent_id, state);
 CREATE INDEX IF NOT EXISTS trades_offer_idx ON trades (offer_id);
+-- The expiry sweeper scans by state and last activity, which no other index
+-- leads with. A proposed or negotiating trade that nobody moves is exactly the
+-- row this finds.
+CREATE INDEX IF NOT EXISTS trades_state_updated_idx ON trades (state, updated_at);
 
 CREATE TABLE IF NOT EXISTS trade_acceptances (
   trade_id   TEXT NOT NULL REFERENCES trades (id),

@@ -135,7 +135,8 @@ Rules:
 
 - Transitions are idempotent and keyed by client-supplied idempotency keys on creation.
 - `accepted` requires both parties' explicit agreement over A2A messages.
-- `settlement_pending` begins when the service issues an unsigned transaction; the trade cannot be cancelled while a live (unexpired) transaction exists — it becomes cancellable again once the blockhash expires.
+- `proposed` and `negotiating` trades expire: a trade with no activity for the open-trade deadline (`--trade-open-ttl`, default 24h, from the later of creation and its last move) is cancelled by the sweeper with an `expired` event, so a reservation a buyer opened and abandoned comes back. The service refuses to boot without a positive open deadline, because a reservation that never returns is a cap that is quietly not enforced.
+- `settlement_pending` begins when the service issues an unsigned transaction; the trade cannot be cancelled while a live (unexpired) transaction exists — it becomes cancellable again once the blockhash expires. The reconciler also cancels a request that is still `issued` after its blockhash has lapsed (the transaction can no longer be submitted), expiring the request and releasing the buyer's reservation. A request the chain resolved as a failed execution is different: it is expired but the trade stays `settlement_pending`, so the buyer may build a fresh transaction against the same trade.
 - `disputed` is terminal for the parties; the service never silently marks a trade settled.
 - Only an operator can close a dispute, and only by resolving it to `resolved` with the operator token (`POST /v1/admin/trades/{id}/resolve`). The resolving event records a verdict — `released` (the dispute stood; the buyer is not held to it) or `upheld` (the dispute was found unfounded) — so an audit can tell the two apart, even though both end the trade and release the buyer's reservation. A disputed trade still counts as disputed in `/v1/metrics` after resolution, because the count records that a dispute happened and a review must not be able to bury one.
 
@@ -179,7 +180,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 
 ### 6.4 Failure handling
 
-- **Expired blockhash (~60–90 s):** client simply requests a fresh settlement transaction; the old `SettlementRequest` is marked expired. Trade stays `settlement_pending`.
+- **Expired blockhash (~60–90 s):** client simply requests a fresh settlement transaction; the old `SettlementRequest` is marked expired. The trade stays `settlement_pending` and may be rebuilt. A build that was never signed or submitted, and whose blockhash has lapsed, is cancelled by the reconciler instead, so an abandoned build does not reserve the buyer's budget forever.
 - **Partial settlement:** impossible — the transaction is atomic.
 - **Fee stripping / instruction tampering:** caught at §6.3 step 2 → `disputed`.
 - **RPC unavailability:** confirm retries with exponential backoff; trades in `settlement_pending` are reconciled by a background worker that re-polls any recorded signatures.
