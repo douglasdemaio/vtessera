@@ -451,7 +451,6 @@ type RouteResult struct {
 }
 
 // RouteEntry is the agent the marketplace chose, and what it charges.
-// RouteEntry is the agent the marketplace chose, and what it charges.
 //
 // Path is the A2A squad path of the chosen offer, which is what a caller sends its
 // request to. It is reported as the marketplace wrote it, because rewriting a path
