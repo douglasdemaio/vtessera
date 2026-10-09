@@ -402,6 +402,13 @@ so an auditor can tell an operator who voided a trade from one who refused to.
 Resolving an already-resolved trade is a no-op, and any other state is
 `409 ILLEGAL_STATE`.
 
+`GET /v1/admin/trades/{id}` returns that trade and its full event history to the
+same token, with no agent session: the dispute reason, the verdict, and who did
+what. It is the read that has to come before a resolve, and the reason it exists
+is that the reason and verdict otherwise lived only in the database, reachable by
+neither party's counterpart. The parties still read their own view through their
+sessions; this is not a wider exposure than they already have.
+
 A resolved dispute still counts as `disputed` in `/v1/metrics`: the count is a
 record that a dispute happened, and a review that could lower it would let an
 operator bury the disputes it lost.

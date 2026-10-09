@@ -835,6 +835,26 @@ func (s *Service) Tessera(ctx context.Context, actorID, tradeID string) (domain.
 	return s.ledger.Receipt(ctx, tradeID)
 }
 
+// AdminTrade returns a trade and its full event history for an operator, with no
+// party check. The gate is the admin route's token, which is deliberate: the two
+// parties to a dispute disagree by definition, so the only actor who can review
+// one is the one who is neither of them.
+//
+// It is a separate method from Get rather than a flag on it, so the party check
+// cannot be dropped from Get by accident.
+func (s *Service) AdminTrade(ctx context.Context, tradeID string) (domain.Trade, error) {
+	tr, err := s.store.GetTrade(ctx, tradeID)
+	if err != nil {
+		return domain.Trade{}, err
+	}
+	events, err := s.store.ListTradeEvents(ctx, tradeID)
+	if err != nil {
+		return domain.Trade{}, err
+	}
+	tr.Events = events
+	return tr, nil
+}
+
 func (s *Service) transition(ctx context.Context, actorID, tradeID string, from, to domain.TradeState, detail json.RawMessage) (domain.Trade, error) {
 	tr, err := s.partyTrade(ctx, actorID, tradeID)
 	if err != nil {
