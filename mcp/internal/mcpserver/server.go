@@ -31,15 +31,16 @@ func (s *Server) Instructions() string { return s.text }
 
 // New builds the MCP server and its tool set for a marketplace.
 func New(client *vtessera.Client, baseURL string) *Server {
-	text := fmt.Sprintf(`vtessera is an agent marketplace at %s.
+	text := fmt.Sprintf(`vtessera is an agent marketplace at %s, where an AI agent can discover, vet and
+hire another agent's service.
 
-Agents offer services for a price and buyers negotiate; trades settle either
-off-chain against a signed receipt the marketplace can issue, or on-chain with the
-buyer signing their own transfer. This server is read-only: it can find offers,
-read cards, route an intent to an agent, and report what the marketplace has
-attested and probed. Registering an agent, publishing an offer, accepting a trade
-and running a probe all require the agent's own session against the marketplace's
-HTTP API, so none of them are here.
+Agents offer capabilities (skills, tasks, services) for a price and buyers
+negotiate; trades settle either off-chain against a signed receipt the marketplace
+can issue, or on-chain with the buyer signing their own transfer. This server is
+read-only: it can search offers, read agent cards, route an intent to an agent, and
+report what the marketplace has attested and probed. Registering an agent,
+publishing an offer, accepting a trade and running a probe all require the agent's
+own session against the marketplace's HTTP API, so none of them are here.
 
 Two answers are worth reading carefully. A card attestation says who vouched for an
 agent's card, and it is two-sided: this marketplace's signature and the agent's
@@ -78,7 +79,7 @@ func register(server *mcp.Server, client *vtessera.Client) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vtessera_health",
 		Title:       "Marketplace health and identity",
-		Description: "Report whether the vtessera marketplace is answering, its verification key, and whether it is a sandbox where no real value can move.",
+		Description: "Check whether the vtessera marketplace is up, read its verification key, and see whether it is a sandbox where no real value can move. Call this before relying on any other answer.",
 		Annotations: readOnly(),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
 		health, err := client.Health(ctx)
@@ -91,7 +92,7 @@ func register(server *mcp.Server, client *vtessera.Client) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vtessera_search_offers",
 		Title:       "Search published offers",
-		Description: "Find open offers by capability, currency, settlement mode, direction or free text.",
+		Description: "Search open offers (agent services and skills) by capability, currency, settlement mode, direction or free text. Use this to find an agent that can perform a task.",
 		Annotations: readOnly(),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		// Every filter is optional, and omitempty is what makes it so: a field
@@ -125,7 +126,7 @@ func register(server *mcp.Server, client *vtessera.Client) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vtessera_get_offer",
 		Title:       "Read one offer",
-		Description: "Read a single offer by id, including its price and whether it is still open.",
+		Description: "Read one offer by id, including its price and whether it is still open.",
 		Annotations: readOnly(),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		OfferID string `json:"offerId" jsonschema:"the offer id"`
@@ -140,7 +141,7 @@ func register(server *mcp.Server, client *vtessera.Client) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vtessera_get_agent",
 		Title:       "Read an agent listing",
-		Description: "Read an agent's published card and marketplace status, as the agent declared it.",
+		Description: "Read an agent's published card and marketplace status, as the agent declared it. The agent id is its Ed25519 public key.",
 		Annotations: readOnly(),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AgentID string `json:"agentId" jsonschema:"the agent id, which is its Ed25519 public key"`
@@ -155,7 +156,7 @@ func register(server *mcp.Server, client *vtessera.Client) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vtessera_get_card_attestation",
 		Title:       "Check who vouched for an agent's card",
-		Description: "Report the marketplace's and the agent's own signatures over an agent's card, answered separately.",
+		Description: "Check who vouched for an agent's card: report the marketplace's and the agent's own signatures over it, answered separately.",
 		Annotations: readOnly(),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AgentID string `json:"agentId" jsonschema:"the agent id"`
@@ -176,7 +177,7 @@ func register(server *mcp.Server, client *vtessera.Client) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vtessera_get_capability_report",
 		Title:       "Read the last capability probe of an agent",
-		Description: "Return the marketplace's most recent signed capability probe of an agent. Fails with NOT_PROBED when the agent has never been probed.",
+		Description: "Read the marketplace's most recent signed capability probe of an agent, which records whether it answered when checked. Fails with NOT_PROBED when the agent has never been probed.",
 		Annotations: readOnly(),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		AgentID string `json:"agentId" jsonschema:"the agent id"`
@@ -201,7 +202,7 @@ func register(server *mcp.Server, client *vtessera.Client) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vtessera_route_intent",
 		Title:       "Route an intent to an agent",
-		Description: "Ask the marketplace which agent should serve a capability and what it charges. The payload is required: pass an empty object for a capability that takes no arguments.",
+		Description: "Route a capability request to the agent the marketplace chooses and learn what it charges. The payload is required: pass an empty object for a capability that takes no arguments.",
 		Annotations: readOnly(),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
 		TargetCapability string `json:"targetCapability" jsonschema:"the capability to satisfy"`

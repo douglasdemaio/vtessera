@@ -3,8 +3,8 @@
 An MCP server over vtessera's public HTTP API. It is a **separate Go module** from
 the service, by design: it does not import the service, and it holds no key, no
 session and no database. Its two direct dependencies are the official MCP SDK and
-`github.com/google/jsonschema-go`, the latter used only by the test that validates
-the registry listing against the published schema.
+`github.com/google/jsonschema-go`, the latter used only by the tests that validate
+the registry listing and the Server Card against their published schemas.
 
 Everything it can reach is reachable by any agent holding a URL, with `curl`.
 
@@ -64,6 +64,22 @@ Two answers deserve a careful read, and the server instructions say so:
 - **A capability report is an observation, not a warranty.** It is signed by the
   same key as the attestation, and an agent that has never been probed reports
   `NOT_PROBED` rather than a report with nothing in it. Empty is not a pass.
+
+## Discovery
+
+A hosted server publishes an **MCP Server Card** at `GET /mcp/server-card` — the
+location the [Server Cards extension](https://github.com/modelcontextprotocol/ext-server-card)
+reserves relative to the transport URL. It is a static document describing identity,
+transport and repository, served before a client speaks MCP so a directory can find
+and connect without one. Following the extension, it does not list tools: those stay
+subject to the protocol's own `tools/list`, and a copy here would be a second
+description of the tool set that nothing keeps in step with the first.
+
+The transport URL in the card is built from the request, so a client that fetched it
+from `vtessera-mcp.fly.dev` is told to connect back there; nothing about the hostname
+is configured. `internal/mcpserver/servercard_test.go` validates the card against
+`registry/server-card.schema.json` and holds its name, version, website, repository
+and endpoint equal to the registry listing's, so the two advertisements cannot drift.
 
 ## Registry listing
 
