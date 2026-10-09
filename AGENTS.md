@@ -309,6 +309,12 @@ deliberately does not accept an agent session: an agent that could authenticate
 there could withdraw every other agent. With no token configured the routes are
 not registered at all, and answer `404` rather than `403`.
 
+The same gate covers `POST /v1/admin/trades/{id}/resolve`, which closes a dispute.
+It takes the token and not a session on purpose: the two parties disagree by
+definition, so the only actor who can end the dispute is the one who is neither of
+them, and a party that could authenticate there could un-dispute its own trade or
+sweep away a complaint against it.
+
 Do not add a default token, a fallback to the session secret, or an agent-session
 path into `requireAdmin`. Do not retire an agent to make a test pass, and do not
 retire one on the live deployment without saying so first. `RetireAgent` is

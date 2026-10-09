@@ -125,8 +125,10 @@ The gateway participates in the [A2A AGP routing extension](https://github.com/a
 ```
 proposed ──► negotiating ──► accepted ──┬─(offchain)─► recorded ──► tessera issued
       │                                 │
-      └──────► cancelled                └─(onchain)──► settlement_pending ──► settled ──► tessera issued
+      └──────► cancelled                └─(onchain)─► settlement_pending ──► settled ──► tessera issued
                                                     └─(verification mismatch)──► disputed
+                                                                                    │
+                                                                            (operator)└──► resolved
 ```
 
 Rules:
@@ -134,7 +136,8 @@ Rules:
 - Transitions are idempotent and keyed by client-supplied idempotency keys on creation.
 - `accepted` requires both parties' explicit agreement over A2A messages.
 - `settlement_pending` begins when the service issues an unsigned transaction; the trade cannot be cancelled while a live (unexpired) transaction exists — it becomes cancellable again once the blockhash expires.
-- `disputed` is terminal pending operator review; the service never silently marks a trade settled.
+- `disputed` is terminal for the parties; the service never silently marks a trade settled.
+- Only an operator can close a dispute, and only by resolving it to `resolved` with the operator token (`POST /v1/admin/trades/{id}/resolve`). The resolving event records a verdict — `released` (the dispute stood; the buyer is not held to it) or `upheld` (the dispute was found unfounded) — so an audit can tell the two apart, even though both end the trade and release the buyer's reservation. A disputed trade still counts as disputed in `/v1/metrics` after resolution, because the count records that a dispute happened and a review must not be able to bury one.
 
 ## 6. On-chain settlement
 
@@ -200,7 +203,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 - `GET /v1/agents`, `GET /v1/agents/{id}`, `GET /v1/agents/{id}/offers` — discovery. Search defaults to **open** offers.
 - `GET /v1/offers?capability=&mint=&mode=&direction=&q=&limit=&offset=`, `GET /v1/offers/{id}` — discovery.
 - `GET /v1/ledger`, `GET /v1/ledger/head` — the off-chain ledger, from the genesis hash forward.
-- `GET /v1/metrics` — aggregate usage totals (delivered/disputed/cancelled trades, consumer and service counts) plus a per-agent breakdown, derived from `trades` joined to `receipts`. No auth: the underlying data is already public via `/v1/ledger`.
+- `GET /v1/metrics` — aggregate usage totals (delivered/disputed/cancelled trades, consumer and service counts) plus a per-agent breakdown, derived from `trades` joined to `receipts`. A `disputed` trade that an operator resolved still counts under `disputed`. No auth: the underlying data is already public via `/v1/ledger`.
 - `POST /agp/route` — AGP intent routing (JSON-RPC 2.0, `agp/route_intent`).
 - `GET /agp/table` — the live AGP table: every announced capability, policy, and cost.
 - `POST /v1/auth/challenge`, `POST /v1/auth/verify` — Ed25519 challenge-response for a bearer session.

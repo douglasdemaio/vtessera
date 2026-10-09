@@ -366,6 +366,29 @@ because they are usually different operators, and one field for both would eithe
 misattribute the withdrawal or lose it. See
 [`docs/deploy.md`](docs/deploy.md#retiring-a-listing).
 
+## Resolving a dispute
+
+A `disputed` trade is terminal for the two parties, and neither can end it: the
+one actor who is neither of them is the operator. With the same token and no
+agent session, `POST /v1/admin/trades/{id}/resolve` closes it:
+
+```
+POST /v1/admin/trades/{id}/resolve            # admin token
+{"outcome": "released", "reason": "seller never delivered"}
+```
+
+`outcome` is `released` (the dispute stood and the buyer is not held to it) or
+`upheld` (the dispute was found unfounded). Both move the trade to `resolved`
+and release the buyer's reservation, because the cap bounds live commitments
+rather than recording a verdict; the verdict is what the resolving event keeps,
+so an auditor can tell an operator who voided a trade from one who refused to.
+Resolving an already-resolved trade is a no-op, and any other state is
+`409 ILLEGAL_STATE`.
+
+A resolved dispute still counts as `disputed` in `/v1/metrics`: the count is a
+record that a dispute happened, and a review that could lower it would let an
+operator bury the disputes it lost.
+
 ## Sandbox mode
 
 `--sandbox` marks a deployment where no real value moves. `/healthz` then reports

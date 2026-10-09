@@ -1,8 +1,8 @@
 # Failure and Dispute Classification — Draft
 
 **Date:** 2026-10-08
-**Status:** Draft for review — **documentation only**. No settlement or trade-state code was changed; the gaps in §7 need sign-off under Rule 2 before any fix.
-**Method:** every claim below was read out of the code at the cited `file:line`. Where a fact comes from the live deployment rather than the source, §6 says so and marks inference as inference.
+**Status:** Draft for review. Originally documentation only; gap 1 has since been fixed (2026-10-09) — `POST /v1/admin/trades/{id}/resolve` closes a dispute with an operator-recorded verdict, and both §5.4 and §5.5 now have a handhold. The remaining gaps in §7 still need sign-off under Rule 2 before any fix.
+**Method:** every claim below was read out of the code at the cited `file:line`, as of the report's date. The gap 1 fix added lines to `trade.go` and `domain.go`, so some citations there have drifted; the prose, not the bare number, is what to trust.
 **Operating assumption:** disputes are resolved by the operator by hand. There is no automated arbitration, and this document does not propose any.
 
 ## 1. Purpose
@@ -171,11 +171,11 @@ After a successful `Record` there is no route to `disputed`.
   the trade remains disputed.
 - **Public stats:** `disputed` (`store/metrics.go:13`), attributed to the
   **seller's** agent via the offer join (`:21-32`).
-- **Who resolves it:** the operator, by hand — but see §7.1: there is no
-  resolution path and no review tooling, so "by hand" today has no handhold.
-  Parties can see the dispute and its reason through
-  `GET /v1/trades/{id}` (events attached at `trade.go:692-696`); the public
-  sees only counts.
+- **Who resolves it:** the operator, by hand, now with a handhold:
+  `POST /v1/admin/trades/{id}/resolve` (operator token) records a verdict and
+  closes the trade to `resolved` — see §7.1. Parties can see the dispute and its
+  reason through `GET /v1/trades/{id}` (events attached in `Service.Get`); the
+  public sees only counts.
 
 ### 5.5 On-chain settlement mismatch
 
@@ -188,7 +188,9 @@ so a trade "can never settle by one path and dispute by the other"
 - **Trade state:** `disputed`, terminal. No receipt, no ledger entry.
 - **Buyer's budget:** charged (`disputed` is committed).
 - **Public stats:** `disputed`.
-- **Who resolves it:** the operator, by hand — same gap as 5.4.
+- **Who resolves it:** the operator, by hand, via the same
+  `POST /v1/admin/trades/{id}/resolve` as §5.4 — the gap 5.4 named is closed for
+  both.
 
 The taxonomy around it is deliberate and mostly distinguishes failure from
 dispute correctly:
@@ -234,17 +236,20 @@ so even that is a deliberate operation rather than a query.
 
 ## 7. Gaps found
 
-None of these are fixed in this change; each needs approval under Rule 2 before
-any code moves.
+Each needs approval under Rule 2 before any code moves. Gap 1 has since been
+fixed; the rest are open.
 
-1. **`disputed` is terminal with no resolution path.** The design says
-   "terminal pending operator review"
+1. ~~**`disputed` is terminal with no resolution path.**~~ **Fixed 2026-10-09.**
+   The design said "terminal pending operator review"
    (`docs/specs/2026-09-26-a2a-marketplace-design.md:137`), but the review step
-   was never built: there is no admin route to resolve or un-dispute a trade,
-   `disputed` has no outgoing transition (`trade.go:434-457`), and the runtime
-   image has no `sqlite3` for by-hand review. "Resolved by hand" currently has
-   no handhold. This is the gap that matters most, because §5.4 and §5.5 both
-   end there.
+   was never built: no admin route, no outgoing transition (`trade.go:434-457`),
+   and no `sqlite3` in the runtime image. `POST /v1/admin/trades/{id}/resolve`,
+   behind the operator token and not an agent session, now moves a disputed trade
+   to the terminal `resolved` state and records a verdict (`released` or
+   `upheld`) and a reason on the resolving event. Both outcomes release the
+   buyer's reservation, and a resolved dispute still counts as `disputed` in
+   `/v1/metrics` so a review cannot bury it. This was the gap that mattered most,
+   because §5.4 and §5.5 both ended there.
 2. **`proposed` and `negotiating` never expire.** A buyer who opens a trade
    against a silent seller holds a hanging record forever; only the buyer's own
    `Cancel` clears it, and the reserved budget is bounded solely by the 24h
