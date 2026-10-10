@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/douglasdemaio/vtessera/internal/attest"
 	"github.com/douglasdemaio/vtessera/internal/domain"
 	"github.com/douglasdemaio/vtessera/internal/money"
 )
@@ -15,6 +16,17 @@ import (
 const maxOfferLimit = 200
 
 func (s *Store) CreateOffer(ctx context.Context, o domain.Offer, idempotencyKey string) error {
+	return s.write(ctx, func(tx *sql.Tx) error {
+		return insertOfferRow(ctx, tx, o, idempotencyKey)
+	})
+}
+
+// insertOfferRow writes the offer row inside a caller-supplied transaction, so
+// an offer can be stored as part of a larger fact (see OnboardAgent) without a
+// second copy of this INSERT drifting from the schema. It does not write the
+// offer's attestation; that is insertOfferAttestationRow's job, and the two are
+// always issued against the same transaction by every caller.
+func insertOfferRow(ctx context.Context, tx *sql.Tx, o domain.Offer, idempotencyKey string) error {
 	caps, err := json.Marshal(nonNil(o.Capabilities))
 	if err != nil {
 		return fmt.Errorf("marshal capabilities: %w", err)
@@ -23,14 +35,30 @@ func (s *Store) CreateOffer(ctx context.Context, o domain.Offer, idempotencyKey 
 	if err != nil {
 		return fmt.Errorf("marshal settlement modes: %w", err)
 	}
-	return s.write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO offers (id, agent_id, direction, description, capabilities, price_amount, price_mint, settlement_modes, status, idempotency_key, created_at, updated_at, expires_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			o.ID, o.AgentID, string(o.Direction), o.Description, string(caps), o.PriceAmount.String(),
-			o.PriceMint, string(modes), string(o.Status), nullString(idempotencyKey), nanos(o.CreatedAt), nanos(o.UpdatedAt), expiryColumn(o.ExpiresAt))
-		return mapErr(err)
-	})
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO offers (id, agent_id, direction, description, capabilities, price_amount, price_mint, settlement_modes, status, idempotency_key, created_at, updated_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		o.ID, o.AgentID, string(o.Direction), o.Description, string(caps), o.PriceAmount.String(),
+		o.PriceMint, string(modes), string(o.Status), nullString(idempotencyKey), nanos(o.CreatedAt), nanos(o.UpdatedAt), expiryColumn(o.ExpiresAt))
+	return mapErr(err)
+}
+
+// insertOfferAttestationRow writes the seller's signature over an offer's terms
+// inside a caller-supplied transaction. A signature stored against an offer that
+// does not exist is an attestation over nothing, so every caller writes both in
+// the same transaction.
+func insertOfferAttestationRow(ctx context.Context, tx *sql.Tx, o domain.Offer, sig *attest.Signature) error {
+	encoded, err := json.Marshal(sig)
+	if err != nil {
+		return fmt.Errorf("marshal offer attestation: %w", err)
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO offer_attestations (offer_id, agent_id, signature, signed_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT (offer_id) DO UPDATE SET
+		   signature = excluded.signature, signed_at = excluded.signed_at`,
+		o.ID, o.AgentID, string(encoded), nanos(sig.SignedAt))
+	return mapErr(err)
 }
 
 func (s *Store) GetOffer(ctx context.Context, id string) (domain.Offer, error) {

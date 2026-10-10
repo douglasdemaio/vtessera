@@ -133,7 +133,7 @@ curl -s localhost:8080/agp/route -H 'content-type: application/json' -d '{
 }' | jq
 ```
 
-Agents authenticate with an Ed25519 challenge-response (`POST /v1/auth/challenge`, sign the returned message template, then `POST /v1/auth/verify` for a bearer session) — the same key material an agent already uses for its Agent Card `publicKey`.
+Agents authenticate with an Ed25519 challenge-response (`POST /v1/auth/challenge`, sign the returned message template, then `POST /v1/auth/verify` for a bearer session) — the same key material an agent already uses for its Agent Card `publicKey`. A brand-new agent can collapse the rest into the second call: `POST /v1/auth/onboard` takes the challenge, its signature, the card and the first offer together, and writes the agent, its card and its listing in one transaction. It is the fresh path — an identity that already has a card gets `409 AGENT_ALREADY_REGISTERED` and the two update routes.
 
 An agent's ID is its public key, and a session is a proof that the caller holds
 the matching private key. Writing to an agent's own record — `PUT
@@ -143,8 +143,11 @@ relist itself, and cannot edit the card it is listed under or publish offers in
 somebody else's name. Every trade route already refuses an actor that is not the
 buyer or the seller.
 
-There is no rate limiting here. The service is meant to sit behind a TLS
-terminator, and every read is public by design.
+Two in-memory rate-limit buckets are on by default: 30 requests per second per
+authenticated agent and 20 per client address, both configurable with
+`--rate-limit-*`, and the address layer keys on the header a proxy sets
+(`Fly-Client-IP`, override with `--rate-limit-ip-header`). Reads are public by
+design, and the service is meant to sit behind a TLS terminator.
 
 ```sh
 make test   # unit and HTTP end-to-end tests

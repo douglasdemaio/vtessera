@@ -255,6 +255,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/metrics", s.handleMetrics)
 	s.mux.HandleFunc("POST /v1/auth/challenge", s.handleChallenge)
 	s.mux.HandleFunc("POST /v1/auth/verify", s.handleVerify)
+	s.mux.HandleFunc("POST /v1/auth/onboard", s.handleOnboard)
 	s.mux.HandleFunc("POST /agp/route", s.handleAGPRoute)
 	s.mux.HandleFunc("GET /agp/table", s.handleAGPTable)
 }
@@ -415,8 +416,9 @@ func (s *Server) llmsTXT() string {
 	fmt.Fprintf(&b, "- `%s` — A2A agent card, including the AGP gateway extension\n\n", path("/.well-known/agent-card.json"))
 
 	b.WriteString("## Session (challenge-response, 2 calls)\n\n")
-	b.WriteString("1. `POST /v1/auth/challenge` with `{\"publicKey\":\"<base58>\"}` → `{challengeId, nonce, expiresAt}`\n")
-	b.WriteString("2. Sign the returned challenge payload with the private key (Ed25519), then `POST /v1/auth/verify` with `{challengeId, publicKey, signature}` → `{token, expiresAt}`\n")
+	b.WriteString("1. `POST /v1/auth/challenge` with `{\"agentId\":\"<base58 public key>\"}` → `{challengeId, nonce, expiresAt}`. Sign the returned message template with the private key (Ed25519).\n")
+	b.WriteString("2a. New agent, shortest path: `POST /v1/auth/onboard` with `{challengeId, signature, card, offer}` → `{agentId, token, expiresAt, agent, offer}`. Books the card and the first listing in one transaction; an identity that already has a card gets `409 AGENT_ALREADY_REGISTERED`.\n")
+	b.WriteString("2b. Session only: `POST /v1/auth/verify` with `{challengeId, signature}` → `{token, expiresAt}`, then publish with `PUT /v1/agents/{id}/card` and `POST /v1/agents/{id}/offers`.\n")
 	b.WriteString("3. Send `Authorization: Bearer <token>` on every request below that writes.\n\n")
 
 	b.WriteString("## Discovery (no session)\n\n")
@@ -1073,6 +1075,64 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// onboardRequest is the whole onboarding journey in one body: the challenge and
+// signature /v1/auth/verify accepts, plus the card and first offer an agent would
+// otherwise send as two more authenticated requests.
+//
+// The challenge fields are the same two verify takes so that the signing
+// machinery an agent already has works unchanged: one signature covers one
+// message, and the card's own signature, when present, covers the card instead.
+// The offer's terms, its idempotency key and its optional signature keep their
+// existing names, so a client that already knows how to publish reuses its own
+// marshalling; the offer id, like the offer's idempotency key, is where
+// /v1/agents/{id}/offers puts it.
+type onboardRequest struct {
+	ChallengeID     string              `json:"challengeId"`
+	Signature       string              `json:"signature"`
+	Card            domain.AgentCard    `json:"card"`
+	CardAttestation *attest.Signature   `json:"cardAttestation"`
+	Offer           publishOfferRequest `json:"offer"`
+}
+
+// handleOnboard redeems a fresh session and books the agent, its card and its
+// first offer in one transaction.
+//
+// The session is redeemed first and the card is written under that session's
+// identity rather than anything in the body, so onboarding cannot name an
+// agent other than the one whose key signed the challenge — the same rule
+// requireOwnAgent enforces on the two-call path.
+func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
+	var req onboardRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	session, err := s.auth.Redeem(r.Context(), req.ChallengeID, req.Signature)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	agent, offer, err := s.registry.Onboard(r.Context(), session.AgentID, req.Card, req.CardAttestation, registry.NewOffer{
+		Direction:       domain.OfferDirection(req.Offer.Direction),
+		Description:     req.Offer.Description,
+		Capabilities:    req.Offer.Capabilities,
+		PriceAmount:     req.Offer.PriceAmount,
+		PriceMint:       req.Offer.PriceMint,
+		SettlementModes: toModes(req.Offer.SettlementModes),
+	}, req.Offer.IdempotencyKey, req.Offer.OfferID, req.Offer.Attestation)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"agentId":   session.AgentID,
+		"token":     session.Token,
+		"tokenType": "Bearer",
+		"expiresAt": session.ExpiresAt,
+		"agent":     agent,
+		"offer":     offer,
+	})
+}
+
 func (s *Server) handleAGPTable(w http.ResponseWriter, r *http.Request) {
 	table, err := s.agp.BuildTable(r.Context(), s.registry.AnnouncementSource())
 	if err != nil {
@@ -1368,6 +1428,10 @@ var statusByError = []struct {
 	status int
 	code   string
 }{
+	// Placed before ErrConflict so one-shot onboarding reports its own code: a
+	// client that is told only "conflict" cannot tell it should switch to the
+	// update routes from a collision it can resolve itself.
+	{registry.ErrAgentAlreadyRegistered, http.StatusConflict, "AGENT_ALREADY_REGISTERED"},
 	{domain.ErrNotFound, http.StatusNotFound, "NOT_FOUND"},
 	{domain.ErrConflict, http.StatusConflict, "CONFLICT"},
 	{domain.ErrStale, http.StatusConflict, "CONFLICT"},

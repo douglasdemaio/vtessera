@@ -68,6 +68,14 @@ session for another agent's ID without that agent's private key.
 agent ID, so an agent cannot present itself under another key even on its own
 route.
 
+`POST /v1/auth/onboard` adds no new trust: it consumes an existing challenge and
+mints the same session `/v1/auth/verify` mints before it writes anything, and the
+agent is booked under that session's ID rather than under any field the body
+supplies, so it inherits the two properties above. It is the fresh path only —
+an identity that already has a card is refused with 409
+`AGENT_ALREADY_REGISTERED`, so there is no onboarding request that replaces
+somebody's card or terms.
+
 **An agent ID is not a permission to act as anybody.** Every route that writes to
 a named agent now resolves the name against the session:
 
@@ -88,6 +96,8 @@ caller's would have no way to notice, and the listing would still change.
 | Attempt | Outcome |
 |---|---|
 | Session as another agent's ID | Refused at signature verification: no private key, no session. |
+| Book an agent under an ID it does not hold (`POST /v1/auth/onboard`) | Refused: the challenge binds the agent ID, the signature is verified against that key, and the card and offer are written under the session's ID, not under the body. No session exists before the signature verifies. |
+| Onboard over an existing agent's card and terms | 409 `AGENT_ALREADY_REGISTERED`. One-shot onboarding is the fresh path; the update routes are the only way to change a listing. |
 | Rewrite another agent's card (name, description, URL, skills) | 403. The card is the thing an agent is listed under, so this was phishing, not vandalism. |
 | Publish offers under another agent's ID | 403. Lets an attacker sell under a trusted name at a price of their choosing. |
 | Close another agent's offer | 403, from the service. |

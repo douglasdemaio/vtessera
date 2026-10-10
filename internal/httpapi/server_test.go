@@ -560,6 +560,7 @@ func TestLlmsTxtDescribesTheRecipe(t *testing.T) {
 		"Ed25519 keypair",
 		"/v1/auth/challenge",
 		"/v1/auth/verify",
+		"/v1/auth/onboard",
 		"/agp/route",
 		"`kid` header",
 		"member of `verificationKeys`",

@@ -105,6 +105,16 @@ func (s *Store) OfferAttestation(ctx context.Context, offerID string) (attest.Si
 // signature is required, because a card this service accepted is a card it
 // published.
 func (s *Store) SaveAgentCard(ctx context.Context, agent domain.Agent, agentSig *attest.Signature, marketSig attest.Signature, at time.Time) error {
+	return s.write(ctx, func(tx *sql.Tx) error {
+		return insertAgentCardRows(ctx, tx, agent, agentSig, marketSig, at)
+	})
+}
+
+// insertAgentCardRows writes the agent row and both of its card signatures inside
+// a caller-supplied transaction, so a card and its attestations are one fact and
+// can also be part of a larger fact (see OnboardAgent) without a second copy of
+// these INSERTs drifting from the schema.
+func insertAgentCardRows(ctx context.Context, tx *sql.Tx, agent domain.Agent, agentSig *attest.Signature, marketSig attest.Signature, at time.Time) error {
 	// The signature must be the agent's own. The registry has already checked
 	// that it covers these exact terms, but this is the one property that must
 	// hold in the database no matter who calls: a row whose agent signature is
@@ -130,44 +140,42 @@ func (s *Store) SaveAgentCard(ctx context.Context, agent domain.Agent, agentSig 
 		}
 		agentEncoded = sql.NullString{String: string(raw), Valid: true}
 	}
-	return s.write(ctx, func(tx *sql.Tx) error {
-		// An upsert rather than an insert-or-update pair, because the caller
-		// cannot know which one applies without a race against a concurrent
-		// registration, and the row plus its attestation have to agree on which.
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO agents (id, name, description, version, url, public_key, card, status, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			 ON CONFLICT (id) DO UPDATE SET
-			   name = excluded.name, description = excluded.description,
-			   version = excluded.version, url = excluded.url,
-			   public_key = excluded.public_key, card = excluded.card,
-			   status = excluded.status, updated_at = excluded.updated_at`,
-			agent.ID, agent.Card.Name, agent.Card.Description, agent.Card.Version, agent.Card.URL,
-			agent.Card.PublicKey, string(card), string(agent.Status),
-			nanos(agent.CreatedAt), nanos(at))
-		if err != nil {
-			return mapErr(err)
-		}
-		if err := requireAffected(res); err != nil {
-			return err
-		}
-		// The agent signature is written whole or cleared whole. A partial write
-		// here would leave a row claiming a signature over content a reader
-		// cannot reproduce, which is worse than no row at all.
-		res, err = tx.ExecContext(ctx,
-			`INSERT INTO agent_attestations (agent_id, card_signature, card_signed_at, market_signature, updated_at)
-			 VALUES (?, ?, ?, ?, ?)
-			 ON CONFLICT (agent_id) DO UPDATE SET
-			   card_signature   = excluded.card_signature,
-			   card_signed_at   = excluded.card_signed_at,
-			   market_signature = excluded.market_signature,
-			   updated_at       = excluded.updated_at`,
-			agent.ID, agentEncoded, signedAtOf(agentSig), string(marketEncoded), nanos(at))
-		if err != nil {
-			return err
-		}
-		return requireAffected(res)
-	})
+	// An upsert rather than an insert-or-update pair, because the caller
+	// cannot know which one applies without a race against a concurrent
+	// registration, and the row plus its attestation have to agree on which.
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO agents (id, name, description, version, url, public_key, card, status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (id) DO UPDATE SET
+		   name = excluded.name, description = excluded.description,
+		   version = excluded.version, url = excluded.url,
+		   public_key = excluded.public_key, card = excluded.card,
+		   status = excluded.status, updated_at = excluded.updated_at`,
+		agent.ID, agent.Card.Name, agent.Card.Description, agent.Card.Version, agent.Card.URL,
+		agent.Card.PublicKey, string(card), string(agent.Status),
+		nanos(agent.CreatedAt), nanos(at))
+	if err != nil {
+		return mapErr(err)
+	}
+	if err := requireAffected(res); err != nil {
+		return err
+	}
+	// The agent signature is written whole or cleared whole. A partial write
+	// here would leave a row claiming a signature over content a reader
+	// cannot reproduce, which is worse than no row at all.
+	res, err = tx.ExecContext(ctx,
+		`INSERT INTO agent_attestations (agent_id, card_signature, card_signed_at, market_signature, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (agent_id) DO UPDATE SET
+		   card_signature   = excluded.card_signature,
+		   card_signed_at   = excluded.card_signed_at,
+		   market_signature = excluded.market_signature,
+		   updated_at       = excluded.updated_at`,
+		agent.ID, agentEncoded, signedAtOf(agentSig), string(marketEncoded), nanos(at))
+	if err != nil {
+		return err
+	}
+	return requireAffected(res)
 }
 
 // CreateOfferWithAttestation stores a new offer and the seller's signature over
@@ -189,34 +197,11 @@ func (s *Store) CreateOfferWithAttestation(ctx context.Context, o domain.Offer, 
 		return fmt.Errorf("%w: offer attestation for %s was signed by %s, not the seller",
 			attest.ErrInvalid, o.ID, sig.KeyID)
 	}
-	encoded, err := json.Marshal(sig)
-	if err != nil {
-		return fmt.Errorf("marshal offer attestation: %w", err)
-	}
-	caps, err := json.Marshal(nonNil(o.Capabilities))
-	if err != nil {
-		return fmt.Errorf("marshal capabilities: %w", err)
-	}
-	modes, err := json.Marshal(nonNil(o.SettlementModes))
-	if err != nil {
-		return fmt.Errorf("marshal settlement modes: %w", err)
-	}
 	return s.write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO offers (id, agent_id, direction, description, capabilities, price_amount, price_mint, settlement_modes, status, idempotency_key, created_at, updated_at, expires_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			o.ID, o.AgentID, string(o.Direction), o.Description, string(caps), o.PriceAmount.String(),
-			o.PriceMint, string(modes), string(o.Status), nullString(idempotencyKey), nanos(o.CreatedAt), nanos(o.UpdatedAt), expiryColumn(o.ExpiresAt))
-		if err != nil {
-			return mapErr(err)
+		if err := insertOfferRow(ctx, tx, o, idempotencyKey); err != nil {
+			return err
 		}
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO offer_attestations (offer_id, agent_id, signature, signed_at)
-			 VALUES (?, ?, ?, ?)
-			 ON CONFLICT (offer_id) DO UPDATE SET
-			   signature = excluded.signature, signed_at = excluded.signed_at`,
-			o.ID, o.AgentID, string(encoded), nanos(sig.SignedAt))
-		return mapErr(err)
+		return insertOfferAttestationRow(ctx, tx, o, sig)
 	})
 }
 

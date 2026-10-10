@@ -60,6 +60,12 @@ var (
 	// reading a log needs to tell them apart.
 	ErrOfferAttestationRequired = errors.New("this deployment publishes only signed offers")
 
+	// ErrAgentAlreadyRegistered refuses one-shot onboarding for an identity that
+	// already has a card. It is a code of its own rather than a bare conflict so
+	// a client can tell "you already exist, use the update routes" from any other
+	// conflict the onboarding request could produce.
+	ErrAgentAlreadyRegistered = errors.New("agent is already registered")
+
 	// ErrNoProbeTarget means the agent's card does not declare a probe endpoint,
 	// so it is never probed. It exists as a refusal rather than a silent skip
 	// because an operator asking for a probe and getting an empty report back
@@ -87,6 +93,7 @@ type Store interface {
 	ListAgentsByIDs(ctx context.Context, ids []string) (map[string]domain.Agent, error)
 	CreateOffer(ctx context.Context, o domain.Offer, idempotencyKey string) error
 	CreateOfferWithAttestation(ctx context.Context, o domain.Offer, idempotencyKey string, sig *attest.Signature) error
+	OnboardAgent(ctx context.Context, a domain.Agent, agentSig *attest.Signature, marketSig attest.Signature, at time.Time, o domain.Offer, idempotencyKey string, offerSig *attest.Signature) error
 	GetOffer(ctx context.Context, id string) (domain.Offer, error)
 	GetOfferByIdempotencyKey(ctx context.Context, key string) (domain.Offer, error)
 	SearchOffers(ctx context.Context, q domain.OfferQuery) ([]domain.Offer, error)
@@ -243,26 +250,9 @@ func (s *Service) mintInfo(address string) domain.MintInfo {
 // does not verify, because storing that would mean publishing something the
 // service has told a reader is authentic when it is not.
 func (s *Service) Register(ctx context.Context, agentID string, card domain.AgentCard, sig *attest.Signature) (domain.Agent, bool, error) {
-	if _, err := domain.ParsePublicKey(agentID); err != nil {
-		return domain.Agent{}, false, fmt.Errorf("%w: agent id: %w", domain.ErrInvalid, err)
-	}
-	if card.PublicKey == "" {
-		card.PublicKey = agentID
-	}
-	if card.PublicKey != agentID {
-		return domain.Agent{}, false, fmt.Errorf("%w: agent card publicKey %q does not match the authenticated agent %q",
-			domain.ErrInvalid, card.PublicKey, agentID)
-	}
-	if err := card.Validate(); err != nil {
+	card, err := s.prepareCard(agentID, card, sig)
+	if err != nil {
 		return domain.Agent{}, false, err
-	}
-	if sig != nil {
-		// Verified against the key in the signature and required to be this
-		// agent's, so another agent's signature over this card is refused rather
-		// than stored.
-		if err := attest.VerifyCard(s.attestCard(card), *sig); err != nil {
-			return domain.Agent{}, false, fmt.Errorf("%w: %w", ErrAttestationRefused, err)
-		}
 	}
 	now := s.now().UTC()
 	statement := s.attestCard(card)
@@ -290,6 +280,35 @@ func (s *Service) Register(ctx context.Context, agentID string, card domain.Agen
 		return domain.Agent{}, false, err
 	}
 	return agent, true, nil
+}
+
+// prepareCard checks that a card may be published for agentID and returns it
+// with the publicKey filled in. It is the shared gate for every path that writes
+// a card, so a new publishing route cannot store one that the general route
+// would have refused.
+func (s *Service) prepareCard(agentID string, card domain.AgentCard, sig *attest.Signature) (domain.AgentCard, error) {
+	if _, err := domain.ParsePublicKey(agentID); err != nil {
+		return domain.AgentCard{}, fmt.Errorf("%w: agent id: %w", domain.ErrInvalid, err)
+	}
+	if card.PublicKey == "" {
+		card.PublicKey = agentID
+	}
+	if card.PublicKey != agentID {
+		return domain.AgentCard{}, fmt.Errorf("%w: agent card publicKey %q does not match the authenticated agent %q",
+			domain.ErrInvalid, card.PublicKey, agentID)
+	}
+	if err := card.Validate(); err != nil {
+		return domain.AgentCard{}, err
+	}
+	if sig != nil {
+		// Verified against the key in the signature and required to be this
+		// agent's, so another agent's signature over this card is refused rather
+		// than stored.
+		if err := attest.VerifyCard(s.attestCard(card), *sig); err != nil {
+			return domain.AgentCard{}, fmt.Errorf("%w: %w", ErrAttestationRefused, err)
+		}
+	}
+	return card, nil
 }
 
 // attestCard projects a card onto the signed subset, filling the agent ID from
@@ -475,10 +494,6 @@ func (s *Service) PublishOffer(ctx context.Context, agentID string, in NewOffer,
 	if agent.Status != domain.AgentActive {
 		return domain.Offer{}, false, fmt.Errorf("%w: %s", ErrAgentSuspended, agentID)
 	}
-	amount, err := money.Parse(in.PriceAmount)
-	if err != nil {
-		return domain.Offer{}, false, fmt.Errorf("priceAmount: %w", err)
-	}
 	now := s.now().UTC()
 	// Whether the caller chose the ID decides whether a taken one is a collision.
 	// A generated ID that is somehow taken is a fault in this service and is
@@ -488,37 +503,10 @@ func (s *Service) PublishOffer(ctx context.Context, agentID string, in NewOffer,
 	if !callerSuppliedID {
 		offerID = uuid.NewString()
 	}
-	offer := domain.Offer{
-		ID:              offerID,
-		AgentID:         agentID,
-		Direction:       in.Direction,
-		Description:     in.Description,
-		Capabilities:    in.Capabilities,
-		PriceAmount:     amount,
-		PriceMint:       in.PriceMint,
-		SettlementModes: in.SettlementModes,
-		Status:          domain.OfferOpen,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}
-	if s.offerTTL > 0 {
-		offer.ExpiresAt = now.Add(s.offerTTL)
-	}
-	if err := offer.Validate(); err != nil {
+	offer, statement, err := s.buildOffer(now, agent, in, offerID)
+	if err != nil {
 		return domain.Offer{}, false, err
 	}
-	if err := checkCurrencyAccepted(agent, offer.PriceMint); err != nil {
-		return domain.Offer{}, false, err
-	}
-	if s.priced != nil && !s.priced.Priced(offer.PriceMint) {
-		return domain.Offer{}, false, fmt.Errorf("%w: %s", ErrMintUnpriced, offer.PriceMint)
-	}
-	if offer.AcceptsMode(domain.SettlementOnchain) {
-		if err := s.checkSettleable(offer); err != nil {
-			return domain.Offer{}, false, err
-		}
-	}
-	statement := s.attestOffer(offer)
 	if sig != nil {
 		// Verified against the content that is about to be stored, not against a
 		// projection of it, so a signature that verified against something else
@@ -554,6 +542,49 @@ func (s *Service) PublishOffer(ctx context.Context, agentID string, in NewOffer,
 		return domain.Offer{}, false, err
 	}
 	return offer, true, nil
+}
+
+// buildOffer turns a NewOffer into the offer to store, applying every check
+// PublishOffer applies to a listing's terms. It is shared with Onboard so a
+// second publishing path cannot accept a mint, a price or a settlement mode the
+// general path would have refused; it performs no I/O, since the caller decides
+// whether the offer is written on its own or as part of onboarding.
+func (s *Service) buildOffer(now time.Time, agent domain.Agent, in NewOffer, offerID string) (domain.Offer, attest.Offer, error) {
+	amount, err := money.Parse(in.PriceAmount)
+	if err != nil {
+		return domain.Offer{}, attest.Offer{}, fmt.Errorf("priceAmount: %w", err)
+	}
+	offer := domain.Offer{
+		ID:              offerID,
+		AgentID:         agent.ID,
+		Direction:       in.Direction,
+		Description:     in.Description,
+		Capabilities:    in.Capabilities,
+		PriceAmount:     amount,
+		PriceMint:       in.PriceMint,
+		SettlementModes: in.SettlementModes,
+		Status:          domain.OfferOpen,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if s.offerTTL > 0 {
+		offer.ExpiresAt = now.Add(s.offerTTL)
+	}
+	if err := offer.Validate(); err != nil {
+		return domain.Offer{}, attest.Offer{}, err
+	}
+	if err := checkCurrencyAccepted(agent, offer.PriceMint); err != nil {
+		return domain.Offer{}, attest.Offer{}, err
+	}
+	if s.priced != nil && !s.priced.Priced(offer.PriceMint) {
+		return domain.Offer{}, attest.Offer{}, fmt.Errorf("%w: %s", ErrMintUnpriced, offer.PriceMint)
+	}
+	if offer.AcceptsMode(domain.SettlementOnchain) {
+		if err := s.checkSettleable(offer); err != nil {
+			return domain.Offer{}, attest.Offer{}, err
+		}
+	}
+	return offer, s.attestOffer(offer), nil
 }
 
 // sameListing reports whether two statements are the same set of terms.
