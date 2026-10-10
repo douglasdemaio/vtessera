@@ -269,6 +269,9 @@ func (s *Server) buildAgentCard() map[string]any {
 					"params": map[string]any{
 						"agent_role":             agp.GatewayRole,
 						"supported_agp_versions": agp.SupportedVersions,
+						"forwarding": map[string]any{
+							"methods": agp.ForwardingMethods,
+						},
 					},
 				},
 			},
@@ -281,6 +284,12 @@ func (s *Server) buildAgentCard() map[string]any {
 				"name":        "AGP Intent routing",
 				"description": "Routes an AGP Intent to the cheapest agent whose announced policy satisfies every constraint.",
 				"tags":        []string{"agp", "gateway", "routing"},
+			},
+			{
+				"id":          "agp_route_task",
+				"name":        "AGP task routing",
+				"description": "Routes an AGP Intent and returns an addressed A2A message envelope ready to POST to the selected path.",
+				"tags":        []string{"agp", "gateway", "routing", "forwarding"},
 			},
 			{
 				"id":          "tessera_receipt",
@@ -962,7 +971,7 @@ func (s *Server) handleAGPRoute(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if req.Method != "" && req.Method != "agp/route_intent" && req.Method != "agp/route" {
+	if req.Method != "" && req.Method != agp.MethodRouteIntent && req.Method != agp.MethodRoute && req.Method != agp.MethodRouteTask {
 		writeJSON(w, http.StatusOK, rpcError(req.ID, codeMethodNotFound, "unknown method: "+req.Method))
 		return
 	}
@@ -981,6 +990,9 @@ func (s *Server) handleAGPRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := table.Route(intent)
+	if req.Method == agp.MethodRouteTask {
+		result, err = table.RouteTask(intent)
+	}
 	if err != nil {
 		code := codeInternal
 		if mapped, ok := agp.CodeOf(err); ok {

@@ -419,6 +419,14 @@ func TestAgentCardDeclaresAGPGateway(t *testing.T) {
 	if !ok || len(versions) == 0 || versions[0] != "1.0" {
 		t.Errorf("supported_agp_versions = %v, want [1.0]", ext.Params["supported_agp_versions"])
 	}
+	forwarding, ok := ext.Params["forwarding"].(map[string]any)
+	if !ok {
+		t.Fatal("extension params declare no forwarding capability")
+	}
+	methods, ok := forwarding["methods"].([]any)
+	if !ok || len(methods) != 2 || methods[1] != agp.MethodRouteTask {
+		t.Errorf("forwarding.methods = %v, want [%s %s]", forwarding["methods"], agp.MethodRouteIntent, agp.MethodRouteTask)
+	}
 	if len(card.Skills) == 0 {
 		t.Error("agent card advertises no skills")
 	}
@@ -651,6 +659,114 @@ func TestAGPRouteHonorsPolicyConstraints(t *testing.T) {
 	}
 	if result.Result.Route.CostAmount != "50.00" {
 		t.Errorf("cost_amount = %q, want 50.00", result.Result.Route.CostAmount)
+	}
+}
+
+func TestAGPRouteTaskRendersAnAddressedEnvelope(t *testing.T) {
+	server, _ := setupServer(t)
+	agent := newAgent(t, server)
+	agent.publishOffer("2.00", usdc, "summarize:document")
+
+	var result struct {
+		Result struct {
+			Route struct {
+				Path    string `json:"path"`
+				AgentID string `json:"agent_id"`
+			} `json:"route"`
+			Task struct {
+				JSONRPC string `json:"jsonrpc"`
+				ID      string `json:"id"`
+				Method  string `json:"method"`
+				Params  struct {
+					Message struct {
+						Role             string         `json:"role"`
+						Kind             string         `json:"kind"`
+						TaskID           string         `json:"taskId"`
+						ContextID        string         `json:"contextId"`
+						TargetCapability string         `json:"targetCapability"`
+						Payload          map[string]any `json:"payload"`
+					} `json:"message"`
+				} `json:"params"`
+			} `json:"task"`
+		} `json:"result"`
+	}
+	payload := map[string]any{"documentId": "doc-1", "maxTokens": 400}
+	body := agent.do(http.MethodPost, "/agp/route", map[string]any{
+		"jsonrpc": "2.0",
+		"id":      9,
+		"method":  agp.MethodRouteTask,
+		"params": map[string]any{
+			"target_capability": "summarize:document",
+			"payload":           payload,
+		},
+	}, false)
+	decodeInto(t, body, &result)
+	if result.Result.Route.AgentID != agent.id {
+		t.Errorf("routed to %s, want %s", result.Result.Route.AgentID, agent.id)
+	}
+	if !strings.HasPrefix(result.Result.Route.Path, "Squad_Marketplace/") {
+		t.Errorf("path = %q, want an AGP squad path", result.Result.Route.Path)
+	}
+	task := result.Result.Task
+	if task.JSONRPC != "2.0" || task.Method != "message" {
+		t.Errorf("envelope = %s/%s, want jsonrpc 2.0 / method message", task.JSONRPC, task.Method)
+	}
+	if task.ID == "" || task.Params.Message.TaskID == "" || task.Params.Message.ContextID == "" {
+		t.Errorf("envelope ids must be present: envelope=%q task=%q context=%q", task.ID, task.Params.Message.TaskID, task.Params.Message.ContextID)
+	}
+	if task.Params.Message.Role != "agent" || task.Params.Message.Kind != "task" {
+		t.Errorf("message = %s/%s, want an agent task message", task.Params.Message.Role, task.Params.Message.Kind)
+	}
+	if task.Params.Message.TargetCapability != "summarize:document" {
+		t.Errorf("targetCapability = %q", task.Params.Message.TargetCapability)
+	}
+	if task.Params.Message.Payload["documentId"] != "doc-1" || task.Params.Message.Payload["maxTokens"] != float64(400) {
+		t.Errorf("payload = %v, want the caller's intent content", task.Params.Message.Payload)
+	}
+}
+
+func TestAGPRouteIntentOmitsTask(t *testing.T) {
+	server, _ := setupServer(t)
+	agent := newAgent(t, server)
+	agent.publishOffer("2.00", usdc, "summarize:document")
+	body := agent.do(http.MethodPost, "/agp/route", map[string]any{
+		"jsonrpc": "2.0",
+		"id":      10,
+		"method":  agp.MethodRouteIntent,
+		"params": map[string]any{
+			"target_capability": "summarize:document",
+			"payload":           map[string]any{},
+		},
+	}, false)
+	var response struct {
+		Result map[string]any `json:"result"`
+	}
+	decodeInto(t, body, &response)
+	if _, ok := response.Result["task"]; ok {
+		t.Error("route_intent must not render a task envelope")
+	}
+}
+
+func TestAGPRouteTaskRejectsUnknownMethod(t *testing.T) {
+	server, _ := setupServer(t)
+	agent := newAgent(t, server)
+	body := agent.do(http.MethodPost, "/agp/route", map[string]any{
+		"jsonrpc": "2.0",
+		"id":      11,
+		"method":  "agp/route_task_v2",
+		"params": map[string]any{
+			"target_capability": "summarize:document",
+			"payload":           map[string]any{},
+		},
+	}, false)
+	var response struct {
+		Error struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	decodeInto(t, body, &response)
+	if response.Error.Code != -32601 {
+		t.Errorf("code = %d, want %d", response.Error.Code, -32601)
 	}
 }
 
