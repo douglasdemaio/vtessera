@@ -1,0 +1,67 @@
+# Fly.io configuration for the vtessera sandbox: a second, public deployment
+# that anyone can develop against. It moves no real value — settlement is
+# off-chain only — and its volume is disposable. See docs/sandbox.md.
+#
+# It is a separate app with a separate volume and, on first boot, a separate
+# signing key. Do not point it at the mainnet app's volume or secrets: the key
+# on the volume is the deployment's identity, and mixing them would make sandbox
+# tessera indistinguishable from mainnet ones.
+#
+# Like the mainnet app, this is a single instance on purpose. The service keeps
+# its SQLite database and Ed25519 signing key on local disk, so a second machine
+# would be a second marketplace. Do not add machines.
+
+app = "vtessera-sandbox"
+
+# Same region as the mainnet app; change it if the audience is elsewhere.
+primary_region = "fra"
+
+[build]
+  dockerfile = "Containerfile"
+
+[env]
+  VTESSERA_ADDR = ":8080"
+  VTESSERA_DB = "/data/vtessera.db"
+  VTESSERA_SIGNER_KEY = "/data/signer.key"
+  # No chain. Settlement is off-chain only, and --sandbox refuses on-chain
+  # settlement outright, so this instance can never move even devnet value and
+  # never needs a fee wallet or a mainnet acknowledgement. Do not add
+  # VTESSERA_CLUSTER or VTESSERA_RPC_URL here: the service refuses to boot with
+  # a chain configured alongside sandbox mode, and that refusal is the guard
+  # that keeps a sandbox from ever settling.
+  VTESSERA_SANDBOX = "1"
+  # Caps cannot be zero — a non-positive cap is a startup error, and the
+  # service has no "caps off" state, deliberately. The sandbox therefore
+  # declares the largest figure it can instead of pretending to disable them:
+  # an operator-declared cap far above anything a sandbox loop reaches, so it
+  # never interferes with development, while still being a real, enforced
+  # number rather than a cap that quietly does not apply.
+  VTESSERA_SPEND_CAP_PER_TRADE = "1000000"
+  VTESSERA_SPEND_CAP_PER_DAY = "1000000"
+
+# Disposable by design; reset with `make sandbox-reset`. No snapshots: paying to
+# back up throwaway data is the wrong trade, and a restored key would resurrect
+# an identity clients were told had been replaced.
+[mounts]
+  source = "vtessera_sandbox_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # A sandbox does not need to be warm: nothing health-checks it on a schedule,
+  # and a cold start on the first request is a fair trade for not paying to idle.
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
