@@ -219,6 +219,16 @@ The things that matter when editing this repository:
   `null`: this is an A2A/AGP gateway, not an MCP server, and that field must
   only ever hold a URL an agent can speak MCP to.
 
+A **second deployment** exists: `https://vtessera-sandbox.fly.dev`
+(`fly.sandbox.toml`, runbook [`docs/sandbox.md`](docs/sandbox.md)). It is the
+same binary for developing against, and it inverts the two rules above on
+purpose — it is off-chain only (`--sandbox`, no `VTESSERA_CLUSTER`/
+`VTESSERA_RPC_URL` ever), it has no admin token, and its key and database are
+**destroyed and recreated weekly** by `make sandbox-reset`, so a changed
+`verificationKey` there is the reset announcement rather than an incident. Do
+not share a volume, a secret or a session secret between the two, and do not
+raise the mainnet app's spending caps to match the sandbox's.
+
 A Fly personal account with a token is required to deploy. Do not commit a
 token, and do not add a `.fly` config to the repository.
 
@@ -269,6 +279,11 @@ negotiable without a design discussion:
 - **A cap is per Ed25519 identity.** It bounds what one key commits to. It is not
   KYC, and anyone can mint another identity. Do not describe it as a spend limit
   on a person or an organisation.
+- **A cap cannot be switched off.** A non-positive figure is a startup error and
+  `limits` has no disabled mode: a cap that quietly did not apply would be a way
+  around the cap. The sandbox ("off" was requested, so it declares the largest
+  figure it can, $1,000,000) is a declared value, not a new state — do not add an
+  off switch to make a sandbox integer out of a constraint.
 
 An accepted trade carries a deadline (`--trade-accept-ttl`, default `72h`) and can
 be cancelled only once it passes. This is what lets the off-chain commit re-check

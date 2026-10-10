@@ -631,6 +631,11 @@ make image        # podman build, docker-format so the HEALTHCHECK is kept
 make image-run    # run against a persistent volume on :8080
 make fly-deploy   # push to the live Fly app
 make fly-verify   # print the marketplace verificationKey
+
+# the sandbox: a second app, off-chain only, disposable
+make fly-sandbox-deploy
+make fly-sandbox-verify
+make sandbox-reset   # destroy its volume and key, then redeploy
 ```
 
 It needs a persistent volume at `/data` (the database and the marketplace
@@ -641,6 +646,13 @@ switching settlement on and off, are in [`docs/deploy.md`](docs/deploy.md).
 The signing key on that volume is the marketplace identity: regenerate it and
 every previously issued tessera stops verifying. Fly's volume snapshots are the
 recovery path.
+
+`https://vtessera-sandbox.fly.dev` is a second deployment of the same binary
+for developing against without touching any of that: no chain, `--sandbox`,
+admin routes unregistered, its own key and volume, and a **weekly** reset that
+rotates the key and discards the database. `make sandbox-reset` does the reset
+and a fresh `verificationKey` at `/healthz` is the announcement. Runbook:
+[`docs/sandbox.md`](docs/sandbox.md).
 
 ## Status
 
