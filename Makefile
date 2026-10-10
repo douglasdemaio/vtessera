@@ -7,7 +7,7 @@ MCP_TAG ?= 0.1.0
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart examples image image-run fly-deploy fly-verify preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push mcp-fly-deploy
+.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart examples image image-run fly-deploy fly-verify fly-sandbox-deploy fly-sandbox-verify sandbox-reset preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push mcp-fly-deploy
 
 # mcp/ is a separate module (see AGENTS.md), so ./... does not reach it. Its checks
 # are wired in here rather than left to memory: a nested module that nothing builds
@@ -175,6 +175,49 @@ mcp-fly-deploy:
 fly-verify:
 	@curl -fsS "https://$$(sed -n 's/^app *= *"\(.*\)"/\1/p' fly.toml).fly.dev/healthz" \
 		| python3 -c "import json,sys; print('verificationKey:', json.load(sys.stdin)['verificationKey'])"
+
+# The sandbox is a second Fly app that moves no real value. Its one-time setup
+# (app, volume, secrets) is in docs/sandbox.md; this is the part you run on
+# every change. Like the mainnet deploy it is a single machine: two would be two
+# marketplaces with two signing keys.
+fly-sandbox-deploy:
+	fly deploy -c fly.sandbox.toml --ha=false
+
+# The sandbox's verification key is its identity, and unlike the mainnet app it
+# legitimately changes — on every `make sandbox-reset`. A different
+# verificationKey is how a client tells a fresh sandbox from the one it is
+# holding a souvenir tessera from.
+fly-sandbox-verify:
+	@curl -fsS "https://$$(sed -n 's/^app *= *"\(.*\)"/\1/p' fly.sandbox.toml).fly.dev/healthz" \
+		| python3 -c "import json,sys; d=json.load(sys.stdin); print('verificationKey:', d['verificationKey']); print('sandbox:', d.get('sandbox'))"
+
+# Reset the sandbox: destroy every machine and volume, then redeploy from
+# scratch. The volume holds the SQLite database and the signing key, so both go
+# together — a new verificationKey at /healthz is the announcement, and anything
+# an agent is still holding from before is a souvenir.
+#
+# Run it weekly (docs/sandbox.md is the runbook). It resolves ids itself and
+# skips the interactive confirms so it can be run from a cron or a phone. The
+# volume is recreated explicitly rather than left to `fly deploy`, so the target
+# does not depend on flyctl's current behaviour when a declared mount is absent.
+#
+# The deploy line is inlined rather than `$(MAKE) fly-sandbox-deploy` on
+# purpose: a recipe line mentioning $(MAKE) runs even under `make -n`, so a
+# dry run of this target would destroy the volume instead of printing what it
+# would have done.
+sandbox-reset:
+	@APP="$$(sed -n 's/^app *= *"\(.*\)"/\1/p' fly.sandbox.toml)"; \
+	REGION="$$(sed -n 's/^primary_region *= *"\(.*\)"/\1/p' fly.sandbox.toml)"; \
+	MACHINES="$$(fly machine list -a "$$APP" --json)" || exit 1; \
+	for id in $$(printf '%s' "$$MACHINES" | python3 -c "import json,sys; print(' '.join(m['id'] for m in json.load(sys.stdin)))"); do \
+		echo "destroying machine $$id"; fly machine destroy "$$id" -a "$$APP" --force || exit 1; \
+	done; \
+	VOLUMES="$$(fly volumes list -a "$$APP" --json)" || exit 1; \
+	for id in $$(printf '%s' "$$VOLUMES" | python3 -c "import json,sys; print(' '.join(v['id'] for v in json.load(sys.stdin)))"); do \
+		echo "destroying volume $$id"; fly volumes destroy "$$id" -a "$$APP" --yes || exit 1; \
+	done; \
+	fly volumes create vtessera_sandbox_data -a "$$APP" --size 1 --region "$$REGION" --yes || exit 1; \
+	fly deploy -c fly.sandbox.toml --ha=false
 
 clean:
 	rm -rf bin
