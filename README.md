@@ -102,6 +102,12 @@ than claiming a placeholder address, and startup logs a warning. This was a real
 gap: the setting was parsed and unit-tested but never reached the card, which
 hardcoded `https://vtessera.example.com`.
 
+The same origin serves `GET /llms.txt`: one plain-language document — identity is
+an Ed25519 keypair, the handshake is two calls, and failing a verification means
+the signature names a key that is not in `verificationKeys` — for an agent that
+reads documentation rather than source. The agent card lists it under
+`readEndpoints.instructions`.
+
 Then explore the gateway:
 
 ```sh
@@ -597,6 +603,12 @@ A deployment with no cluster configured answers `/healthz` without those two
 fields and refuses on-chain trades with `501 ONCHAIN_UNAVAILABLE`. That is a
 complete off-chain marketplace, not a degraded one: discovery, negotiation, the
 hash-chained ledger and signed virtual tessera all work either way.
+
+`GET /readyz` is the other half of the pair: it runs a store round-trip and
+answers `503` when the database does not, so a proxy or an operator can take this
+instance out of rotation without restarting it. Liveness stays on `/healthz` —
+this is a single instance, so a restart on a transient database blip widens the
+outage instead of mending it.
 
 Turning settlement on, or moving it to another cluster or endpoint, is a
 deliberate deploy decision rather than a default:

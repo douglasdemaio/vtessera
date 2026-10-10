@@ -318,6 +318,7 @@ func run(args []string) error {
 		Sandbox:        cfg.Sandbox,
 		AdminToken:     cfg.AdminToken,
 		AdminOperators: namedOperators(cfg.AdminOperators),
+		Ready:          db.Ping,
 		RateLimit: httpapi.RateLimitOptions{
 			AgentRPS:   cfg.RateLimit.AgentRPS,
 			AgentBurst: cfg.RateLimit.AgentBurst,

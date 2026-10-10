@@ -41,6 +41,13 @@ done
 curl -fsS "${BASE}/healthz" >/dev/null || { cat "${WORKDIR}/server.log"; fail "server never became healthy"; }
 ok "server is healthy"
 
+# readiness is wired to the database, so the journey proves the store answers
+# behind a process that is more than up
+curl -fsS "${BASE}/readyz" >/dev/null || fail "server never became ready"
+readybody="$(curl -fsS "${BASE}/readyz")"
+grep -q '"status":"ok"' <<<"${readybody}" || fail "readyz did not report ok: ${readybody}"
+ok "server is ready"
+
 CARD="$(curl -fsS "${BASE}/.well-known/agent-card.json")"
 grep -q "$AGP_URI" <<<"${CARD}" || fail "agent card does not advertise the AGP extension"
 grep -q '"agent_role":"gateway"' <<<"${CARD}" || fail "agent card does not declare the gateway role"

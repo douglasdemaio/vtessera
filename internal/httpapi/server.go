@@ -61,6 +61,10 @@ type Server struct {
 	ipLimiter    *rateLimiter
 	ipHeader     string
 	now          func() time.Time
+	// ready checks a deployment's backing store for /readyz. It is separate from
+	// /healthz on purpose: a process whose database is briefly unreachable is up
+	// and should not be restarted, but it should not be sent new work either.
+	ready func(context.Context) error
 }
 
 type Options struct {
@@ -104,6 +108,10 @@ type Options struct {
 	// burst leaves that layer off, which is how a caller of New that does not
 	// configure limits (a test, an embedder) gets the behaviour it had before.
 	RateLimit RateLimitOptions
+	// Ready is the store liveness check behind /readyz. Nil means the deployment
+	// has nothing to check and /readyz always reports ready, which is the honest
+	// answer for an embedder that passes no store.
+	Ready func(context.Context) error
 }
 
 // SettlementTier is the maturity label reported wherever on-chain settlement is
@@ -160,6 +168,7 @@ func New(opts Options) *Server {
 		adminOperators: newOperatorTokens(opts.AdminToken, opts.AdminOperators),
 		ipHeader:       opts.RateLimit.IPHeader,
 		now:            time.Now,
+		ready:          opts.Ready,
 		mux:            http.NewServeMux(),
 	}
 	if opts.RateLimit.AgentBurst > 0 {
@@ -186,7 +195,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /.well-known/agent-card.json", s.handleAgentCard)
+	s.mux.HandleFunc("GET /llms.txt", s.handleLLMSTXT)
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.mux.HandleFunc("GET /readyz", s.handleReady)
 	// Registered only with a token configured. Absent routes 404 rather than
 	// refusing, because a capability a deployment did not opt into should not be
 	// advertised to anybody scanning the surface.
@@ -297,12 +308,13 @@ func (s *Server) buildAgentCard() map[string]any {
 	if s.publicBaseURL != "" {
 		card["url"] = s.publicBaseURL
 		card["readEndpoints"] = map[string]string{
-			"agents":     s.publicBaseURL + "/v1/agents",
-			"offers":     s.publicBaseURL + "/v1/offers",
-			"metrics":    s.publicBaseURL + "/v1/metrics",
-			"tokens":     s.publicBaseURL + "/v1/tokens",
-			"ledgerHead": s.publicBaseURL + "/v1/ledger/head",
-			"health":     s.publicBaseURL + "/healthz",
+			"agents":       s.publicBaseURL + "/v1/agents",
+			"offers":       s.publicBaseURL + "/v1/offers",
+			"metrics":      s.publicBaseURL + "/v1/metrics",
+			"tokens":       s.publicBaseURL + "/v1/tokens",
+			"ledgerHead":   s.publicBaseURL + "/v1/ledger/head",
+			"health":       s.publicBaseURL + "/healthz",
+			"instructions": s.publicBaseURL + "/llms.txt",
 		}
 	}
 	return card
@@ -340,6 +352,126 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		body["sandbox"] = true
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// handleReady answers /readyz: whether this instance can serve, which for this
+// service means whether its database answers.
+//
+// It is split from /healthz because the two failures want opposite responses. A
+// process that is up but whose store is briefly unreachable should be taken out
+// of rotation, not restarted — restarting it loses the in-memory rate-limit
+// buckets and the warm connection for no benefit, and on this deployment there is
+// a single instance, so the only thing a restart buys is a gap. The container
+// HEALTHCHECK therefore stays on /healthz, and /readyz is what an operator or a
+// fronting proxy gates traffic on.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if s.ready == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.ready(ctx); err != nil {
+		// The failure is reported as a verdict, not as the store's error string:
+		// this route is unauthenticated, and a database error can name a path,
+		// a file, or a schema detail an anonymous caller has no business reading.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// handleLLMSTXT answers /llms.txt, a plain-language map of this API for an
+// agent that reads documentation rather than source.
+//
+// It is deliberately the whole recipe in one document: identity is a keypair,
+// the handshake is two calls, and verification is one rule. An agent that lands
+// here needs no other file to make its first request, which is the point —
+// discoverability for a program is a document it can act on, not a landing page.
+func (s *Server) handleLLMSTXT(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, s.llmsTXT())
+}
+
+func (s *Server) llmsTXT() string {
+	var b strings.Builder
+	base := s.publicBaseURL
+	path := func(p string) string {
+		if base == "" {
+			return p
+		}
+		return base + p
+	}
+	b.WriteString("# vtessera marketplace gateway\n\n")
+	b.WriteString("> An A2A agent marketplace. Agents publish offers, a buyer negotiates and settles a trade, and settlement is recorded as a hash-chained Ed25519-signed tessera (receipt). On-chain settlement on Solana is optional, buyer-signed, and this service never holds funds. It also routes AGP Intents to the cheapest policy-compliant agent.\n\n")
+	if base != "" {
+		fmt.Fprintf(&b, "Base URL: %s\n\n", base)
+	} else {
+		b.WriteString("Base URL: not published by this deployment; use relative paths.\n\n")
+	}
+	b.WriteString("## Identity\n\n")
+	b.WriteString("- An agent *is* an Ed25519 keypair. There is no signup, account, or password.\n")
+	fmt.Fprintf(&b, "- `%s` — status, version, verificationKey, verificationKeys%s\n", path("/healthz"), s.llmsHealthNotes())
+	fmt.Fprintf(&b, "- `%s` — A2A agent card, including the AGP gateway extension\n\n", path("/.well-known/agent-card.json"))
+
+	b.WriteString("## Session (challenge-response, 2 calls)\n\n")
+	b.WriteString("1. `POST /v1/auth/challenge` with `{\"publicKey\":\"<base58>\"}` → `{challengeId, nonce, expiresAt}`\n")
+	b.WriteString("2. Sign the returned challenge payload with the private key (Ed25519), then `POST /v1/auth/verify` with `{challengeId, publicKey, signature}` → `{token, expiresAt}`\n")
+	b.WriteString("3. Send `Authorization: Bearer <token>` on every request below that writes.\n\n")
+
+	b.WriteString("## Discovery (no session)\n\n")
+	for _, p := range []string{
+		"/v1/agents",
+		"/v1/agents/{id}  /v1/agents/{id}/attestation  /v1/agents/{id}/offers  /v1/agents/{id}/capabilities",
+		"/v1/offers?q=&direction=&mint=&settlementMode=",
+		"/v1/offers/{id}  /v1/offers/{id}/attestation",
+		"/v1/tokens  /v1/metrics  /v1/ledger  /v1/ledger/head",
+	} {
+		fmt.Fprintf(&b, "- `%s`\n", p)
+	}
+	b.WriteString("\n## Writes and trade lifecycle (session required)\n\n")
+	for _, p := range []string{
+		"PUT /v1/agents/{id}/card",
+		"POST /v1/agents/{id}/offers  — direction, description, capabilities, priceAmount, priceMint, settlementModes",
+		"POST /v1/offers/{id}/close",
+		"POST /v1/trades  — offerId, settlementMode (offchain | onchain)",
+		"POST /v1/trades/{id}/negotiate | /accept | /record | /cancel | /dispute",
+		"GET  /v1/trades/{id}  — GET /v1/tesseras/{tradeID} for the receipt",
+		"GET  /v1/limits  — PUT /v1/limits to raise a cap within an operator ceiling",
+	} {
+		fmt.Fprintf(&b, "- `%s`\n", p)
+	}
+
+	b.WriteString("\n## Intent routing (AGP gateway)\n\n")
+	b.WriteString("- `POST /agp/route` — route an AGP Intent to the cheapest compliant agent\n")
+	b.WriteString("- `GET /agp/table` — the current routing table\n\n")
+
+	b.WriteString("## Verification rule\n\n")
+	b.WriteString("A tessera is a JWT with `alg: EdDSA`. Its response carries:\n")
+	b.WriteString("- `verificationKey` — the key that signed *this* receipt, read from its `kid` header\n")
+	b.WriteString("- `verificationKeys` — every key this marketplace publishes, current first\n\n")
+	b.WriteString("Check the signature against `verificationKey` as named, then require that key to be a member of `verificationKeys`. `/healthz` reports the current key as `verificationKey` and the full set as `verificationKeys`; marketplace attestation signatures carry their `KeyID` and follow the same rule.\n\n")
+
+	b.WriteString("## Notes\n\n")
+	b.WriteString("- Spending caps and rate limits are operator-declared and reported by `GET /v1/limits`; refuse rather than guess.\n")
+	b.WriteString("- Every response carries `X-Vtessera-Version`.\n")
+	fmt.Fprintf(&b, "- This deployment is running version %s%s\n", s.version, s.llmsSandboxNote())
+	return b.String()
+}
+
+func (s *Server) llmsHealthNotes() string {
+	notes := ""
+	if s.cluster != "" {
+		notes += ", cluster, genesisHash, settlementTier"
+	}
+	return notes
+}
+
+func (s *Server) llmsSandboxNote() string {
+	if s.sandbox {
+		return ", in sandbox mode: on-chain settlement is refused here and no real value moves.\n"
+	}
+	return ".\n"
 }
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {

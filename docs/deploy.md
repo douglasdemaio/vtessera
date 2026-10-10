@@ -52,6 +52,17 @@ because that is what agents will call.
 supervision story: the healthcheck probes `/healthz`, which is cheap and does
 not touch the database.
 
+The two probes are split, and it matters. `GET /healthz` is liveness — the
+process is up and this is its identity — and never touches the store. `GET
+/readyz` is readiness — it runs a store round-trip and answers `503` when the
+database does not, so a fronting proxy or an operator can take this instance out
+of rotation without restarting it. Keep the container `HEALTHCHECK` on
+`/healthz`: on this deployment there is a single instance, so restarting it on a
+transient database blip only widens the outage and throws away the in-memory
+rate-limit state, whereas taking it out of rotation is exactly the correct
+response. `/readyz` reports the verdict, never the store's error string, because
+the route is unauthenticated.
+
 ### Without a container
 
 ```bash

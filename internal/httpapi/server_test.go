@@ -90,6 +90,10 @@ type serverBuild struct {
 	adminToken      string
 	adminOperators  []httpapi.Operator
 	requireOfferSig bool
+	// ready installs the store liveness probe behind /readyz. Unset, /readyz
+	// reports ready because there is nothing to probe, which is what the default
+	// harness and the production harness honestly answer with.
+	ready func(context.Context) error
 	// rateLimit configures the request limits. Zero leaves both layers off, so
 	// every test that is not about limiting behaves as it did before.
 	rateLimit httpapi.RateLimitOptions
@@ -182,6 +186,7 @@ func buildServer(t *testing.T, build serverBuild) (*httptest.Server, *ledger.Led
 	}
 	opts.AdminOperators = build.adminOperators
 	opts.RateLimit = build.rateLimit
+	opts.Ready = build.ready
 	api := httpapi.New(opts)
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)
@@ -470,6 +475,43 @@ func mustRead(t *testing.T, r io.Reader) []byte {
 	return body
 }
 
+func TestReadyzReportsReadyWithoutAProbe(t *testing.T) {
+	server, _ := setupServer(t)
+	resp, err := server.Client().Get(server.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /readyz = %d, want 200", resp.StatusCode)
+	}
+	var ready struct {
+		Status string `json:"status"`
+	}
+	decodeInto(t, mustRead(t, resp.Body), &ready)
+	if ready.Status != "ok" {
+		t.Errorf("status = %s, want ok", ready.Status)
+	}
+}
+
+func TestReadyzReportsUnavailableWhenTheStoreIsDown(t *testing.T) {
+	server, _ := buildServer(t, serverBuild{ready: func(context.Context) error { return fmt.Errorf("database not reachable") }})
+	resp, err := server.Client().Get(server.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("GET /readyz = %d, want 503", resp.StatusCode)
+	}
+	// The verdict, not the store's error string, is what the anonymous caller
+	// gets: the string can name a path or a file.
+	body := string(mustRead(t, resp.Body))
+	if strings.Contains(body, "not reachable") {
+		t.Errorf("/readyz leaked the store error: %s", body)
+	}
+}
+
 func TestHealthReportsVerificationKey(t *testing.T) {
 	server, led := setupServer(t)
 	resp, err := server.Client().Get(server.URL + "/healthz")
@@ -497,6 +539,52 @@ func TestHealthReportsVerificationKey(t *testing.T) {
 	}
 	if health.AGP.Version != agp.Version {
 		t.Errorf("agp version = %s, want %s", health.AGP.Version, agp.Version)
+	}
+}
+
+func TestLlmsTxtDescribesTheRecipe(t *testing.T) {
+	server, _ := setupServer(t)
+	resp, err := server.Client().Get(server.URL + "/llms.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /llms.txt = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("content-type = %q, want text/plain", ct)
+	}
+	body := string(mustRead(t, resp.Body))
+	for _, want := range []string{
+		"Ed25519 keypair",
+		"/v1/auth/challenge",
+		"/v1/auth/verify",
+		"/agp/route",
+		"`kid` header",
+		"member of `verificationKeys`",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/llms.txt is missing %q", want)
+		}
+	}
+	// No public base URL is configured in the default harness, so the document
+	// must not invent one.
+	if strings.Contains(body, "Base URL: http") {
+		t.Errorf("/llms.txt published a base URL that was never configured:\n%s", body)
+	}
+}
+
+func TestLlmsTxtPublishesTheConfiguredBaseURL(t *testing.T) {
+	server, _ := setupServerAt(t, "https://market.example")
+	resp, err := server.Client().Get(server.URL + "/llms.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := string(mustRead(t, resp.Body))
+	if !strings.Contains(body, "Base URL: https://market.example") {
+		t.Errorf("/llms.txt did not publish the configured base URL:\n%s", body)
 	}
 }
 
