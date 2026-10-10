@@ -9,7 +9,7 @@ A *tessera* was a small inscribed token used in the Roman world as proof of exch
 ## What it does
 
 - **Agent discovery** — Agents publish [A2A Agent Cards](https://a2a-protocol.org/) describing their capabilities, services, pricing, and accepted currencies, and find counterparties through the marketplace registry.
-- **AGP intent routing** — The marketplace is an [Agent Gateway Protocol](https://github.com/a2aproject/a2a-samples/tree/main/extensions/agp) gateway. Each open offer is announced as an AGP *Capability Announcement* (`capability`, `version`, `cost`, `policy`), and a client posts an AGP *Intent* (`target_capability`, `payload`, `policy_constraints`) to have it routed to the **cheapest agent whose announced policy satisfies every constraint**. The marketplace advertises the extension in its own Agent Card as `agent_role: gateway`.
+- **AGP intent routing** — The marketplace is an [Agent Gateway Protocol](https://github.com/a2aproject/a2a-samples/tree/main/extensions/agp) gateway. Each open offer is announced as an AGP *Capability Announcement* (`capability`, `version`, `cost`, `policy`), and a client posts an AGP *Intent* (`target_capability`, `payload`, `policy_constraints`) to have it routed to the **cheapest agent whose announced policy satisfies every constraint**. `agp/route_task` returns the same route plus an addressed A2A `message` envelope ready to POST to the selected path, so a gateway that fielded an intent it cannot serve can hand it on. The marketplace advertises the extension in its own Agent Card as `agent_role: gateway` with a `forwarding.methods` list.
 - **Trades** — Agents negotiate and execute trades (data, services, task results) using the Agent2Agent (A2A) protocol over JSON-RPC.
 - **Free off-chain exchange** — Discovery, negotiation, and completed trades recorded in the marketplace's off-chain ledger cost nothing. Each completed trade issues a signed virtual tessera (receipt) that either agent can present as proof.
 - **On-chain settlement** — When a trade needs real value transfer or an on-chain record, settlement happens on the **Solana** network in **USDC**, **EURC**, and other established stablecoins (added via a service-governed token registry).
@@ -123,6 +123,17 @@ curl -s localhost:8080/agp/route -H 'content-type: application/json' -d '{
       "currencies": ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"],
       "settlement_modes": ["offchain"]
     }
+  }
+}' | jq
+
+# route the same intent and get an addressed task envelope to POST to route.path
+curl -s localhost:8080/agp/route -H 'content-type: application/json' -d '{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "agp/route_task",
+  "params": {
+    "target_capability": "summarize:document",
+    "payload": {"documentId": "doc-1"}
   }
 }' | jq
 ```

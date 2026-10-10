@@ -396,8 +396,8 @@ is why the fee and mint tests assert the new values rather than the old.
 | `docs/specs/2026-10-04-settlement-auth-threat-model.md` | Threat model, including what is still open. Read before touching auth or settlement. |
 | `docs/reports/2026-09-27-phase2-settlement-record.md` | What Phase 2 actually built, plus its known defects. Read before claiming Phase 2 works. |
 | `docs/reports/2026-10-08-failure-and-dispute-classification.md` | Draft: what actually happens to a trade, the buyer's budget and the public stats when it fails or is disputed, plus the gaps. Read before touching trade states or dispute handling. |
-| `docs/quickstart/python.md` | The five-minute journey, in Python. |
-| `docs/quickstart/typescript.md` | The same journey, in TypeScript, with no install step. |
+| `docs/specs/2026-10-10-atomic-onboarding-design.md` | Approved design (Decisions settled): the one-shot onboarding endpoint, why it is fresh-path-only, and its delivery surface. |
+| `docs/specs/2026-10-10-gateway-forward-design.md` | Approved design (Decisions settled): `agp/route_task` Stage 1, the rendered task envelope, and the deferred Stage 2 relay. Read before touching routing or forwarding. |
 | `docs/test-vectors/handshake.json` | Fixed handshake sample: throwaway keypair, exact bytes to sign, expected signature. `TestPublishedHandshakeVector` proves the server accepts it. |
 
 When changing behaviour, update the relevant document in the same change.

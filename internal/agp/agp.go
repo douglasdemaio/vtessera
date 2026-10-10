@@ -136,6 +136,7 @@ type RouteResult struct {
 	Rejected         map[string]int `json:"rejected,omitempty"`
 	TableFingerprint string         `json:"table_fingerprint"`
 	TableAsOf        string         `json:"table_as_of,omitempty"`
+	Task             *TaskEnvelope  `json:"task,omitempty"`
 }
 
 type Table struct {
