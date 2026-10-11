@@ -1,21 +1,29 @@
 BINARY := bin/vtessera
+SEED_BINARY := bin/vtessera-seed
 PKG := ./...
 GO ?= go
 IMAGE ?= vtessera:local
+SEED_IMAGE ?= ghcr.io/douglasdemaio/vtessera-seed
+SEED_TAG ?= 0.1.0
 MCP_IMAGE ?= ghcr.io/douglasdemaio/vtessera-mcp
 MCP_TAG ?= 0.1.0
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart examples image image-run fly-deploy fly-verify fly-sandbox-deploy fly-sandbox-verify sandbox-reset preflight-live mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push mcp-fly-deploy
+.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart examples example-buyer image image-run fly-deploy fly-verify fly-sandbox-deploy fly-sandbox-verify sandbox-reset preflight-live seed-build seed-smoke seed-image seed-fly-deploy mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push mcp-fly-deploy
 
 # mcp/ is a separate module (see AGENTS.md), so ./... does not reach it. Its checks
 # are wired in here rather than left to memory: a nested module that nothing builds
 # is a module that rots quietly, and this one talks to the service's public API.
-all: fmt vet test build mcp-fmt mcp-vet mcp-test mcp-build
+all: fmt vet test build seed-build mcp-fmt mcp-vet mcp-test mcp-build
 
 build:
 	$(GO) build -trimpath -o $(BINARY) ./cmd/vtessera
+
+# The offer seeder is part of this module but a separate binary: it holds agent
+# keys, which the marketplace must never have, so it is built and run on its own.
+seed-build:
+	$(GO) build -trimpath -o $(SEED_BINARY) ./cmd/vtessera-seed
 
 run:
 	$(GO) run ./cmd/vtessera --session-secret $(or $(VTESSERA_SESSION_SECRET),0123456789abcdef0123456789abcdef)
@@ -134,6 +142,34 @@ quickstart: build
 # every change so they cannot quietly rot.
 examples: build
 	./scripts/examples.sh $(BINARY)
+
+# Runs the buyer-only example (examples/buyer) against a throwaway sandbox it
+# stocks with the seeder. A buyer alone cannot finish a trade — accepting is the
+# seller's move — so this checks the consumer's half: discovery, trade creation
+# and negotiation. It is not part of `all` because, like seed-smoke, it needs a
+# running marketplace; unlike seed-smoke it needs no python.
+example-buyer: build seed-build
+	./scripts/example-buyer.sh $(BINARY) $(SEED_BINARY)
+
+# Runs the offer seeder against a throwaway sandbox. The seeder's own tests use a
+# fake marketplace, and a fake can drift from the real endpoints; this is the
+# check that the real handshake, card and offer endpoints accept what the seeder
+# sends, and that a refresh replaces a listing rather than duplicating it. Like
+# quickstart it needs python3, so it is not part of `all`.
+seed-smoke: build seed-build
+	./scripts/seed.sh $(BINARY) $(SEED_BINARY)
+
+# The seeder's image, built from its own Containerfile because it is a client of
+# the marketplace rather than a marketplace. `.` is the build context because it
+# imports the service's own modules.
+seed-image:
+	podman build -t $(SEED_IMAGE):$(SEED_TAG) -t $(SEED_IMAGE):latest -f Containerfile.seed .
+
+# The seeder is its own Fly app (fly.seed.toml), with its own keyring volume.
+# Deploying it against the sandbox is the same target with the base URL changed
+# in fly.seed.toml. Set FLY_API_TOKEN first.
+seed-fly-deploy:
+	fly deploy -c fly.seed.toml --ha=false
 
 # podman defaults to the OCI image format, which has no HEALTHCHECK field, so it
 # drops the directive with a warning and the container reports no health status.

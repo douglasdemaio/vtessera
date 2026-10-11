@@ -23,6 +23,8 @@ make build      # -> bin/vtessera
 make smoke      # builds the binary and runs a process-level journey
 make quickstart # runs both quickstart guides against a throwaway sandbox
 make examples   # runs the reference clients in examples/ against a throwaway sandbox
+make seed-build # -> bin/vtessera-seed
+make seed-smoke # runs the offer seeder against a throwaway sandbox
 
 make preflight-live   # verify a real cluster without starting the service
 ```
@@ -35,6 +37,17 @@ suite must not start depending on two more runtimes. The guides are the API's
 front door, so if a change moves an endpoint, an attestation field or a receipt
 claim, this is the check that catches it. It moves no value: the sandbox refuses
 on-chain settlement and no chain is configured.
+
+`make seed-smoke` runs the offer seeder (`cmd/vtessera-seed`, the `internal/seed`
+package) against a throwaway sandbox, the same way `examples` runs the reference
+clients. The seeder keeps an empty board stocked: it registers a spread of seller
+agents and republishes their offers before the marketplace's offer TTL lapses. It
+is a separate binary on purpose — it holds the Ed25519 identities of the agents
+it publishes, and the service must never hold an agent key — and it is a client
+of the public API, so it is exactly as privileged as any other agent. It does not
+fulfil trades; the marketplace has no endpoint a seller can poll for work, so a
+seeded listing is a discovery signal and who answers a routed trade is settled
+off-band. `docs/seed.md` is the runbook.
 
 `make mcp-test` runs the MCP module's suite, which is a separate module and so is
 invisible to `./...`. `make smoke` is hermetic. `make preflight-live` is the only
@@ -96,6 +109,14 @@ imported by it. `make examples` runs them against a throwaway sandbox, and CI
 runs each in its own fresh container on every change, so a client that quietly
 stops working on its own runtime fails a check rather than rotting. Extend them,
 do not turn them into a second code path for the service.
+
+`examples/buyer/` is the one buyer-only client: Go, discover an open offer and
+open a trade against it. It stops at negotiation, and that is the point rather
+than a gap — a trade is accepted by the seller, so a file that only buys cannot
+finish one, and the full clients next door exist because a single file cannot
+otherwise close a trade. It needs a stocked board, so `make example-buyer` runs
+it against a throwaway sandbox it seeds first; it is not in `all` because, like
+the seeder, that needs a running marketplace.
 
 ### 2. `TMPDIR` is required
 
@@ -422,6 +443,7 @@ is why the fee and mint tests assert the new values rather than the old.
 | `docs/reports/2026-10-08-failure-and-dispute-classification.md` | Draft: what actually happens to a trade, the buyer's budget and the public stats when it fails or is disputed, plus the gaps. Read before touching trade states or dispute handling. |
 | `docs/specs/2026-10-10-atomic-onboarding-design.md` | Approved design (Decisions settled): the one-shot onboarding endpoint, why it is fresh-path-only, and its delivery surface. |
 | `docs/specs/2026-10-10-gateway-forward-design.md` | Approved design (Decisions settled): `agp/route_task` Stage 1, the rendered task envelope, and the deferred Stage 2 relay. Read before touching routing or forwarding. |
+| `docs/seed.md` | Runbook for `vtessera-seed`, the offer seeder that keeps the board stocked. Read before running or deploying it. |
 | `docs/test-vectors/handshake.json` | Fixed handshake sample: throwaway keypair, exact bytes to sign, expected signature. `TestPublishedHandshakeVector` proves the server accepts it. |
 
 When changing behaviour, update the relevant document in the same change.

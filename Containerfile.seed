@@ -1,0 +1,39 @@
+# vtessera-seed, built and shipped as a single self-contained image.
+#
+# This is the offer seeder, not the marketplace: it is an HTTP client that holds
+# one Ed25519 identity per seeded agent and nothing else. Its one piece of state
+# that must outlive a container is the keyring in /data — without it a restart
+# mints new agent IDs and orphans every offer the old ones published.
+
+# ---- build ----------------------------------------------------------------
+
+FROM docker.io/library/golang:1.27-alpine AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
+      -o /out/vtessera-seed ./cmd/vtessera-seed
+
+# ---- runtime --------------------------------------------------------------
+
+FROM docker.io/library/alpine:3.21
+
+# ca-certificates: the seeder makes outbound TLS calls to the marketplace.
+RUN apk add --no-cache ca-certificates tzdata \
+ && adduser -D -u 10001 -h /data seed \
+ && mkdir -p /data \
+ && chown seed:seed /data
+
+COPY --from=build /out/vtessera-seed /usr/local/bin/vtessera-seed
+
+# Never run a network client as root. The process only needs to write /data.
+USER seed
+
+ENV VTESSERA_SEED_KEYRING=/data/seed-keyring.json
+
+ENTRYPOINT ["/usr/local/bin/vtessera-seed"]

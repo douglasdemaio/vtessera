@@ -1,0 +1,46 @@
+# fly.toml app configuration file for the vtessera offer seeder.
+#
+# The seeder is a client of a marketplace, not a marketplace. It registers a
+# spread of seller agents and keeps their offers fresh so an agent that arrives
+# at an empty board finds something to route to. It holds one Ed25519 identity
+# per seeded agent on its volume and no key the marketplace trusts.
+#
+# It is deliberately its own app: it must never share a volume, a keyring or a
+# machine with the marketplace, and stopping or redeploying it must not touch
+# the marketplace's database or signing key.
+#
+# The keyring on /data is the seeder's identity set. Losing it is not losing
+# value, but it is losing the agent IDs: the honest recovery is to let the old
+# offers lapse and publish under the new ones.
+
+app = "vtessera-seed"
+
+# Same region as the marketplace it seeds, so its requests are short hops.
+primary_region = "fra"
+
+[build]
+  dockerfile = "Containerfile.seed"
+
+[env]
+  # The marketplace to seed. Change this to seed the sandbox instead:
+  #   VTESSERA_BASE_URL = "https://vtessera-sandbox.fly.dev"
+  VTESSERA_BASE_URL = "https://vtessera.fly.dev"
+  VTESSERA_SEED_KEYRING = "/data/seed-keyring.json"
+
+# The keyring lives here. Without it every restart is a new set of agents.
+[mounts]
+  source = "vtessera_seed_data"
+  destination = "/data"
+
+# Refresh well inside the marketplace's offer TTL, which defaults to 24h. The
+# seeder refuses to start if this is not shorter than the TTL it observes.
+#
+# --allow-mainnet acknowledges that the target above settles real value, and it
+# is required for a mainnet-beta target. Point this at the sandbox instead and
+# the acknowledgement, and this line, should go.
+[processes]
+  seed = "--refresh 12h --allow-mainnet"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
