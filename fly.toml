@@ -1,76 +1,36 @@
-# Fly.io configuration for vtessera.
+# fly.toml app configuration file generated for vtessera-sandbox on 2026-10-11T01:44:29Z
 #
-# One machine, one volume, on purpose. The service keeps its SQLite database and
-# its Ed25519 marketplace signing key on local disk, so scaling this out would
-# produce two marketplaces with two different identities — every tessera issued
-# by one would fail to verify against the other. This is a single-instance
-# service by design, not until some later phase: Phase 3 made the chain a
-# verified value, not the store a shared one, and Postgres is still a planned
-# target. Do not add machines.
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "vtessera"
-
-# Region only affects latency and where the volume physically lives. This one is
-# inferred from the maintainer's timezone; change it if the audience is
-# elsewhere. Run `fly platform regions` for the list.
-primary_region = "fra"
+app = 'vtessera-sandbox'
+primary_region = 'syd'
 
 [build]
-  # flyctl builds the same Containerfile used locally, so what ships is what was
-  # tested. .dockerignore (a symlink to .containerignore) keeps data/ out of the
-  # build context, so the signing key can never reach an image layer.
-  dockerfile = "Containerfile"
+  dockerfile = 'Containerfile'
 
 [env]
-  # Non-secret configuration. The session secret and the public base URL are
-  # secrets, because one is sensitive and the other depends on the hostname Fly
-  # assigns; set both with `fly secrets set`.
-  VTESSERA_ADDR = ":8080"
-  VTESSERA_DB = "/data/vtessera.db"
-  VTESSERA_SIGNER_KEY = "/data/signer.key"
-  # On-chain settlement is enabled, against mainnet-beta. The three variables
-  # that turn it on are secrets, not here:
-  #   fly secrets set VTESSERA_CLUSTER=mainnet-beta \
-  #                 VTESSERA_RPC_URL=https://solana-rpc.publicnode.com \
-  #                 VTESSERA_MAINNET_ACK=1
-  # They are secrets so that a cluster and endpoint change is one auditable
-  # `fly secrets set`, not an image rebuild, and so the public endpoint can
-  # later be replaced by a dedicated one carrying an API key. Read
-  # docs/deploy.md before changing any of them: the genesis pin is not to be
-  # edited to clear a preflight failure, and the fee policy is fixed on
-  # mainnet-beta.
-  #
-  # Unsetting VTESSERA_RPC_URL and VTESSERA_CLUSTER turns settlement back off,
-  # which is the correct state for a deployment with nothing to settle:
-  # on-chain trades are then refused with 501 ONCHAIN_UNAVAILABLE and the
-  # off-chain ledger path is unaffected.
+  VTESSERA_ADDR = ':8080'
+  VTESSERA_DB = '/data/vtessera.db'
+  VTESSERA_SIGNER_KEY = '/data/signer.key'
 
-# This volume is the marketplace identity. The signing key is created here on
-# first boot and cannot be regenerated — a new key is a new marketplace, and
-# every previously issued tessera stops verifying. Back it up.
-[mounts]
-  source = "vtessera_data"
-  destination = "/data"
+[[mounts]]
+  source = 'vtessera_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  # The directory health-checks this service every six hours, and an agent
-  # fetching the agent card should not pay a cold start. Keeping one machine
-  # warm costs roughly the price of a coffee per month; `fly machines` shows the
-  # current bill. Set auto_stop_machines = true to trade that for cold starts.
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
   [[http_service.checks]]
-    # First boot applies the schema and loads or creates the signing key, so
-    # give it room before the first check is allowed to fail it.
-    grace_period = "10s"
-    interval = "30s"
-    timeout = "5s"
-    method = "GET"
-    path = "/healthz"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/healthz'
 
 [[vm]]
   size = "shared-cpu-1x"
