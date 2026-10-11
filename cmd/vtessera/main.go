@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -28,13 +29,49 @@ import (
 )
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "key" {
+		if err := runKey(args[1:]); err != nil {
+			slog.Error("vtessera key exited", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := run(args); err != nil {
 		if errors.Is(err, config.ErrHelp()) {
 			os.Exit(0)
 		}
 		slog.Error("vtessera exited", "error", err)
 		os.Exit(1)
 	}
+}
+
+// runKey is the offline signing-key administration, kept out of run() on purpose:
+// it must work without a database, a cluster or a listening socket, and it must
+// never run alongside a serving process that still holds the key it replaces.
+func runKey(args []string) error {
+	if len(args) == 0 || args[0] != "rotate" {
+		return errors.New("usage: vtessera key rotate [--signer-key PATH]")
+	}
+	fs := flag.NewFlagSet("key rotate", flag.ContinueOnError)
+	path := fs.String("signer-key", defaultSignerKeyPath(), "path to the Ed25519 marketplace signing key")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	key, err := ledger.RotateSigner(*path)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("rotated %s\n  new verificationKey %s\n", *path, key)
+	fmt.Println("restart the service to sign with it; retired keys stay published so old receipts still verify")
+	return nil
+}
+
+func defaultSignerKeyPath() string {
+	if path := os.Getenv("VTESSERA_SIGNER_KEY"); path != "" {
+		return path
+	}
+	return "data/signer.key"
 }
 
 func run(args []string) error {
@@ -81,6 +118,7 @@ func run(args []string) error {
 	}
 	logger.Info("marketplace signing key ready",
 		"verificationKey", signer.PublicKeyBase58(),
+		"retiredKeys", len(signer.RetiredKeyIDs()),
 		"generated", created,
 		"path", cfg.SignerKeyPath,
 	)
@@ -116,7 +154,8 @@ func run(args []string) error {
 		registry.WithPricer(spendPolicy),
 		registry.WithRequiredOfferAttestation(cfg.RequireOfferAttestation),
 		registry.WithProbeRunner(prober),
-		registry.WithOfferTTL(cfg.OfferTTL))
+		registry.WithOfferTTL(cfg.OfferTTL),
+		registry.WithRetiredMarketplaceKeys(signer.RetiredKeyIDs()))
 	led := ledger.New(db, signer)
 	trades := trade.New(db, db, db, led).WithLimits(spendPolicy, db).WithAcceptanceTTL(cfg.AcceptTTL).WithOpenTTL(cfg.OpenTTL)
 	if cfg.RequireOfferAttestation {
@@ -185,7 +224,8 @@ func run(args []string) error {
 			registry.WithPricer(spendPolicy),
 			registry.WithRequiredOfferAttestation(cfg.RequireOfferAttestation),
 			registry.WithProbeRunner(prober),
-			registry.WithOfferTTL(cfg.OfferTTL))
+			registry.WithOfferTTL(cfg.OfferTTL),
+			registry.WithRetiredMarketplaceKeys(signer.RetiredKeyIDs()))
 
 		client := settlement.NewRPCClient(cfg.Solana.RPCURL)
 		logger.Info("preflight passed",

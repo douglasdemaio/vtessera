@@ -28,7 +28,7 @@ of "a session is a key", and the ones that are not are marked.
 |---|---|---|
 | An agent's private key | The agent, and an attacker impersonating it | Never transmitted, never stored. A session exists only for a signed challenge. |
 | Settlement funds | Buyer and seller | Never custodied. The service builds an unsigned transaction and the buyer signs it. |
-| The marketplace's signing key | An attacker wanting to forge receipts | On a Fly volume. Not rotatable: a new key is a new identity. |
+| The marketplace's signing key | An attacker wanting to forge receipts | On a Fly volume. Now rotatable with `vtessera key rotate`; the old public key stays trusted so old receipts keep verifying. |
 | An agent's reputation | An attacker impersonating a known agent | Ownership checks on every write. See *Residual risk*. |
 | Trade history and receipts | Buyers disputing, auditors verifying | Hash-chained, signed, and immutable by any route. |
 | The database | An operator, an attacker | Single file on a volume, SQLite, no network listener of its own. |
@@ -97,7 +97,7 @@ caller's would have no way to notice, and the listing would still change.
 | Raise its own cap past the operator ceiling | 409 `CAP_ABOVE_CEILING`. The ceilings are unset by default, so raising is refused until an operator declares a ceiling. |
 | Raise another agent's cap | Impossible: `PUT /v1/limits` has no path value, and the session decides whose cap changes. |
 | Commit an unrecorded transaction | The settlement verifier is canonical and exact; a trade that was never requested cannot verify. |
-| Compromise the marketplace signing key | Forges receipts for every trade in the ledger. **Not rotatable.** Recovery is a new deployment. |
+| Compromise the marketplace signing key | Forges receipts under the old key. **Compromise is unrecoverable by design**: retired keys stay trusted so old receipts keep verifying, which keeps the forgeries valid too. Rotation is for planned replacement and key loss, never a compromise response. |
 | Repoint the RPC endpoint at another chain | Genesis hash and every governed mint's existence, program, decimals, and authorities are verified at boot, per request, and per tick. |
 | Race two trade creations to take the same dollar | Refused: `Create` holds a lock across reading the cap and writing the reservation. |
 | Flood the API to exhaust the machine | 429 with a `Retry-After` once the caller's bucket empties, per agent and per client address. |
@@ -114,10 +114,15 @@ commits to. It is not KYC, not a spend limit on a person or an organisation, and
 must never be described as one. Closing this means identity attestation or a
 deposit, which is a different product.
 
-**The marketplace signing key is a single point of failure with no rotation
-path.** It is on the Fly volume, was created on first boot, and cannot be
-regenerated without invalidating every previously issued tessera. Compromise is
-catastrophic and unrecoverable.
+**The marketplace signing key is rotatable for planned replacement, not for
+compromise.** `vtessera key rotate` (offline, then restart) retires the current
+public key into a `verificationKeys` set that also keeps verifying old tesserae
+and marketplace attestations, and a receipt names its own key by `kid`. The
+private half of a retired key is never written, and rotation is not recovery:
+a compromised key that is then retired still verifies its own forgeries, because
+that is the cost of old receipts staying valid. Compromise therefore remains
+catastrophic, and losing the key — not an attacker holding it — is what rotation
+actually rescues.
 
 **A trade reserves its budget until it is cancelled or it settles, and acceptance
 is not a cancellation.** The off-chain commit re-checks the cap now that accepted

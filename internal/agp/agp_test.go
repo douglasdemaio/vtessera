@@ -177,6 +177,78 @@ func TestSettlementModeConstraintIsAnyOf(t *testing.T) {
 	}
 }
 
+func TestRouteTaskRendersAnAddressedEnvelope(t *testing.T) {
+	now := time.Now()
+	announcement := AnnouncementsForOffer(
+		offer("o1", "alice", "25", usdc, domain.SettlementOffchain), agent("alice"), usdcMint(), now)[0]
+	table, err := NewRouting().BuildTable(context.Background(), source([]CapabilityAnnouncement{announcement}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{"text": "a long document to summarise"}
+	intent := Intent{TargetCapability: announcement.Capability, Payload: payload}
+	result, err := table.RouteTask(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task == nil {
+		t.Fatal("route_task result carries no task envelope")
+	}
+	task := *result.Task
+	if task.JSONRPC != "2.0" || task.Method != "message" {
+		t.Errorf("envelope = %s/%s, want jsonrpc 2.0 / method message", task.JSONRPC, task.Method)
+	}
+	if task.Params.Message.Role != "agent" || task.Params.Message.Kind != "task" {
+		t.Errorf("message = %s/%s, want an agent task message", task.Params.Message.Role, task.Params.Message.Kind)
+	}
+	if task.ID == "" || task.Params.Message.TaskID == "" || task.Params.Message.ContextID == "" {
+		t.Error("envelope, task and context ids must all be present")
+	}
+	if task.Params.Message.TargetCapability != announcement.Capability {
+		t.Errorf("targetCapability = %q, want %q", task.Params.Message.TargetCapability, announcement.Capability)
+	}
+	if task.Params.Message.Payload["text"] != "a long document to summarise" {
+		t.Errorf("payload = %v, want the caller's intent content", task.Params.Message.Payload)
+	}
+	fresh, err := table.RouteTask(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Task.ID == task.ID {
+		t.Error("two route_task calls mint the same envelope id")
+	}
+
+	plain, err := table.Route(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Task != nil {
+		t.Error("Route must not attach a task envelope")
+	}
+}
+
+func TestRouteTaskSharesRoutesFailureModes(t *testing.T) {
+	now := time.Now()
+	announcement := AnnouncementsForOffer(
+		offer("o1", "alice", "25", usdc, domain.SettlementOffchain), agent("alice"), usdcMint(), now)[0]
+	table, err := NewRouting().BuildTable(context.Background(), source([]CapabilityAnnouncement{announcement}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := table.RouteTask(Intent{TargetCapability: "nope:nope", Payload: map[string]any{}}); !IsRouteNotFound(err) {
+		t.Errorf("unknown capability = %v, want AGP_ROUTE_NOT_FOUND", err)
+	}
+	if _, err := table.RouteTask(Intent{TargetCapability: announcement.Capability, Payload: map[string]any{}, PolicyConstraints: map[string]any{PolicyCurrencies: []any{eurc}}}); !IsPolicyViolation(err) {
+		t.Errorf("unsatisfied constraint = %v, want AGP_POLICY_VIOLATION", err)
+	}
+}
+
+func TestForwardingMethods(t *testing.T) {
+	if len(ForwardingMethods) != 2 || ForwardingMethods[0] != "agp/route_intent" || ForwardingMethods[1] != "agp/route_task" {
+		t.Errorf("forwarding methods = %v, want [agp/route_intent agp/route_task]", ForwardingMethods)
+	}
+}
+
 func TestRouteErrors(t *testing.T) {
 	now := time.Now()
 	announcement := AnnouncementsForOffer(

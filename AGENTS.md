@@ -202,7 +202,11 @@ The things that matter when editing this repository:
   anything. Fly keeps 5 daily volume snapshots as the recovery path; if the key
   is ever lost, the honest response is a new deployment, not a recovery.
 - **`verificationKey` in `/healthz` is the identity.** It must not change across
-  a deploy. `make fly-verify` prints it. A change means the volume is gone.
+  a deploy. `make fly-verify` prints it. A change means the volume is gone —
+  unless a deliberate `vtessera key rotate` retired it (then `/healthz` lists
+  both keys under `verificationKeys`, current first). Rotation is for planned
+  replacement and key loss only, never for compromise: a retired key stays
+  trusted so old receipts keep verifying.
 - The volume is a SQLite database in WAL mode, so it is three files
   (`vtessera.db`, `-wal`, `-shm`). Copying only the `.db` while the service runs
   can silently drop committed trades.
@@ -336,9 +340,13 @@ is not the buyer or the seller. Closing an offer is checked in the service,
 because the offer names its owner in a column.
 
 The threat model is `docs/specs/2026-10-04-settlement-auth-threat-model.md`. It
-lists what is still open, and the two that matter are a cap per identity when
-identities are free, and a marketplace signing key with no rotation path. Rate
-limiting was a third and is now in place: two in-memory token buckets in
+lists what is still open, and the one that matters most is a cap per identity
+when identities are free. Signing-key rotation, its former partner in that list,
+is now in place — `docs/specs/2026-10-09-signing-key-rotation-design.md`: the
+key file is a JSON keyring, receipts carry a `kid` header, and `vtessera key
+rotate` retires the current public key into a `verificationKeys` set instead of
+invalidating old receipts. Rate limiting was a third and is now in place: two
+in-memory token buckets in
 `internal/httpapi`, one per authenticated agent and one per client address, both
 on by default and both configurable with `--rate-limit-*`. The per-address bucket
 keys on the header the proxy sets (`--rate-limit-ip-header`, default
@@ -408,11 +416,12 @@ is why the fee and mint tests assert the new values rather than the old.
 |---|---|
 | `docs/specs/2026-09-26-a2a-marketplace-design.md` | Authoritative product spec. |
 | `docs/specs/2026-09-27-phase3-cluster-aware-settlement-design.md` | Approved Phase 3 design (revision 2). Read before touching settlement. |
+| `docs/specs/2026-10-09-signing-key-rotation-design.md` | Signing-key rotation: keyring, `kid`, `verificationKeys`, offline `key rotate`. Read before touching the signing key or receipt verification. |
 | `docs/specs/2026-10-04-settlement-auth-threat-model.md` | Threat model, including what is still open. Read before touching auth or settlement. |
 | `docs/reports/2026-09-27-phase2-settlement-record.md` | What Phase 2 actually built, plus its known defects. Read before claiming Phase 2 works. |
 | `docs/reports/2026-10-08-failure-and-dispute-classification.md` | Draft: what actually happens to a trade, the buyer's budget and the public stats when it fails or is disputed, plus the gaps. Read before touching trade states or dispute handling. |
-| `docs/quickstart/python.md` | The five-minute journey, in Python. |
-| `docs/quickstart/typescript.md` | The same journey, in TypeScript, with no install step. |
+| `docs/specs/2026-10-10-atomic-onboarding-design.md` | Approved design (Decisions settled): the one-shot onboarding endpoint, why it is fresh-path-only, and its delivery surface. |
+| `docs/specs/2026-10-10-gateway-forward-design.md` | Approved design (Decisions settled): `agp/route_task` Stage 1, the rendered task envelope, and the deferred Stage 2 relay. Read before touching routing or forwarding. |
 | `docs/test-vectors/handshake.json` | Fixed handshake sample: throwaway keypair, exact bytes to sign, expected signature. `TestPublishedHandshakeVector` proves the server accepts it. |
 
 When changing behaviour, update the relevant document in the same change.
