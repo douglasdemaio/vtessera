@@ -31,7 +31,7 @@ because there is nothing to move.
 | Spending caps | $10 / $10 per trade and day | **$1,000,000 / $1,000,000** (see below) |
 | Rate limits | on by default | on by default — same flags, same defaults |
 | Admin routes | `--admin-token` / `--admin-operators` | **unregistered**: no token, so the routes 404 rather than 403 |
-| Machines / volume | 1 machine, 1 GB, kept warm, 5 daily snapshots | 1 machine, 1 GB, cold, **no snapshots** |
+| Machines / volume | 1 machine, 1 GB, kept warm, 5 daily snapshots | 1 machine, 1 GB, kept warm, **no snapshots** |
 | `verificationKey` | must never change | **changes on every reset**, and that is the announcement |
 | Reset | never — losing the key is a new identity | weekly, `make sandbox-reset` |
 
@@ -56,11 +56,21 @@ a separate app:
 ```bash
 fly auth login
 fly apps create vtessera-sandbox
+# Allocate the public address. `fly deploy` does not do this for an app that
+# already exists, and without it there is no DNS name and the service is
+# unreachable even though the machine is healthy.
+fly ips allocate-v6 -a vtessera-sandbox
+fly ips allocate-v4 --shared -a vtessera-sandbox
 fly secrets set VTESSERA_SESSION_SECRET="$(openssl rand -hex 32)" \
                 VTESSERA_PUBLIC_BASE_URL=https://vtessera-sandbox.fly.dev
 make fly-sandbox-deploy
 make fly-sandbox-verify
 ```
+
+`VTESSERA_SESSION_SECRET` is required: the service refuses to boot without it,
+and a missing one is the crash-loop that looks like "starting too often". The
+IP allocation is the other silent gap — a machine can be up and passing its
+health check while `vtessera-sandbox.fly.dev` does not resolve.
 
 Never set `VTESSERA_CLUSTER` or `VTESSERA_RPC_URL` on this app: sandbox mode
 refuses to boot with a chain configured, and that refusal is the guard that
@@ -118,7 +128,9 @@ undo.
 
 ## Expected cost
 
-One stopped-or-cold `shared-cpu-1x` machine with 256 MB plus a 1 GB volume,
-**under $5 a month**. The machine is set to stop when idle
-(`auto_stop_machines`), so a sandbox nobody is using costs the volume only and
-the first request of the day pays a cold start.
+One always-on `shared-cpu-1x` machine with 512 MB plus a 1 GB volume, **a few
+dollars a month**. The machine is kept warm (`auto_stop_machines = false`,
+`min_machines_running = 1`) for the same reason the mainnet app is: a sandbox
+that stops when idle reads as down, and an unwatched one spends its life
+restarting. It is the same shape as the mainnet and MCP apps — a single machine
+per app, all three running together and sharing nothing.

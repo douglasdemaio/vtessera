@@ -77,6 +77,11 @@ volume in one region (about $1.5/month), with no RPC egress because there is no
 RPC. Call it **under $5 a month**, and the first abuse response is resetting the
 volume, which stops the state and can be done from a phone.
 
+**Superseded in practice.** The deployed sandbox was later changed to a warm
+machine with 512 MB (`auto_stop_machines = false`, `min_machines_running = 1`)
+so it runs alongside the mainnet and MCP apps instead of reading as down when
+idle. `docs/sandbox.md` is the runbook for what is actually deployed.
+
 ## Abuse limits
 
 - **It moves no real value.** Settlement is off-chain only, refused at boot, so

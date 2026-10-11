@@ -184,7 +184,7 @@ reporting `cluster` and `genesisHash`, and on-chain trades are refused with
 
 ### 5. `vtessera` is deployed at `https://vtessera.fly.dev`
 
-**Live as of 2026-09-29.** One Fly machine (`shared-cpu-1x`, 256 MB, `fra`) with
+**Live as of 2026-09-29.** One Fly machine (`shared-cpu-1x`, 512 MB, `fra`) with
 a 1 GB volume mounted at `/data`, and both kept warm. `fly.toml` and a verified
 `Containerfile` are in the repository; the runbook is
 [`docs/deploy.md`](docs/deploy.md).

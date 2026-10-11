@@ -74,22 +74,19 @@ primary_region = "fra"
   force_https = true
 
   # Smallest machine and idle auto-stop, because this server serves almost
-  # nobody. shared-cpu-1x/256MB is the smallest size Fly offers at all - its
-  # pricing page lists tiers 256/512MB/1GB/2GB and calls 256MB the "Smallest
-  # Machine size" - so there is no smaller number available to choose here.
+  # nobody. shared-cpu-1x is 512 MB here because a machine that was cold for a
+  # long time would cold-start under memory pressure, and a small machine that
+  # restarts is worse than a warm one that never does.
   #
-  # Auto-stop is where the saving is: Fly bills by the second while running and
-  # is explicit that auto-stopped machines cost less. For a tool called
-  # occasionally rather than continuously that is the difference between paying
-  # for 30 days of a machine and paying for its actual calls.
-  #
-  # The cost is a cold start. It is a cheap one: no database to load and no key
-  # to read, because this server has neither.
-  auto_stop_machines = true
+  # Kept warm like the other two apps. The maintenance rationale for auto-stop
+  # (bill for actual calls, absorb a cheap cold start) did not survive contact
+  # with the deployment: a machine that goes quiet flies under the radar, and a
+  # cold MCP server looks exactly like a broken one to whatever calls it next.
+  # All three apps run one always-on machine and share nothing, and "is it up"
+  # has one answer everywhere.
+  auto_stop_machines = false
   auto_start_machines = true
-  # Zero, because a non-zero floor with auto-stop on would keep one machine warm
-  # and make auto-stop decorative.
-  min_machines_running = 0
+  min_machines_running = 1
 
   # Deliberately no [[http_service.checks]]. The endpoint is /mcp, which is
   # POST-only: an MCP initialize is not a thing a health prober can send without

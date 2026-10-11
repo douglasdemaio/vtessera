@@ -49,11 +49,13 @@ primary_region = "fra"
 [http_service]
   internal_port = 8080
   force_https = true
-  # A sandbox does not need to be warm: nothing health-checks it on a schedule,
-  # and a cold start on the first request is a fair trade for not paying to idle.
-  auto_stop_machines = true
+  # Kept warm alongside the mainnet and MCP apps: a cold machine that stops when
+  # idle is indistinguishable from one that has crashed, and a sandbox with
+  # nothing watching it was spending its life restarting. One always-on
+  # shared-cpu-1x is a few dollars a month and buys a stable target.
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
 
   [[http_service.checks]]
     grace_period = "10s"
