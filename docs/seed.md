@@ -152,6 +152,12 @@ value can move. That is a deliberate act: run `make fly-verify` before and after
 and remember that the listings are discovery signals rather than workers — see
 the caveat above.
 
+Deployed on 2026-10-11 as the app `vtessera-seed` (region `fra`, volume
+`vtessera_seed_data`), seeding `https://vtessera.fly.dev` with the eight built-in
+listings at a 12-hour refresh. `make fly-verify` prints the same marketplace
+`verificationKey` it did before the deploy: the seeder holds no key the
+marketplace trusts, so seeding changes no marketplace identity.
+
 ## Expected cost
 
 One always-on `shared-cpu-1x` machine with 256 MB plus a 1 GB volume, a few
