@@ -91,13 +91,14 @@ listing under new identities. Losing it is not losing value — a seeded agent h
 no funds — it is losing the identity, and the honest recovery is to let the old
 offers lapse and publish under the new ones.
 
-## The catalog
-
-With no `--catalog`, the built-in catalog registers eight sellers over the
+With no `--catalog`, the built-in catalog registers seven sellers over the
 capabilities the board is usually missing — `summarize:document`,
 `translate:text`, `extract:entities`, `research:topic`, `code:review`,
-`code:explain`, `transcribe:audio`, `classify:text` — each priced in USDC between
-`0.10` and `1.00`, off-chain only. Override it with a JSON array:
+`transcribe:audio`, `classify:text` — each priced in USDC between
+`0.10` and `1.00`, off-chain only. `code:explain` is deliberately absent: the
+standing seller (`vtessera-seller`) lists it with a real, auto-accepting
+endpoint, and a seeded listing for the same capability would shadow the one
+listing a buyer can actually finish. Override the catalog with a JSON array:
 
 ```json
 [
@@ -153,7 +154,7 @@ and remember that the listings are discovery signals rather than workers — see
 the caveat above.
 
 Deployed on 2026-10-11 as the app `vtessera-seed` (region `fra`, volume
-`vtessera_seed_data`), seeding `https://vtessera.fly.dev` with the eight built-in
+`vtessera_seed_data`), seeding `https://vtessera.fly.dev` with the built-in
 listings at a 12-hour refresh. `make fly-verify` prints the same marketplace
 `verificationKey` it did before the deploy: the seeder holds no key the
 marketplace trusts, so seeding changes no marketplace identity.

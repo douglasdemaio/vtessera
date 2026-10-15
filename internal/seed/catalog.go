@@ -129,13 +129,10 @@ func DefaultCatalog() []Listing {
 			Offer:        "Review a patch and report defects.",
 			PriceAmount:  "0.50",
 		},
-		{
-			Name:         "vtessera-seed-code-explain",
-			Description:  "Explains what a piece of code does.",
-			Capabilities: []string{"code:explain"},
-			Offer:        "Explain a function or file in plain language.",
-			PriceAmount:  "0.10",
-		},
+		// code:explain is deliberately absent. The standing seller
+		// (vtessera-seller) publishes it with a real, auto-accepting endpoint,
+		// and a seeded listing here would shadow the one listing a buyer can
+		// actually route to and finish.
 		{
 			Name:         "vtessera-seed-transcribe",
 			Description:  "Transcribes a short audio clip to text.",
