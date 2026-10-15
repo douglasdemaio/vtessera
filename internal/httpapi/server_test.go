@@ -450,6 +450,9 @@ func TestAgentCardAdvertisesConfiguredPublicURL(t *testing.T) {
 	if got := card.ReadEndpoints["agents"]; got != "https://vtessera.test/v1/agents" {
 		t.Errorf("readEndpoints[agents] = %q", got)
 	}
+	if got := card.ReadEndpoints["receipts"]; got != "https://vtessera.test/v1/receipts" {
+		t.Errorf("readEndpoints[receipts] = %q", got)
+	}
 }
 
 func TestAgentCardOmitsURLWhenNoPublicBaseURLConfigured(t *testing.T) {
@@ -917,6 +920,94 @@ func TestFullTradeLifecycleOverHTTP(t *testing.T) {
 type tesseraResult struct {
 	JWS             string `json:"jws"`
 	VerificationKey string `json:"verificationKey"`
+}
+
+// completeOffchainTrade drives a trade through to a recorded tessera and returns
+// the trade ID and the issued JWS, which is what a receipt listing is expected to
+// reproduce.
+func completeOffchainTrade(t *testing.T, seller, buyer *agentClient, amount, idem string) (tradeID, jws string) {
+	t.Helper()
+	offer := seller.publishOffer(amount, usdc, "summarize:document")
+	var trade domain.Trade
+	decodeInto(t, buyer.do(http.MethodPost, "/v1/trades", map[string]any{
+		"offerId":        offer.ID,
+		"settlementMode": "offchain",
+		"idempotencyKey": idem,
+	}, true), &trade)
+	buyer.do(http.MethodPost, "/v1/trades/"+trade.ID+"/negotiate", map[string]any{}, true)
+	seller.do(http.MethodPost, "/v1/trades/"+trade.ID+"/accept", map[string]any{}, true)
+	buyer.do(http.MethodPost, "/v1/trades/"+trade.ID+"/accept", map[string]any{}, true)
+	var recorded struct {
+		Trade   domain.Trade  `json:"trade"`
+		Tessera tesseraResult `json:"tessera"`
+	}
+	decodeInto(t, buyer.do(http.MethodPost, "/v1/trades/"+trade.ID+"/record", map[string]any{}, true), &recorded)
+	if recorded.Tessera.JWS == "" {
+		t.Fatalf("no tessera issued for trade %s", trade.ID)
+	}
+	return trade.ID, recorded.Tessera.JWS
+}
+
+// TestReceiptListPublishesVerifiableDeliveredTrades is what a directory reads to
+// build a verified-trades gallery. It needs no session, it names the key that
+// signed each receipt, and the receipt it publishes re-derives to the same
+// signature a reader checks independently.
+func TestReceiptListPublishesVerifiableDeliveredTrades(t *testing.T) {
+	server, led := setupServer(t)
+	seller := newAgent(t, server)
+	buyer := newAgent(t, server)
+	firstID, _ := completeOffchainTrade(t, seller, buyer, "1.00", "receipt-1")
+	secondID, secondJWS := completeOffchainTrade(t, seller, buyer, "2.00", "receipt-2")
+
+	type publishedReceipt struct {
+		TradeID         string                `json:"tradeId"`
+		JWS             string                `json:"jws"`
+		VerificationKey string                `json:"verificationKey"`
+		Valid           bool                  `json:"valid"`
+		Claims          *ledger.TesseraClaims `json:"claims"`
+	}
+	var listing struct {
+		Count           int                `json:"count"`
+		Truncated       bool               `json:"truncated"`
+		VerificationKey string             `json:"verificationKey"`
+		Receipts        []publishedReceipt `json:"receipts"`
+	}
+
+	// A page one short of the two delivered trades reports truncation, and the
+	// one receipt on it is the newest.
+	decodeInto(t, buyer.do(http.MethodGet, "/v1/receipts?limit=1", nil, false), &listing)
+	if listing.Count != 1 || !listing.Truncated {
+		t.Fatalf("count=%d truncated=%v, want 1 and true", listing.Count, listing.Truncated)
+	}
+	got := listing.Receipts[0]
+	if got.TradeID != secondID {
+		t.Errorf("receipt trade = %s, want the newest %s", got.TradeID, secondID)
+	}
+	if got.JWS != secondJWS {
+		t.Error("listing did not publish the delivered tessera")
+	}
+	if !got.Valid || got.Claims == nil {
+		t.Fatalf("valid=%v claims=%v, want a verified receipt with claims", got.Valid, got.Claims)
+	}
+	if got.Claims.Trade.TradeID != secondID {
+		t.Errorf("claims trade = %s, want %s", got.Claims.Trade.TradeID, secondID)
+	}
+	if got.VerificationKey != led.VerificationKey() {
+		t.Errorf("receipt verificationKey = %s, want %s", got.VerificationKey, led.VerificationKey())
+	}
+	if _, err := led.Verify(got.JWS); err != nil {
+		t.Errorf("published receipt does not verify: %v", err)
+	}
+
+	// The full listing is complete, so it is not reported as truncated, and the
+	// older receipt follows the newer.
+	decodeInto(t, buyer.do(http.MethodGet, "/v1/receipts", nil, false), &listing)
+	if listing.Count != 2 || listing.Truncated {
+		t.Fatalf("count=%d truncated=%v, want 2 and false", listing.Count, listing.Truncated)
+	}
+	if listing.Receipts[1].TradeID != firstID {
+		t.Errorf("second receipt = %s, want the oldest %s", listing.Receipts[1].TradeID, firstID)
+	}
 }
 
 func TestOnchainTradeIsNotImplemented(t *testing.T) {

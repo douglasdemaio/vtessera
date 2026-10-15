@@ -151,6 +151,48 @@ func TestLedgerChainLinksEntries(t *testing.T) {
 	}
 }
 
+// TestRecentReceiptsVerifiesNewestFirst pins the two things a public listing must
+// get right: the order is the order they were anchored, not wall-clock time (the
+// fixed clock makes every receipt share a timestamp, so only the ledger sequence
+// can order them), and every published receipt verifies with its claims attached.
+func TestRecentReceiptsVerifiesNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newLedger(t)
+	for _, id := range []string{"t1", "t2"} {
+		if _, err := l.Record(ctx, completedTrade(id), "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, err := l.RecentReceipts(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 {
+		t.Fatalf("receipts = %d, want 1", len(page))
+	}
+	if published := page[0]; published.TradeID != "t2" {
+		t.Errorf("newest receipt trade = %s, want t2", page[0].TradeID)
+	}
+	if !page[0].Valid || page[0].Claims == nil {
+		t.Fatalf("valid=%v claims=%v, want a verified receipt with claims", page[0].Valid, page[0].Claims)
+	}
+	if page[0].Claims.Trade.TradeID != "t2" {
+		t.Errorf("claims trade = %s, want t2", page[0].Claims.Trade.TradeID)
+	}
+	if page[0].VerificationKey != l.VerificationKey() {
+		t.Errorf("verificationKey = %s, want %s", page[0].VerificationKey, l.VerificationKey())
+	}
+
+	all, err := l.RecentReceipts(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].TradeID != "t2" || all[1].TradeID != "t1" {
+		t.Errorf("receipts = %+v, want [t2 t1] newest first", all)
+	}
+}
+
 func TestVerifyRejectsTamperedTessera(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newLedger(t)
