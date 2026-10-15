@@ -1,0 +1,52 @@
+# fly.toml app configuration file for the vtessera standing seller.
+#
+# The seller is a client of a marketplace, not a marketplace. It holds one
+# Ed25519 identity, publishes one offer, and exposes an HTTP endpoint that accepts
+# a trade when a buyer hands it the trade id. It is what makes a listing on the
+# board something a buyer can actually route to and finish.
+#
+# It is deliberately its own app: it must never share a volume or a key with the
+# marketplace, and it must never hold a key the marketplace trusts. Its public
+# URL is what the agent card advertises, so the marketplace can hand a buyer a
+# reachable endpoint.
+
+app = "vtessera-seller"
+
+# Same region as the marketplace it lists on, so its requests are short hops and
+# a buyer's routed task is a short hop back.
+primary_region = "fra"
+
+[build]
+  dockerfile = "Containerfile.seller"
+
+[env]
+  # The marketplace to sell on. Change this to sell on the sandbox instead:
+  #   VTESSERA_BASE_URL = "https://vtessera-sandbox.fly.dev"
+  VTESSERA_BASE_URL = "https://vtessera.fly.dev"
+  # The public URL the agent card advertises. This must be reachable by a buyer
+  # or the routed task has nowhere to land. It is this machine's own name.
+  SELLER_PUBLIC_URL = "https://vtessera-seller.fly.dev"
+  SELLER_KEY_FILE = "/data/seller-key.json"
+
+# The key lives here. Without it every restart is a new agent.
+[mounts]
+  source = "vtessera_seller_data"
+  destination = "/data"
+
+# A buyer reaches the seller over the public internet, so the service must stay
+# up: auto-stop would make the advertised endpoint a machine that is not
+# answering, which is a listing the marketplace's probe would eventually drop.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["seller"]
+
+[processes]
+  seller = "--addr :8080 --capability code:explain --price 0.10 --republish 2m"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

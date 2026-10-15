@@ -1,0 +1,44 @@
+# vtessera-seller, built and shipped as a single self-contained image.
+#
+# This is a standing seller, not the marketplace: it is an HTTP client of the
+# marketplace that holds one Ed25519 identity and answers routed tasks. Its one
+# piece of state that must outlive a container is the key in /data — without it a
+# restart mints a new agent ID and orphans the offer the old one published.
+#
+# It is deliberately its own app: it must never share a volume or a key with the
+# marketplace, and it must never hold a key the marketplace trusts.
+
+# ---- build ----------------------------------------------------------------
+
+FROM docker.io/library/golang:1.27-alpine AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
+      -o /out/vtessera-seller ./cmd/vtessera-seller
+
+# ---- runtime --------------------------------------------------------------
+
+FROM docker.io/library/alpine:3.21
+
+# ca-certificates: the seller makes outbound TLS calls to the marketplace.
+RUN apk add --no-cache ca-certificates tzdata \
+ && adduser -D -u 10001 -h /data seller \
+ && mkdir -p /data \
+ && chown seller:seller /data
+
+COPY --from=build /out/vtessera-seller /usr/local/bin/vtessera-seller
+
+# Never run a network server as root. The process only needs to write /data.
+USER seller
+
+ENV SELLER_KEY_FILE=/data/seller-key.json
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/vtessera-seller"]

@@ -1,16 +1,19 @@
 BINARY := bin/vtessera
 SEED_BINARY := bin/vtessera-seed
+SELLER_BINARY := bin/vtessera-seller
 PKG := ./...
 GO ?= go
 IMAGE ?= vtessera:local
 SEED_IMAGE ?= ghcr.io/douglasdemaio/vtessera-seed
 SEED_TAG ?= 0.1.0
+SELLER_IMAGE ?= ghcr.io/douglasdemaio/vtessera-seller
+SELLER_TAG ?= 0.1.0
 MCP_IMAGE ?= ghcr.io/douglasdemaio/vtessera-mcp
 MCP_TAG ?= 0.1.0
 
 # The validator-backed suite is build-tagged so the hermetic suite never needs a
 # running validator. VTESSERA_TEST_RPC_URL points it at a local test validator.
-.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart examples example-buyer image image-run fly-deploy fly-verify fly-sandbox-deploy fly-sandbox-verify sandbox-reset preflight-live seed-build seed-smoke seed-image seed-fly-deploy mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push mcp-fly-deploy
+.PHONY: all build run test race test-solana test-devnet validator validator-off vet fmt lint tidy clean smoke quickstart examples example-buyer image image-run fly-deploy fly-verify fly-sandbox-deploy fly-sandbox-verify sandbox-reset preflight-live seed-build seed-smoke seed-image seed-fly-deploy seller-build seller-image seller-fly-deploy mcp-build mcp-test mcp-fmt mcp-vet mcp-tidy mcp-image mcp-image-run mcp-image-push mcp-fly-deploy
 
 # mcp/ is a separate module (see AGENTS.md), so ./... does not reach it. Its checks
 # are wired in here rather than left to memory: a nested module that nothing builds
@@ -24,6 +27,11 @@ build:
 # keys, which the marketplace must never have, so it is built and run on its own.
 seed-build:
 	$(GO) build -trimpath -o $(SEED_BINARY) ./cmd/vtessera-seed
+
+# The standing seller is the other client binary that holds an agent key: it
+# publishes an offer and answers routed tasks, so it is built and run on its own.
+seller-build:
+	$(GO) build -trimpath -o $(SELLER_BINARY) ./cmd/vtessera-seller
 
 run:
 	$(GO) run ./cmd/vtessera --session-secret $(or $(VTESSERA_SESSION_SECRET),0123456789abcdef0123456789abcdef)
@@ -170,6 +178,18 @@ seed-image:
 # in fly.seed.toml. Set FLY_API_TOKEN first.
 seed-fly-deploy:
 	fly deploy -c fly.seed.toml --ha=false
+
+# The seller's image, built from its own Containerfile because it is a client of
+# the marketplace. `.` is the build context because it imports the service's own
+# modules.
+seller-image:
+	podman build -t $(SELLER_IMAGE):$(SELLER_TAG) -t $(SELLER_IMAGE):latest -f Containerfile.seller .
+
+# The seller is its own Fly app (fly.seller.toml), with its own key volume.
+# Selling against the sandbox is the same target with the base URL changed in
+# fly.seller.toml. Set FLY_API_TOKEN first.
+seller-fly-deploy:
+	fly deploy -c fly.seller.toml --ha=false
 
 # podman defaults to the OCI image format, which has no HEALTHCHECK field, so it
 # drops the directive with a warning and the container reports no health status.
