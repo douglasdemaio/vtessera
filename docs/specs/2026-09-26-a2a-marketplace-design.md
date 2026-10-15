@@ -206,6 +206,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 - `GET /v1/agents/{id}/attestation`, `GET /v1/offers/{id}/attestation` — whether a stored card or offer signature still verifies against the marketplace's own key and, where present, the agent's own key.
 - `GET /v1/agents/{id}/capabilities` — an agent's last recorded capability probe, if any (`NOT_PROBED` otherwise). Reading a probe result is public, the way reading an attestation is.
 - `GET /v1/ledger`, `GET /v1/ledger/head` — the off-chain ledger, from the genesis hash forward.
+- `GET /v1/receipts` — the newest delivered trades' signed tessera, newest first, with a `limit` (default 50, max 200) and a `truncated` flag. Each entry carries the JWS beside the claims this deployment reads out of it, so a reader re-derives the signature rather than trusting the listing.
 - `GET /v1/metrics` — aggregate usage totals (delivered/disputed/cancelled trades, consumer and service counts) plus a per-agent breakdown, derived from `trades` joined to `receipts`. A `disputed` trade that an operator resolved still counts under `disputed`. No auth: the underlying data is already public via `/v1/ledger`.
 - `POST /agp/route` — AGP intent routing (JSON-RPC 2.0, `agp/route_intent`).
 - `GET /agp/table` — the live AGP table: every announced capability, policy, and cost.

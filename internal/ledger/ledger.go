@@ -38,6 +38,7 @@ type Store interface {
 	ListLedgerEntries(ctx context.Context) ([]domain.LedgerEntry, error)
 	SaveReceipt(ctx context.Context, r domain.Receipt) error
 	GetReceiptByTrade(ctx context.Context, tradeID string) (domain.Receipt, error)
+	ListReceipts(ctx context.Context, limit int) ([]domain.Receipt, error)
 }
 
 type Ledger struct {
@@ -202,6 +203,49 @@ func (l *Ledger) Receipt(ctx context.Context, tradeID string) (domain.Receipt, e
 
 func (l *Ledger) Entries(ctx context.Context) ([]domain.LedgerEntry, error) {
 	return l.store.ListLedgerEntries(ctx)
+}
+
+// PublishedReceipt is a delivered trade's receipt as the marketplace publishes
+// it: the signed tessera beside the claims this deployment reads out of it. The
+// signature is the thing a verifier checks; the claims are what the issuer says
+// it means, offered so a reader can compare the two rather than take either on
+// faith. valid is this marketplace's own verdict — a reader that re-derives the
+// signature should reach the same answer, and one that does not is the point of
+// publishing the JWS.
+type PublishedReceipt struct {
+	TradeID         string         `json:"tradeId"`
+	JWS             string         `json:"jws"`
+	VerificationKey string         `json:"verificationKey"`
+	Valid           bool           `json:"valid"`
+	Claims          *TesseraClaims `json:"claims,omitempty"`
+	IssuedAt        time.Time      `json:"issuedAt"`
+}
+
+// RecentReceipts lists the newest issued receipts and verifies each against the
+// keys this marketplace trusts, so the listing cannot advertise a receipt that
+// does not check out. A receipt that fails verification is still returned, with
+// valid false and no claims: dropping it silently would hide a broken signature,
+// which is the one thing a public receipt listing exists to expose.
+func (l *Ledger) RecentReceipts(ctx context.Context, limit int) ([]PublishedReceipt, error) {
+	receipts, err := l.store.ListReceipts(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PublishedReceipt, 0, len(receipts))
+	for _, r := range receipts {
+		published := PublishedReceipt{
+			TradeID:         r.TradeID,
+			JWS:             r.JWS,
+			VerificationKey: l.SignerKeyID(r.JWS),
+			IssuedAt:        r.IssuedAt,
+		}
+		if claims, err := l.Verify(r.JWS); err == nil {
+			published.Valid = true
+			published.Claims = claims
+		}
+		out = append(out, published)
+	}
+	return out, nil
 }
 
 // signClaims signs a tessera and names the signing key in the JOSE header.

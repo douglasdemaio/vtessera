@@ -116,6 +116,35 @@ func (s *Store) GetReceiptByTrade(ctx context.Context, tradeID string) (domain.R
 	return r, nil
 }
 
+// ListReceipts returns issued receipts newest first. Ordering is by the ledger
+// entry's sequence rather than the receipt's created_at, because a batch of
+// receipts issued in the same instant (the reconciler can settle several at once)
+// would otherwise order arbitrarily; the sequence is the exact order they were
+// anchored, which is the order a reader wants.
+func (s *Store) ListReceipts(ctx context.Context, limit int) ([]domain.Receipt, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT r.id, r.trade_id, r.jws, r.created_at
+		 FROM receipts r JOIN ledger_entries le ON le.trade_id = r.trade_id
+		 ORDER BY le.seq DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.Receipt{}
+	for rows.Next() {
+		var (
+			r    domain.Receipt
+			crea int64
+		)
+		if err := rows.Scan(&r.ID, &r.TradeID, &r.JWS, &crea); err != nil {
+			return nil, err
+		}
+		r.IssuedAt = fromNanos(crea)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) CreateChallenge(ctx context.Context, c domain.Challenge) error {
 	return s.write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,

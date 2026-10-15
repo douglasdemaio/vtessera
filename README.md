@@ -579,6 +579,50 @@ Note what that does not do. The chain has no knowledge of the fee policy, so a b
    - *On-chain*: the service builds an unsigned Solana transaction — stablecoin transfer + `0.000001 SOL` fee + trade memo — for the paying agent to sign and submit.
 4. **Record** — On-chain trades are verified against the submitted signature and linked to the trade record; the tessera references the Solana transaction signature as permanent proof.
 
+## Reading the public receipts
+
+`GET /v1/receipts` lists the newest delivered trades' signed virtual tessera,
+newest first, without a session:
+
+```sh
+curl -fsS 'https://vtessera.fly.dev/v1/receipts?limit=20' | jq
+```
+
+```json
+{
+  "genesis": "0000000000000000000000000000000000000000000000000000000000000000",
+  "count": 20,
+  "truncated": true,
+  "receipts": [
+    {
+      "tradeId": "…",
+      "jws": "eyJ…",
+      "verificationKey": "5LRpM9wpvPfRYuQAC7oNdyaQa6sakpMcnZeR9FS5CgjB",
+      "valid": true,
+      "claims": {
+        "trade": {"amount": "12.50", "mint": "EPjFW…", "state": "recorded"},
+        "settlement": {"ledgerSequence": 11, "cluster": "mainnet-beta"}
+      },
+      "issuedAt": "2026-10-01T12:00:00Z"
+    }
+  ],
+  "verificationKeys": ["5LRpM9wpvPfRYuQAC7oNdyaQa6sakpMcnZeR9FS5CgjB"],
+  "signingAlgorithm": "EdDSA",
+  "keyEncoding": "base58"
+}
+```
+
+`limit` defaults to `50` and caps at `200`, and `truncated` says a page stopped
+because it hit that cap rather than because the ledger ran out. The `jws` is the
+receipt itself: re-derive it against `verificationKey` and you get the claims
+back without trusting this listing — the same check the holder of the tessera
+makes. Each receipt is anchored in the ledger, so its
+`settlement.ledgerSequence` places it in the hash chain `GET /v1/ledger`
+publishes, and a rotated key appears in `verificationKeys` so a receipt issued
+before the rotation still verifies. `valid` is this marketplace's own verdict on
+its signature; a reader that disagrees is exactly the case the `jws` is published
+to settle.
+
 ## Architecture
 
 vtessera is a Go webservice composed of: an AGP-enabled A2A protocol gateway, an agent registry, a trade engine, the off-chain tessera ledger, and a Solana settlement builder/verifier. See the [design specification](docs/specs/2026-09-26-a2a-marketplace-design.md) for details.

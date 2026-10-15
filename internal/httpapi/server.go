@@ -32,6 +32,14 @@ const (
 	codeMethodNotFound = -32601
 )
 
+// receiptsDefaultLimit and receiptsMaxLimit bound GET /v1/receipts, which is
+// public and needs no session. A cap rather than an unbounded scan keeps the
+// listing from growing with every trade the deployment has ever settled.
+const (
+	receiptsDefaultLimit = 50
+	receiptsMaxLimit     = 200
+)
+
 type Server struct {
 	registry      *registry.Service
 	trades        *trade.Service
@@ -241,6 +249,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/tesseras/{tradeID}", s.authed(s.handleTessera))
 	s.mux.HandleFunc("GET /v1/ledger", s.handleLedger)
 	s.mux.HandleFunc("GET /v1/ledger/head", s.handleLedgerHead)
+	s.mux.HandleFunc("GET /v1/receipts", s.handleListReceipts)
 	s.mux.HandleFunc("GET /v1/metrics", s.handleMetrics)
 	s.mux.HandleFunc("POST /v1/auth/challenge", s.handleChallenge)
 	s.mux.HandleFunc("POST /v1/auth/verify", s.handleVerify)
@@ -311,6 +320,7 @@ func (s *Server) buildAgentCard() map[string]any {
 			"metrics":    s.publicBaseURL + "/v1/metrics",
 			"tokens":     s.publicBaseURL + "/v1/tokens",
 			"ledgerHead": s.publicBaseURL + "/v1/ledger/head",
+			"receipts":   s.publicBaseURL + "/v1/receipts",
 			"health":     s.publicBaseURL + "/healthz",
 		}
 	}
@@ -892,6 +902,47 @@ func (s *Server) handleLedgerHead(w http.ResponseWriter, r *http.Request) {
 		body["head"] = entries[len(entries)-1]
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// handleListReceipts publishes the newest delivered trades' signed receipts.
+//
+// The ledger already exposes the record behind each entry; what it does not carry
+// is the signature. This is that signature, with the claims the marketplace reads
+// out of it, so a directory can re-derive the verification itself rather than
+// trust the listing. It is public and takes no session for the same reason the
+// ledger does: a receipt is issued to both parties and proves a trade they
+// already know about, and requiring a session to read one would let only the
+// agent that holds it present it.
+func (s *Server) handleListReceipts(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = receiptsDefaultLimit
+	}
+	if limit > receiptsMaxLimit {
+		limit = receiptsMaxLimit
+	}
+	// One past the page tells an exact final page from a truncated one: a
+	// listing that stopped because it ran out is a complete answer, and one that
+	// stopped because it hit the cap is not.
+	receipts, err := s.ledger.RecentReceipts(r.Context(), limit+1)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	truncated := len(receipts) > limit
+	if truncated {
+		receipts = receipts[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"genesis":          domain.GenesisHash,
+		"count":            len(receipts),
+		"truncated":        truncated,
+		"receipts":         receipts,
+		"verificationKey":  s.ledger.VerificationKey(),
+		"verificationKeys": s.ledger.VerificationKeys(),
+		"signingAlgorithm": "EdDSA",
+		"keyEncoding":      "base58",
+	})
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

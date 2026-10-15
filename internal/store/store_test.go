@@ -508,6 +508,44 @@ func TestLedgerChainAndReceipt(t *testing.T) {
 	}
 }
 
+func TestListReceiptsReturnsNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	hashOf := func(seq int64, prev, payloadHash string) string {
+		return "h-" + prev + "-" + payloadHash
+	}
+	prev := domain.GenesisHash
+	for _, id := range []string{"t1", "t2", "t3"} {
+		entry, err := s.AppendLedgerEntry(ctx, domain.LedgerAppend{
+			TradeID: id, Payload: []byte(`{}`), PayloadHash: "p-" + id, PrevHash: prev, CreatedAt: time.Now().UTC(),
+		}, hashOf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prev = entry.Hash
+		if err := s.SaveReceipt(ctx, domain.Receipt{ID: "r-" + id, TradeID: id, JWS: "jws-" + id, IssuedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := s.ListReceipts(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("receipts = %d, want 3", len(all))
+	}
+	if all[0].TradeID != "t3" || all[1].TradeID != "t2" || all[2].TradeID != "t1" {
+		t.Errorf("order = [%s %s %s], want newest first [t3 t2 t1]", all[0].TradeID, all[1].TradeID, all[2].TradeID)
+	}
+	page, err := s.ListReceipts(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].TradeID != "t3" {
+		t.Errorf("limit 1 = %+v, want just the newest t3", page)
+	}
+}
+
 func TestChallengeIsSingleUse(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
