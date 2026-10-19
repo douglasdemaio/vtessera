@@ -362,7 +362,7 @@ func TestSeedClosesItsOffersWhenAskedOnExit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- seeder.Run(ctx) }()
-	waitForOpenOffers(t, f, len(testCatalog()))
+	waitForPublishedOffers(t, seeder, testCatalog())
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("Run: %v", err)
@@ -372,16 +372,35 @@ func TestSeedClosesItsOffersWhenAskedOnExit(t *testing.T) {
 	}
 }
 
-func waitForOpenOffers(t *testing.T, f *fakeMarketplace, want int) {
+// waitForPublishedOffers blocks until the seeder has recorded a live offer for
+// every listing. It reads the seeder's own bookkeeping rather than the fake
+// marketplace's, because the seeder records a listing only once that listing's
+// publish request has returned. A test that cancelled as soon as the marketplace
+// had the offers would abort the very pass it means to observe: the second publish
+// would be cut off mid-flight, Run would report the cancellation as a failed pass,
+// and close-on-exit would have nothing recorded to close.
+func waitForPublishedOffers(t *testing.T, s *Seeder, listings []Listing) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(f.openOffers()) >= want {
+		if recordedOffers(s, listings) == len(listings) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("only %d offers appeared, want %d", len(f.openOffers()), want)
+	t.Fatalf("the seeder recorded an offer for %d of %d listings before the deadline", recordedOffers(s, listings), len(listings))
+}
+
+// recordedOffers counts the listings the seeder has published and not yet
+// replaced, read from the seeder rather than the marketplace.
+func recordedOffers(s *Seeder, listings []Listing) int {
+	published := 0
+	for _, listing := range listings {
+		if id, ok := s.openOffer(listing.Name); ok && id != "" {
+			published++
+		}
+	}
+	return published
 }
 
 func TestOpenKeyringRefusesAnUnknownVersion(t *testing.T) {
