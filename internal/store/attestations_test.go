@@ -49,6 +49,50 @@ func TestAProbeResultRoundTripsWithItsAttestation(t *testing.T) {
 	}
 }
 
+// MarketplaceSignatureFor is the registry's path to re-sign an existing card
+// without reading the agent's own signature it does not touch, so it has to
+// return the marketplace's attestation on its own, independent of CardAttestation.
+func TestMarketplaceSignatureForReturnsOnlyTheMarketplacesOwnAttestation(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	key := attestSigner(t)
+	market := attestSigner(t)
+
+	agent := seedAttestAgent(t, s, key)
+	sig, err := key.SignCard(attestCard(agent), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	marketSig, err := market.AttestCard(attestCard(agent), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAgentCard(ctx, agent, &sig, marketSig, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, found, err := s.MarketplaceSignatureFor(ctx, agent.ID)
+	if err != nil || !found {
+		t.Fatalf("MarketplaceSignatureFor = %v, %v; want a record", found, err)
+	}
+	if got.Value != marketSig.Value {
+		t.Errorf("Value = %q, want %q", got.Value, marketSig.Value)
+	}
+}
+
+// An agent with no attestation row at all — registered before attestations
+// existed — has no marketplace signature to return either, and the caller must
+// be able to tell that apart from an error.
+func TestMarketplaceSignatureForAnUnattestedAgentReportsNoRecord(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	agent := seedAttestAgent(t, s, attestSigner(t))
+
+	if _, found, err := s.MarketplaceSignatureFor(ctx, agent.ID); err != nil || found {
+		t.Errorf("MarketplaceSignatureFor = %v, %v, want no record and no error", found, err)
+	}
+}
+
 // An agent that has never been probed is not the same as an agent that failed its
 // probe, and a reader has to be able to tell them apart.
 func TestAnAgentThatHasNeverBeenProbedHasNoProbeRecord(t *testing.T) {
