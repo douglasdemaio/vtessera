@@ -231,6 +231,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 - `POST /v1/admin/agents/{id}/retire`, `POST /v1/admin/agents/{id}/restore`, `GET /v1/admin/agents/{id}/retirement` — withdraw an agent's registration and put it back.
 - `POST /v1/admin/agents/{id}/probe` — run a capability probe against an agent's declared endpoint on the operator's say-so, since it spends the deployment's egress.
 - `POST /v1/admin/trades/{id}/resolve` — close a `disputed` trade to `resolved`, recording a `released` or `upheld` verdict. The only route that can end a dispute, since neither party to one can.
+- `GET /v1/admin/trades/{id}` — the operator's read of a trade and its full event history, including a dispute's reason and verdict, without reading the database. Takes the token, never an agent session, since the operator is the one actor who is neither party.
 
 ## 9. Security
 
