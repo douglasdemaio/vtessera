@@ -49,9 +49,9 @@ var (
 	// ErrChainUnreachable means a check could not complete because the node
 	// could not be reached. It is never a mint fault: reporting "wrong" for a
 	// rate-limited request sends an operator chasing a problem that does not
-	// exist. It was previously called ErrChainUnreachable, which described a
-	// fee-wallet condition and nothing else — the name pointed an operator at
-	// the one subsystem the fault was never in.
+	// exist. It was previously called ErrFeeWalletUnreachable, which described
+	// a fee-wallet condition and nothing else — the name pointed an operator
+	// at the one subsystem the fault was never in.
 	ErrChainUnreachable = errors.New("the chain could not be consulted")
 )
 
