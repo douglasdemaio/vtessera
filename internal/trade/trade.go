@@ -419,8 +419,9 @@ func (s *Service) checkSpend(ctx context.Context, buyerAgentID string, amount mo
 	}
 	policy := *s.limits
 	effective := policy.Effective(ctx, buyerAgentID)
+	prices := policy.NewPriceCache()
 
-	value, err := policy.USDValue(amount, mint)
+	value, err := prices.USDValue(amount, mint)
 	if err != nil {
 		if errors.Is(err, limits.ErrNoRate) {
 			return fmt.Errorf("%w: %s", ErrMintUnpriced, mint)
@@ -443,7 +444,7 @@ func (s *Service) checkSpend(ctx context.Context, buyerAgentID string, amount mo
 	}
 	committed := value
 	for _, row := range rows {
-		rowValue, err := policy.USDValue(row.Amount, row.Mint)
+		rowValue, err := prices.USDValue(row.Amount, row.Mint)
 		if err != nil {
 			// A committed trade in a mint that has since lost its rate cannot be
 			// counted, and counting it as zero would understate the buyer's
@@ -502,9 +503,10 @@ func (s *Service) CommittedSpendUSD(ctx context.Context, buyerAgentID string) (u
 	if err != nil {
 		return 0, err
 	}
+	prices := policy.NewPriceCache()
 	var total uint64
 	for _, row := range rows {
-		value, err := policy.USDValue(row.Amount, row.Mint)
+		value, err := prices.USDValue(row.Amount, row.Mint)
 		if err != nil {
 			if errors.Is(err, limits.ErrNoRate) {
 				return 0, fmt.Errorf("%w: this agent has committed spend in %s, which has no rate", ErrMintUnpriced, row.Mint)

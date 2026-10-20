@@ -90,6 +90,39 @@ func TestAnUnpricedMintHasNoUSDValue(t *testing.T) {
 	}
 }
 
+func TestAPriceCacheAgreesWithUSDValue(t *testing.T) {
+	p := limits.DefaultPolicy(limits.DefaultRates())
+	prices := p.NewPriceCache()
+
+	for _, tc := range []struct {
+		amount string
+		mint   string
+	}{
+		{"1", usdcMainnet},
+		{"5.00", usdcMainnet},
+		// A second amount in the same mint exercises the cached rate, not just
+		// the first lookup.
+		{"1234.567891", usdcMainnet},
+		{"12.50", eurc},
+	} {
+		want, err := p.USDValue(money.MustParse(tc.amount), tc.mint)
+		if err != nil {
+			t.Fatalf("USDValue(%s, %s): %v", tc.amount, tc.mint, err)
+		}
+		got, err := prices.USDValue(money.MustParse(tc.amount), tc.mint)
+		if err != nil {
+			t.Fatalf("PriceCache.USDValue(%s, %s): %v", tc.amount, tc.mint, err)
+		}
+		if got != want {
+			t.Errorf("PriceCache.USDValue(%s, %s) = %d, want %d (USDValue)", tc.amount, tc.mint, got, want)
+		}
+	}
+
+	if _, err := prices.USDValue(money.MustParse("1.00"), "9n4xM2fPP91Zm3fDc7rT2QkWrB1sRdVvNcR6cMDcyGDQ"); !errors.Is(err, limits.ErrNoRate) {
+		t.Fatalf("PriceCache.USDValue for an unpriced mint = %v, want ErrNoRate", err)
+	}
+}
+
 func TestAMintPricedAtZeroIsRefusedRatherThanTreatedAsFree(t *testing.T) {
 	rates := limits.Rates{}
 	// Add rejects a zero rate outright, which is the point: a free mint would

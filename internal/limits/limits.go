@@ -354,6 +354,46 @@ func (p Policy) USDValue(amount money.Amount, mint string) (uint64, error) {
 	return scaleToUSD(units, perToken), nil
 }
 
+// PriceCache memoizes each mint's parsed micro-USD rate, so a caller pricing
+// many rows against the same policy — a buyer's committed spend, row by row —
+// parses a given mint's declared rate once rather than re-parsing the same
+// decimal string on every row that happens to share it.
+type PriceCache struct {
+	policy Policy
+	micro  map[string]uint64
+}
+
+// NewPriceCache returns a cache of USDValue results for repeated lookups
+// against this policy's rate table within one request.
+func (p Policy) NewPriceCache() *PriceCache {
+	return &PriceCache{policy: p, micro: make(map[string]uint64)}
+}
+
+// USDValue is Policy.USDValue, but reuses this cache's already-parsed rate for
+// a mint instead of re-parsing its declared USD rate on every call.
+func (c *PriceCache) USDValue(amount money.Amount, mint string) (uint64, error) {
+	rate, ok := c.policy.rates.Lookup(mint)
+	if !ok {
+		return 0, fmt.Errorf("%w: %s", ErrNoRate, mint)
+	}
+	units, err := amount.BaseUnits(int(rate.Decimals))
+	if err != nil {
+		return 0, fmt.Errorf("amount %s for %s: %w", amount, mint, err)
+	}
+	perToken, cached := c.micro[mint]
+	if !cached {
+		perToken, err = toMicro(rate.USD)
+		if err != nil {
+			return 0, fmt.Errorf("rate for %s: %w", mint, err)
+		}
+		c.micro[mint] = perToken
+	}
+	if perToken == 0 {
+		return 0, fmt.Errorf("%w: %s is priced at zero", ErrRateInvalid, mint)
+	}
+	return scaleToUSD(units, perToken), nil
+}
+
 // usdScaleFactor is 10^USDScale, the divisor that turns a micro-USD quantity into
 // a stored USD quantity. It is derived rather than written as a literal so that
 // changing USDScale cannot leave the two disagreeing.
