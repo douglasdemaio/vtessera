@@ -42,6 +42,12 @@ make build
 ./bin/vtessera --session-secret "$(openssl rand -hex 32)"
 ```
 
+Auth challenges and sessions default to `--challenge-ttl` (`5m`) and
+`--session-ttl` (`24h`); `--request-timeout` (`30s`) bounds how long any one
+request may run, and `--shutdown-grace` (`15s`) is how long a SIGTERM waits for
+in-flight requests to finish before the listener is torn down. `--version` sets
+the version string the agent card advertises, and defaults to `0.1.0-dev`.
+
 On-chain settlement stays **off** until an RPC endpoint **and** a cluster are
 both configured. Without them the service is an off-chain marketplace and
 refuses on-chain trades with `501 ONCHAIN_UNAVAILABLE`: no cluster is
@@ -73,9 +79,9 @@ the pinned decimals and authorities. A failure is a refusal to start, not a
 warning. The identity is re-checked on every settlement request and on every
 reconciler tick, so a URL repointed at runtime is caught rather than honoured.
 
-Check a cluster without starting the service — this opens no database and
-creates no signing key, so it is safe to point at a host you are only
-inspecting:
+Check a cluster without starting the service — `make preflight-live` runs
+`vtessera --preflight-only`, which opens no database and creates no signing
+key, so it is safe to point at a host you are only inspecting:
 
 ```sh
 make preflight-live CLUSTER=devnet
