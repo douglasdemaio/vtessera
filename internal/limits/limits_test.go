@@ -113,6 +113,27 @@ func TestAMissingRateIsNamedAtStartup(t *testing.T) {
 	}
 }
 
+func TestStringRendersRatesSortedByMint(t *testing.T) {
+	rates := limits.Rates{}
+	// Added out of sorted order, so the test would fail on an unsorted render.
+	if err := rates.Add(eurc, limits.Rate{Decimals: 6, USD: money.MustParse("1.00")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rates.Add(usdcMainnet, limits.Rate{Decimals: 6, USD: money.MustParse("1.00")}); err != nil {
+		t.Fatal(err)
+	}
+	want := usdcMainnet + "=1.00 (6dp), " + eurc + "=1.00 (6dp)"
+	if got := rates.String(); got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+}
+
+func TestStringOfEmptyRatesIsEmpty(t *testing.T) {
+	if got := (limits.Rates{}).String(); got != "" {
+		t.Fatalf("String() of an empty table = %q, want empty", got)
+	}
+}
+
 func TestAnAddressThatCannotBeAMintIsARefusalNotAMiss(t *testing.T) {
 	rates := limits.Rates{}
 	// A typo in configuration must not become a rate that silently never matches
