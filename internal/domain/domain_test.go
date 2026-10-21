@@ -391,6 +391,20 @@ func TestSettlementStatusValid(t *testing.T) {
 	}
 }
 
+func TestResolutionValid(t *testing.T) {
+	cases := map[Resolution]bool{
+		ResolutionReleased: true,
+		ResolutionUpheld:   true,
+		"":                 false,
+		"perhaps":          false,
+	}
+	for r, want := range cases {
+		if got := r.Valid(); got != want {
+			t.Errorf("Resolution(%q).Valid() = %v, want %v", r, got, want)
+		}
+	}
+}
+
 func TestSettlementRequestLive(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
