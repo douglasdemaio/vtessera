@@ -93,8 +93,13 @@ because settlement there moves real value. Fee overrides are rejected on
 mainnet-beta, where the fee is fixed at 1000 lamports: far enough above zero to
 bind a settlement to a signature, and far below the 650,240 lamport rent
 exemption that made the previous 500,000 default fail on an unfunded wallet.
-Devnet and localnet accept overrides, which is what the local-validator suite
-runs on.
+Devnet and localnet accept overrides via `--fee-lamports` (`VTESSERA_FEE_LAMPORTS`)
+and `--fee-wallet` (`VTESSERA_FEE_WALLET`, the Solana address that receives the
+fee), which is what the local-validator suite runs on.
+
+`--blockhash-ttl` (`VTESSERA_BLOCKHASH_TTL`, default `90s`) is the advisory
+window during which an issued settlement transaction stays signable before the
+reconciler treats it as lapsed and releases the trade's reservation.
 
 `localnet` accepts only loopback endpoints unless `--localnet-allow-host` is
 given, and governs only the mints you declare in `--localnet-mints`. The public
