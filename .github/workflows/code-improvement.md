@@ -141,8 +141,22 @@ run works on that single outcome.
 `go vet ./...`, `go build ./...`, and `go test ./...`, captured before you
 started. Read it before choosing work.
 
-- If it shows a **failure** in any of those four, this run's scope is fixed:
-  fix that one failure and prove the same command now passes. Choose nothing else.
+- If it shows a **failure** in any of those four, decide first whether the
+  failure is deterministic or intermittent. A single `go test` run is one draw,
+  and this repository's suite has flaked before: a red baseline can be a lost
+  coin flip rather than a dirty workspace.
+  - Re-run the failing command more than once before treating it as the scope,
+    for example `go test ./... -count=3`. If it passes on a later attempt while
+    changing nothing, the failure is **flaky**.
+  - A **deterministic** failure fixes this run's scope: fix that one failure and
+    prove the same command now passes. Choose nothing else.
+  - A **flaky** failure does **not** fix the scope. Record it — the test name and
+    the run output — under `## Observed flakes` in the pull request body or, if
+    you are filing nothing, in the run summary, and take the scope from the
+    rotation below. An intermittent test is a candidate the rotation cannot see,
+    so naming it is the contribution the run can make here; do not silently
+    rewrite a flaky test to make a run green, and do not treat it as the dirty
+    workspace the prompt otherwise assumes.
 - If all four **pass**, take this run's scope from the rotation below.
 
 ## Rotation — avoid re-picking the same category
@@ -163,9 +177,18 @@ every category as unused and create it.
   and its hard constraints. Do not contradict it.
 - Before proposing anything, inspect recently closed pull requests from this
   workflow: `gh pr list --repo "$GITHUB_REPOSITORY" --state closed --limit 20
-  --json title,body,url`. A close marked *not planned*, or a rejecting review
-  comment, is a strong signal that change was unwanted. Do not re-propose it.
-  Choose something else, or `noop`.
+  --json title,body,url`. Note what that query returns and what it does **not**:
+  title, body and URL, with no close reason and no review comments. To read an
+  actual reason, list the closed PRs first, then query each one that matters:
+  `gh pr view <number> --json state,stateReason,reviews,comments`. A `stateReason`
+  of `NOT_PLANNED`, or a rejecting review, is a strong signal that change was
+  unwanted — do not re-propose it. Choose something else, or `noop`. If the
+  reason cannot be recovered, say so rather than inferring one from the title.
+- What a run **considered and did not file** is not recorded by the above: the
+  recently-closed-PRs read only protects against work a human already rejected,
+  not against work the run talked itself out of. When you decline a candidate,
+  name it (one line, and why) under `## Considered and not filed` in the pull
+  request body or the run summary, so a later run and a reviewer can see it.
 
 ## Hard constraints — DO NOT
 
@@ -206,7 +229,15 @@ If anything still fails, do not open a pull request. Fix it, or `noop`.
 
 - `create-pull-request` — open as a **draft**. The title MUST begin with
   `code-improvement: `. The body must state the problem, the rationale, the exact
-  commands run with their output, and what you deliberately did not do.
+  commands run with their output, and what you deliberately did not do. It must
+  also record the two things a reviewer otherwise cannot see, because they
+  happened before the pull request existed and the merge inherits them:
+  - the run IDs and commands treated as the baseline, and whether the baseline
+    was green or red (and if red, whether it was deterministic or flaky);
+  - any gate refusal from this session — a skipped step, a candidate declined
+    against a closed pull request, a `noop` considered.
+  State them plainly so that approving the change also means approving the
+  decisions it was standing on.
 - `push-to-pull-request-branch` — only to a branch this workflow created.
 - `merge-pull-request` — only for a pull request this workflow created, only
   once every required check has passed, and only after independent validation.
