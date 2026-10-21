@@ -83,10 +83,6 @@ func Message(challengeID, agentID, nonce string) []byte {
 	return []byte(fmt.Sprintf("%s\nchallenge:%s\nagent:%s\nnonce:%s", authDomain, challengeID, agentID, nonce))
 }
 
-func MessageFor(challenge domain.Challenge) []byte {
-	return Message(challenge.ID, challenge.AgentID, challenge.Nonce)
-}
-
 type Session struct {
 	Token     string    `json:"token"`
 	AgentID   string    `json:"agentId"`
