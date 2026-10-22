@@ -198,7 +198,7 @@ func (d Deps) checkMint(ctx context.Context, mint tokens.Token) (MintCheck, erro
 		return check, fmt.Errorf("%w: %s (%s) has no account on %s",
 			ErrMintMissing, mint.Address, mint.Symbol, d.Cluster)
 	}
-	if !info.Owner.Equals(mustTokenProgram()) {
+	if !info.Owner.Equals(tokenProgramKey) {
 		return check, fmt.Errorf("%w: %s is owned by %s, want %s",
 			ErrMintOwner, mint.Address, info.Owner, TokenProgram)
 	}
@@ -265,4 +265,7 @@ func describe(key *solana.PublicKey) string {
 	return key.String()
 }
 
-func mustTokenProgram() solana.PublicKey { return solana.MustPublicKeyFromBase58(TokenProgram) }
+// tokenProgramKey is TokenProgram parsed once. It is a constant string, so
+// re-parsing it on every mint check would repeat the same base58 decode for
+// no reason.
+var tokenProgramKey = solana.MustPublicKeyFromBase58(TokenProgram)

@@ -30,6 +30,11 @@ var (
 	ErrAuthorityDrifted = errors.New("settlement mint authority pin has drifted")
 )
 
+// tokenProgramKey is tokens.TokenProgram parsed once. It is a constant
+// string, so re-parsing it on every cache-miss fetch would repeat the same
+// base58 decode for no reason.
+var tokenProgramKey = solana.MustPublicKeyFromBase58(tokens.TokenProgram)
+
 // DefaultMintVerificationTTL bounds how long a mint observation is reused.
 //
 // Thirty seconds is the balance, and it is a balance between two failure modes.
@@ -244,7 +249,7 @@ func (v *MintVerifier) fetch(ctx context.Context, mint tokens.Token) (observatio
 		obs.fault = fmt.Sprintf("has no account on %s", v.cluster)
 		return obs, nil
 	}
-	if !info.Owner.Equals(solana.MustPublicKeyFromBase58(tokens.TokenProgram)) {
+	if !info.Owner.Equals(tokenProgramKey) {
 		obs.fault = fmt.Sprintf("is owned by %s, not %s", info.Owner, tokens.TokenProgram)
 		return obs, nil
 	}
