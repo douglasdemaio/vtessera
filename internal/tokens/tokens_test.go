@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/douglasdemaio/vtessera/internal/cluster"
+	"github.com/gagliardetto/solana-go"
 )
 
 const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -206,6 +207,45 @@ func TestNewRejectsDuplicateMints(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalid) {
 		t.Errorf("err = %v, want ErrInvalid for duplicate mint", err)
+	}
+}
+
+func TestMintAuthorityKeyAndFreezeAuthorityKey(t *testing.T) {
+	// An absent pin is a fact (this mint has no such authority), not an unknown,
+	// so it must come back as nil rather than an error preflight would have to
+	// special-case.
+	absent := Token{Address: usdc, Symbol: "USDC", Decimals: 6}
+	if got := absent.MintAuthorityKey(); got != nil {
+		t.Errorf("MintAuthorityKey() = %v, want nil for an absent pin", got)
+	}
+	if got := absent.FreezeAuthorityKey(); got != nil {
+		t.Errorf("FreezeAuthorityKey() = %v, want nil for an absent pin", got)
+	}
+
+	pinned := Token{
+		Address: usdc, Symbol: "USDC", Decimals: 6,
+		MintAuthority: usdc, FreezeAuthority: eurch,
+	}
+	wantMint, err := solana.PublicKeyFromBase58(usdc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pinned.MintAuthorityKey(); got == nil || *got != wantMint {
+		t.Errorf("MintAuthorityKey() = %v, want %v", got, wantMint)
+	}
+	wantFreeze, err := solana.PublicKeyFromBase58(eurch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pinned.FreezeAuthorityKey(); got == nil || *got != wantFreeze {
+		t.Errorf("FreezeAuthorityKey() = %v, want %v", got, wantFreeze)
+	}
+
+	// A malformed pin must not panic or propagate a parse error through what
+	// preflight treats as a plain comparison; it degrades to nil, same as absent.
+	malformed := Token{Address: usdc, Symbol: "USDC", Decimals: 6, MintAuthority: "not-base58"}
+	if got := malformed.MintAuthorityKey(); got != nil {
+		t.Errorf("MintAuthorityKey() = %v, want nil for a malformed pin", got)
 	}
 }
 
