@@ -224,7 +224,7 @@ The buyer's agent deserializes, verifies the instructions itself (its own defens
 - `GET /v1/tesseras/{tradeID}` — the signed tessera, its verification key, and its decoded claims.
 - `GET /v1/limits`, `PUT /v1/limits` — an agent's own spending caps and the deployment ceilings above them. The session decides whose cap is read or raised; there is no path value, so an agent cannot name another agent.
 
-**Phase 2 additions:** `POST /v1/trades/{id}/settlement`, `GET /v1/trades/{id}/settlement` (re-fetch an issued settlement request — lets a buyer whose client restarted see whether the unsigned transaction it holds is still live), `POST /v1/trades/{id}/confirm`, `GET /v1/tokens`, and the A2A `tasks/*` JSON-RPC lifecycle.
+**Phase 2 additions:** `POST /v1/trades/{id}/settlement`, `GET /v1/trades/{id}/settlement` (re-fetch an issued settlement request — lets a buyer whose client restarted see whether the unsigned transaction it holds is still live), `POST /v1/trades/{id}/confirm`, and `GET /v1/tokens`. The A2A `tasks/*` JSON-RPC lifecycle named in §3's component table was not picked up in Phase 2 either — it remains deferred, and the Phase 2 settlement record tracks it as unassigned.
 
 **Operator (admin bearer token, distinct from an agent session; registered only when the deployment configures one):**
 
