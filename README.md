@@ -42,6 +42,11 @@ make build
 ./bin/vtessera --session-secret "$(openssl rand -hex 32)"
 ```
 
+It listens on `--addr` (`VTESSERA_ADDR`, default `:8080`), stores its SQLite
+database at `--db` (`VTESSERA_DB`, default `file:vtessera.db`), and loads the
+marketplace's Ed25519 signing key from `--signer-key` (`VTESSERA_SIGNER_KEY`,
+default `data/signer.key`), creating one there on first boot if none exists.
+
 Auth challenges and sessions default to `--challenge-ttl` (`5m`) and
 `--session-ttl` (`24h`); `--request-timeout` (`30s`) bounds how long any one
 request may run, and `--shutdown-grace` (`15s`) is how long a SIGTERM waits for
