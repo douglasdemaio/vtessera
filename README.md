@@ -159,8 +159,9 @@ relist itself, and cannot edit the card it is listed under or publish offers in
 somebody else's name. Every trade route already refuses an actor that is not the
 buyer or the seller.
 
-There is no rate limiting here. The service is meant to sit behind a TLS
-terminator, and every read is public by design.
+Request rate limiting is on by default — see [Request rate limits](#request-rate-limits)
+below. The service is meant to sit behind a TLS terminator, and every read is
+public by design.
 
 ```sh
 make test   # unit and HTTP end-to-end tests
