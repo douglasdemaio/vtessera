@@ -864,14 +864,15 @@ func tesseraPayload(led *ledger.Ledger, jws string) map[string]any {
 	// its kid. After a rotation that is a retired key for every receipt issued
 	// before it, and advertising the current key instead would hand a verifier a
 	// key that does not verify the thing it is attached to.
+	claims, keyID, err := led.VerifyAndKeyID(jws)
 	payload := map[string]any{
 		"jws":              jws,
-		"verificationKey":  led.SignerKeyID(jws),
+		"verificationKey":  keyID,
 		"verificationKeys": led.VerificationKeys(),
 		"signingAlgorithm": "EdDSA",
 		"keyEncoding":      "base58",
 	}
-	if claims, err := led.Verify(jws); err == nil {
+	if err == nil {
 		payload["claims"] = claims
 	}
 	return payload

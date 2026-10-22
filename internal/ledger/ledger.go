@@ -233,13 +233,14 @@ func (l *Ledger) RecentReceipts(ctx context.Context, limit int) ([]PublishedRece
 	}
 	out := make([]PublishedReceipt, 0, len(receipts))
 	for _, r := range receipts {
+		claims, keyID, err := l.VerifyAndKeyID(r.JWS)
 		published := PublishedReceipt{
 			TradeID:         r.TradeID,
 			JWS:             r.JWS,
-			VerificationKey: l.SignerKeyID(r.JWS),
+			VerificationKey: keyID,
 			IssuedAt:        r.IssuedAt,
 		}
-		if claims, err := l.Verify(r.JWS); err == nil {
+		if err == nil {
 			published.Valid = true
 			published.Claims = claims
 		}
@@ -282,9 +283,27 @@ func (l *Ledger) candidateKeys(jws string) ([]ed25519.PublicKey, error) {
 }
 
 func (l *Ledger) Verify(jws string) (*TesseraClaims, error) {
+	claims, _, err := l.verifyWithKey(jws)
+	return claims, err
+}
+
+// VerifyAndKeyID verifies a tessera and reports the key that signed it in one
+// pass. A caller that wants both already has Verify and SignerKeyID pay for
+// their own parse of the JWS, and SignerKeyID's own fallback search repeats
+// the cryptographic check Verify just did; sharing the key a successful
+// verification already found avoids both.
+func (l *Ledger) VerifyAndKeyID(jws string) (*TesseraClaims, string, error) {
+	claims, key, err := l.verifyWithKey(jws)
+	if err != nil {
+		return nil, l.SignerKeyID(jws), err
+	}
+	return claims, l.signer.KeyID(key), nil
+}
+
+func (l *Ledger) verifyWithKey(jws string) (*TesseraClaims, ed25519.PublicKey, error) {
 	keys, err := l.candidateKeys(jws)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var lastErr error
 	for _, key := range keys {
@@ -293,12 +312,12 @@ func (l *Ledger) Verify(jws string) (*TesseraClaims, error) {
 			lastErr = err
 			continue
 		}
-		return claims, nil
+		return claims, key, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no trusted key verified the tessera")
 	}
-	return nil, fmt.Errorf("verify tessera: %w", lastErr)
+	return nil, nil, fmt.Errorf("verify tessera: %w", lastErr)
 }
 
 func verifyTesseraUnder(jws string, key ed25519.PublicKey) (*TesseraClaims, error) {
