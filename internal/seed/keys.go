@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 )
 
@@ -84,18 +83,6 @@ func (k *Keyring) Key(name string) (ed25519.PrivateKey, error) {
 		return nil, err
 	}
 	return key, nil
-}
-
-// Names lists the identities the keyring holds, sorted, for reporting.
-func (k *Keyring) Names() []string {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	names := make([]string, 0, len(k.keys))
-	for name := range k.keys {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // save replaces the file atomically: a temp file in the same directory, then
