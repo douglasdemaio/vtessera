@@ -79,7 +79,7 @@ func (l *rateLimiter) allow(key string, now time.Time) (bool, time.Duration) {
 		l.buckets[key] = b
 	} else {
 		if elapsed := now.Sub(b.last).Seconds(); elapsed > 0 {
-			b.tokens = math.Min(l.burst, b.tokens+elapsed*l.rps)
+			b.tokens = min(l.burst, b.tokens+elapsed*l.rps)
 			b.last = now
 		}
 	}
