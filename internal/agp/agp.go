@@ -227,12 +227,10 @@ func (t Table) Route(intent Intent) (RouteResult, error) {
 	if len(compliantRoutes) == 0 {
 		return RouteResult{}, fmt.Errorf("%w: %s matched %d route(s), none satisfied the constraints", ErrPolicyViolation, capability, len(candidates))
 	}
+	// candidates is t.Entries[capability], already sorted ascending by lessCost
+	// via sortEntries; filtering into compliantRoutes preserves that order, so
+	// the first entry is already the cheapest compliant route.
 	best := compliantRoutes[0]
-	for _, entry := range compliantRoutes[1:] {
-		if lessCost(entry, best) {
-			best = entry
-		}
-	}
 	result := RouteResult{
 		TargetCapability: capability,
 		Route:            best,
