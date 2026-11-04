@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -335,12 +336,7 @@ func (o Offer) validate() error {
 }
 
 func (o Offer) AcceptsMode(m SettlementMode) bool {
-	for _, candidate := range o.SettlementModes {
-		if candidate == m {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(o.SettlementModes, m)
 }
 
 type TradeState string
