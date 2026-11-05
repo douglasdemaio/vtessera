@@ -199,6 +199,46 @@ func TestPublishOfferIdempotency(t *testing.T) {
 	}
 }
 
+// TestPublishOfferWithExplicitIDReplaysOrConflicts covers the caller-supplied-ID
+// path, which the idempotency-key replay above never reaches: a client that
+// names its own offer ID gets the existing offer back only when the terms match
+// exactly, and a conflict otherwise, so that a taken ID can never silently
+// replace a seller's terms.
+func TestPublishOfferWithExplicitIDReplaysOrConflicts(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	if _, _, err := svc.Register(ctx, aliceKey, card("alice"), nil); err != nil {
+		t.Fatal(err)
+	}
+	offerID := uuid.NewString()
+	in := registry.NewOffer{
+		Direction:       domain.DirectionAsk,
+		Description:     "translate text",
+		Capabilities:    []string{"translate"},
+		PriceAmount:     "2.00",
+		PriceMint:       usdc,
+		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
+	}
+	first, isNew, err := svc.PublishOffer(ctx, aliceKey, in, "", offerID, nil)
+	if err != nil || !isNew {
+		t.Fatalf("PublishOffer = %v, %v", isNew, err)
+	}
+
+	again, isNew, err := svc.PublishOffer(ctx, aliceKey, in, "", offerID, nil)
+	if err != nil || isNew {
+		t.Fatalf("replay = %v, %v, want the same offer", isNew, err)
+	}
+	if again.ID != first.ID {
+		t.Errorf("replay returned %s, want %s", again.ID, first.ID)
+	}
+
+	changed := in
+	changed.PriceAmount = "3.00"
+	if _, _, err := svc.PublishOffer(ctx, aliceKey, changed, "", offerID, nil); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("PublishOffer with changed terms err = %v, want ErrConflict", err)
+	}
+}
+
 func TestSearchAndClose(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
