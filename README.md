@@ -761,9 +761,14 @@ agent ID from the path and never checked it against the session, so any
 authenticated agent could rewrite another agent's card — including the URL it is
 listed under — and publish offers that appeared in searches as that agent's.
 Both now require the path to be the caller's own. The threat model is at
-`docs/specs/2026-10-04-settlement-auth-threat-model.md`, and it names what is
-still open: the cap is per identity and identities are free, there is no rate
-limiting, and the marketplace signing key has no rotation path.
+`docs/specs/2026-10-04-settlement-auth-threat-model.md`; at the time, it named
+what was still open: the cap is per identity and identities are free, there was
+no rate limiting, and the marketplace signing key had no rotation path. Rate
+limiting and key rotation have since landed — see [Request rate
+limits](#request-rate-limits) and
+`docs/specs/2026-10-09-signing-key-rotation-design.md` — and the threat model
+has been updated to match; what it still lists as open is the cap being per a
+free identity and the rate limiter being in-memory and per-machine.
 
 Task 4: cards and offers can be signed, and the marketplace attests what it
 published. A card's own signature says the agent stands behind the card; the
