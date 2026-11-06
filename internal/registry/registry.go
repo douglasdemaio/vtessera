@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/attest"
@@ -654,13 +655,8 @@ func (s *Service) challenge() string {
 }
 
 func checkCurrencyAccepted(agent domain.Agent, mint string) error {
-	if len(agent.Card.Currencies) == 0 {
+	if len(agent.Card.Currencies) == 0 || slices.Contains(agent.Card.Currencies, mint) {
 		return nil
-	}
-	for _, accepted := range agent.Card.Currencies {
-		if accepted == mint {
-			return nil
-		}
 	}
 	return fmt.Errorf("%w: %s accepts %v", ErrCurrencyNotAccepted, agent.ID, agent.Card.Currencies)
 }
