@@ -1041,9 +1041,11 @@ func (s *Server) handleAGPRoute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, rpcError(req.ID, codeInternal, err.Error()))
 		return
 	}
-	result, err := table.Route(intent)
+	var result agp.RouteResult
 	if req.Method == agp.MethodRouteTask {
 		result, err = table.RouteTask(intent)
+	} else {
+		result, err = table.Route(intent)
 	}
 	if err != nil {
 		code := codeInternal
