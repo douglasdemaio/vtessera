@@ -290,7 +290,7 @@ wants that bounded declares a rate above par.
 | `--spend-cap-max-per-day` | `VTESSERA_SPEND_CAP_MAX_PER_DAY` | unset, so raising is refused |
 | `--spend-rates` | `VTESSERA_SPEND_RATES` | the governed stablecoins at par |
 | `--trade-expiry-sweep-interval` | `VTESSERA_TRADE_EXPIRY_SWEEP_INTERVAL` | `5m` |
-| `--trade-expiry-sweep-batch` | `VTESSERA_TRADE_EXPIRY_SWEEP_BATCH` | `100` |
+| `--trade-expiry-sweep-batch` | — (flag only) | `100` |
 | `--require-offer-attestation` | `VTESSERA_REQUIRE_OFFER_ATTESTATION` | off |
 | `--probe-timeout` | `VTESSERA_PROBE_TIMEOUT` | `5s` |
 | `--probe-max-response-bytes` | `VTESSERA_PROBE_MAX_RESPONSE_BYTES` | `65536` |
