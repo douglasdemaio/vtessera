@@ -358,6 +358,67 @@ func TestCapsAreOffUntilAPolicyIsWired(t *testing.T) {
 	}
 }
 
+// CommittedSpendUSD is what GET /v1/limits reports, and internal/httpapi's
+// tests only ever reach it through that handler, so this package's own
+// coverage of the arithmetic it owns was 0% despite it being well exercised
+// from the other side of the HTTP boundary. Asserted here directly, alongside
+// TestCapsAreOffUntilAPolicyIsWired above: the same "no policy" condition, but
+// for the read rather than the write.
+func TestCommittedSpendUSDIsZeroWithoutACapPolicy(t *testing.T) {
+	ctx := context.Background()
+	h := setup(t)
+
+	if _, _, err := h.svc.Create(ctx, buyerKey, h.offerID, domain.SettlementOffchain, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.svc.CommittedSpendUSD(ctx, buyerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Errorf("CommittedSpendUSD without a cap policy = %d, want 0: a service with no limits wired commits nothing", got)
+	}
+}
+
+func TestCommittedSpendUSDTracksAnOpenTradeUntilItIsCancelled(t *testing.T) {
+	ctx := context.Background()
+	h := capSetup(t, nil)
+	offerID := offerFor(t, h, "4.00")
+
+	tr, _, err := h.svc.Create(ctx, buyerKey, offerID, domain.SettlementOffchain, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.svc.CommittedSpendUSD(ctx, buyerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.FormatUSD(got) != "4.000000" {
+		t.Errorf("committed spend with one open trade = %s, want 4.000000", limits.FormatUSD(got))
+	}
+
+	// A different buyer's identity holds none of this: the figure is per agent,
+	// not per marketplace.
+	got, err = h.svc.CommittedSpendUSD(ctx, outsider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Errorf("an uninvolved agent's committed spend = %d, want 0", got)
+	}
+
+	if _, err := h.svc.Cancel(ctx, buyerKey, tr.ID, "not proceeding"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = h.svc.CommittedSpendUSD(ctx, buyerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Errorf("committed spend after cancel = %d, want 0: a released trade is not spend", got)
+	}
+}
+
 // acceptAt walks a trade to accepted, which is where a deadline starts running.
 func acceptAt(t *testing.T, h harness, offerID string) domain.Trade {
 	t.Helper()
