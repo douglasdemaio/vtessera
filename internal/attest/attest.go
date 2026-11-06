@@ -478,14 +478,14 @@ func (e *encoder) probeResults(name string, results []ProbeResult) {
 // order is making the same claim. An agent gets one canonical form to reproduce,
 // and an agent cannot dodge a changed signature by reordering its own JSON.
 func (e *encoder) skills(name string, skills []Skill) {
-	// The sort key is computed once per skill up front rather than inside the
-	// comparator: skillKey itself sorts and joins three tag lists, and a
-	// comparator that recomputed it on every call would redo that work
-	// O(n log n) times instead of O(n) for a value that never changes once a
-	// skill is fixed.
+	// The sort key and each field's sorted-unique form are computed once per
+	// skill up front rather than inside the comparator or recomputed again at
+	// emission: both uses need the same sorted tag/input/output lists, and
+	// computing them twice would redo that O(n log n) work for a value that
+	// never changes once a skill is fixed.
 	ordered := make([]skillWithKey, len(skills))
 	for i, skill := range skills {
-		ordered[i] = skillWithKey{skill: skill, key: skillKey(skill)}
+		ordered[i] = newSkillWithKey(skill)
 	}
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return ordered[i].key < ordered[j].key
@@ -499,26 +499,34 @@ func (e *encoder) skills(name string, skills []Skill) {
 		prefix := name + "." + strconv.Itoa(i)
 		e.field(prefix+".id", skill.ID)
 		e.field(prefix+".name", skill.Name)
-		e.list(prefix+".tags", sortedUnique(skill.Tags))
-		e.list(prefix+".inputModes", sortedUnique(skill.Input))
-		e.list(prefix+".outputModes", sortedUnique(skill.Output))
+		e.list(prefix+".tags", entry.tags)
+		e.list(prefix+".inputModes", entry.input)
+		e.list(prefix+".outputModes", entry.output)
 	}
 }
 
-// skillWithKey pairs a skill with its precomputed sort key, so sorting a list
-// of skills does not recompute that key on every comparison.
+// skillWithKey pairs a skill with its precomputed sort key and sorted-unique
+// field lists, so sorting a list of skills does not recompute that key on
+// every comparison and emitting the sorted list does not recompute the same
+// lists again.
 type skillWithKey struct {
-	skill Skill
-	key   string
+	skill               Skill
+	key                 string
+	tags, input, output []string
 }
 
-// skillKey is the sort key for a skill. ID alone is not enough: two skills can
-// share an ID and disagree on everything else, and sorting on ID alone would
-// leave their relative order down to the input, which is exactly the kind of
-// ambiguity the canonical form exists to remove.
-func skillKey(s Skill) string {
-	return strings.Join([]string{s.ID, s.Name, strings.Join(sortedUnique(s.Tags), "\x00"),
-		strings.Join(sortedUnique(s.Input), "\x00"), strings.Join(sortedUnique(s.Output), "\x00")}, "\x00")
+// newSkillWithKey builds a skill's sort key and sorted-unique field lists in
+// one pass. The key cannot be ID alone: two skills can share an ID and
+// disagree on everything else, and sorting on ID alone would leave their
+// relative order down to the input, which is exactly the kind of ambiguity
+// the canonical form exists to remove.
+func newSkillWithKey(s Skill) skillWithKey {
+	tags := sortedUnique(s.Tags)
+	input := sortedUnique(s.Input)
+	output := sortedUnique(s.Output)
+	key := strings.Join([]string{s.ID, s.Name, strings.Join(tags, "\x00"),
+		strings.Join(input, "\x00"), strings.Join(output, "\x00")}, "\x00")
+	return skillWithKey{skill: s, key: key, tags: tags, input: input, output: output}
 }
 
 func (e *encoder) bytes() []byte { return []byte(e.b.String()) }
