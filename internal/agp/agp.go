@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -185,12 +187,7 @@ func (t Table) sortEntries() {
 }
 
 func (t Table) Capabilities() []string {
-	out := make([]string, 0, len(t.Entries))
-	for capability := range t.Entries {
-		out = append(out, capability)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(t.Entries))
 }
 
 func (t Table) Fingerprint() string {
@@ -402,10 +399,5 @@ func normalizeValue(v any) any {
 }
 
 func sortedKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(m))
 }
