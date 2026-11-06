@@ -475,6 +475,24 @@ func TestMatchPolicyDefaultCaseComparesNormalizedValues(t *testing.T) {
 	}
 }
 
+func TestMatchPolicyRequiresPII(t *testing.T) {
+	if err := matchPolicy(PolicyRequiresPII, true, true); err != nil {
+		t.Errorf("announcing PII support when required should not error: %v", err)
+	}
+	if err := matchPolicy(PolicyRequiresPII, false, false); err != nil {
+		t.Errorf("neither side requiring PII should not error: %v", err)
+	}
+	if err := matchPolicy(PolicyRequiresPII, true, false); err == nil {
+		t.Error("requiring PII when the route does not support it should error")
+	}
+	if err := matchPolicy(PolicyRequiresPII, "not-a-bool", true); err == nil {
+		t.Error("an unconvertible want value should error")
+	}
+	if err := matchPolicy(PolicyRequiresPII, true, "not-a-bool"); err == nil {
+		t.Error("an unconvertible have value should error")
+	}
+}
+
 func TestMatchAnyOfPropagatesConversionErrors(t *testing.T) {
 	if err := matchAnyOf(PolicyCurrencies, 42, []any{"usdc"}); err == nil {
 		t.Error("an unconvertible want value should error")
