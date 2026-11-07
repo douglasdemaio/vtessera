@@ -915,6 +915,23 @@ func TestFullTradeLifecycleOverHTTP(t *testing.T) {
 	if ledgerView.Entries[0].PrevHash != domain.GenesisHash {
 		t.Errorf("first entry prevHash = %s, want the genesis hash", ledgerView.Entries[0].PrevHash)
 	}
+
+	body = buyer.do(http.MethodGet, "/v1/ledger/head", nil, false)
+	var head struct {
+		Genesis string             `json:"genesis"`
+		Head    domain.LedgerEntry `json:"head"`
+		Length  int64              `json:"length"`
+	}
+	decodeInto(t, body, &head)
+	if head.Genesis != domain.GenesisHash {
+		t.Errorf("head genesis = %s, want %s", head.Genesis, domain.GenesisHash)
+	}
+	if head.Length != int64(len(ledgerView.Entries)) {
+		t.Errorf("head length = %d, want %d", head.Length, len(ledgerView.Entries))
+	}
+	if head.Head.Hash != ledgerView.Entries[len(ledgerView.Entries)-1].Hash {
+		t.Errorf("head hash = %s, want %s", head.Head.Hash, ledgerView.Entries[len(ledgerView.Entries)-1].Hash)
+	}
 }
 
 type tesseraResult struct {
