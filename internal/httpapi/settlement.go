@@ -34,12 +34,13 @@ type confirmRequest struct {
 // exactly what was offered.
 func (s *Server) handleBuildSettlement(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	request, err := s.trades.BuildSettlement(r.Context(), agentFrom(r), id)
+	agentID := agentFrom(r)
+	request, err := s.trades.BuildSettlement(r.Context(), agentID, id)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	tr, err := s.trades.Get(r.Context(), agentFrom(r), id)
+	tr, err := s.trades.Get(r.Context(), agentID, id)
 	if err != nil {
 		writeError(w, err)
 		return

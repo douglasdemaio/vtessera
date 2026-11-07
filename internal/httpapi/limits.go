@@ -83,9 +83,10 @@ func (s *Server) handlePutLimits(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &in) {
 		return
 	}
+	agentID := agentFrom(r)
 	// An absent field means "leave this cap as it is", so a caller raising only
 	// the daily figure does not silently drop its per-trade cap to the default.
-	effective, err := s.trades.EffectiveLimits(r.Context(), agentFrom(r))
+	effective, err := s.trades.EffectiveLimits(r.Context(), agentID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -116,12 +117,12 @@ func (s *Server) handlePutLimits(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 		return
 	}
-	raised, err := s.trades.RaiseLimits(r.Context(), agentFrom(r), perTrade, perDay)
+	raised, err := s.trades.RaiseLimits(r.Context(), agentID, perTrade, perDay)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	committed, err := s.trades.CommittedSpendUSD(r.Context(), agentFrom(r))
+	committed, err := s.trades.CommittedSpendUSD(r.Context(), agentID)
 	if err != nil {
 		writeError(w, err)
 		return
