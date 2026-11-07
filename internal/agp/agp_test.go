@@ -325,6 +325,40 @@ func TestCostComparisonIsExact(t *testing.T) {
 	}
 }
 
+func TestLessCostTiesOnPathWhenParsedCostsMatch(t *testing.T) {
+	amount := money.MustParse("10")
+	first := RouteEntry{Path: "a", parsedCost: amount, hasParsedCost: true}
+	second := RouteEntry{Path: "b", parsedCost: amount, hasParsedCost: true}
+	if lessCost(second, first) {
+		t.Errorf("lessCost(%q, %q) = true, want false: equal parsed cost must tie-break on path", second.Path, first.Path)
+	}
+	if !lessCost(first, second) {
+		t.Errorf("lessCost(%q, %q) = false, want true: equal parsed cost must tie-break on path", first.Path, second.Path)
+	}
+}
+
+func TestLessCostFallsBackToFloatCostWhenEitherSideIsUnparsed(t *testing.T) {
+	parsed := RouteEntry{Path: "parsed", Cost: 100, parsedCost: money.MustParse("1"), hasParsedCost: true}
+	unparsed := RouteEntry{Path: "unparsed", Cost: 1}
+	if !lessCost(unparsed, parsed) {
+		t.Error("lessCost(unparsed, parsed) = false, want true: a missing parsed cost on either side must fall back to the float Cost field")
+	}
+	if lessCost(parsed, unparsed) {
+		t.Error("lessCost(parsed, unparsed) = true, want false")
+	}
+}
+
+func TestLessCostTiesOnPathWhenFloatCostsMatch(t *testing.T) {
+	first := RouteEntry{Path: "a", Cost: 5}
+	second := RouteEntry{Path: "b", Cost: 5}
+	if lessCost(second, first) {
+		t.Errorf("lessCost(%q, %q) = true, want false: equal float cost must tie-break on path", second.Path, first.Path)
+	}
+	if !lessCost(first, second) {
+		t.Errorf("lessCost(%q, %q) = false, want true: equal float cost must tie-break on path", first.Path, second.Path)
+	}
+}
+
 func TestTableFingerprintChangesWithTable(t *testing.T) {
 	now := time.Now()
 	first, err := NewRouting().BuildTable(context.Background(), source([]CapabilityAnnouncement{
