@@ -53,9 +53,8 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
-  copilot-requests: write
-engine: gemini
-model: gemini-3.8-flash
+engine: claude
+model: claude-sonnet-5
 tools:
   bash: true
   github:
@@ -98,7 +97,6 @@ safe-outputs:
   merge-pull-request:
   threat-detection:
     continue-on-error: false
-    engine: copilot
     retries: 2
 concurrency:
   group: code-improvement-${{ github.ref }}
