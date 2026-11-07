@@ -668,7 +668,7 @@ and the health check probes it like one.
 
 ## What is deployed
 
-`https://vtessera.fly.dev` — one `shared-cpu-1x` machine at 256 MB in `fra`, a
+`https://vtessera.fly.dev` — one `shared-cpu-1x` machine at 512 MB in `fra`, a
 1 GB encrypted volume at `/data`, Fly keeping five daily volume snapshots, and
 on-chain settlement enabled against `mainnet-beta` through Fly secrets.
 `verificationKey` is `5LRpM9wpvPfRYuQAC7oNdyaQa6sakpMcnZeR9FS5CgjB`.
