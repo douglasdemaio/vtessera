@@ -417,6 +417,47 @@ func TestAppendPropagatesHeadLookupError(t *testing.T) {
 	}
 }
 
+func TestHeadReturnsStoreHeadDirectly(t *testing.T) {
+	signer, err := GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := domain.LedgerEntry{Seq: 7, Hash: "head-hash"}
+	fs := &fakeLedgerStore{headEntry: want, headFound: true}
+	l := New(fs, signer)
+
+	got, found, err := l.Head(context.Background())
+	if err != nil {
+		t.Fatalf("Head() error = %v", err)
+	}
+	if !found {
+		t.Fatal("Head() found = false, want true")
+	}
+	if got.Seq != want.Seq || got.Hash != want.Hash {
+		t.Errorf("Head() = %+v, want %+v", got, want)
+	}
+}
+
+func TestHeadPropagatesNotFoundAndError(t *testing.T) {
+	signer, err := GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := &fakeLedgerStore{headFound: false}
+	l := New(fs, signer)
+
+	if _, found, err := l.Head(context.Background()); err != nil || found {
+		t.Errorf("Head() on empty ledger = (found=%v, err=%v), want (false, nil)", found, err)
+	}
+
+	wantErr := errors.New("head lookup failed")
+	fs = &fakeLedgerStore{headErr: wantErr}
+	l = New(fs, signer)
+	if _, _, err := l.Head(context.Background()); !errors.Is(err, wantErr) {
+		t.Errorf("Head() error = %v, want %v", err, wantErr)
+	}
+}
+
 func TestAppendRetriesOnStaleWriteThenSucceeds(t *testing.T) {
 	signer, err := GenerateSigner()
 	if err != nil {

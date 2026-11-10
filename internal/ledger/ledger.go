@@ -208,6 +208,9 @@ func (l *Ledger) Entries(ctx context.Context) ([]domain.LedgerEntry, error) {
 // Head returns the newest entry, and false for a ledger nothing has been
 // anchored in yet. Sequences are assigned as head+1 inside the append and no
 // entry is ever removed, so the head's sequence is also the chain's length.
+// Head returns the most recently appended entry without reading the rest of
+// the chain, which is all the ledger's head needs: the hash chain is
+// append-only, so the head's Seq already is the chain's length.
 func (l *Ledger) Head(ctx context.Context) (domain.LedgerEntry, bool, error) {
 	return l.store.HeadLedgerEntry(ctx)
 }
