@@ -917,6 +917,45 @@ func TestFullTradeLifecycleOverHTTP(t *testing.T) {
 	}
 }
 
+// The head is read on its own rather than by listing the ledger, so it has to
+// agree with the listing about what the last entry is and how long the chain is.
+func TestLedgerHeadAgreesWithTheLedgerItSummarises(t *testing.T) {
+	server, _ := setupServer(t)
+	seller := newAgent(t, server)
+	buyer := newAgent(t, server)
+
+	var head struct {
+		Genesis string              `json:"genesis"`
+		Head    *domain.LedgerEntry `json:"head"`
+		Length  int64               `json:"length"`
+	}
+	decodeInto(t, buyer.do(http.MethodGet, "/v1/ledger/head", nil, false), &head)
+	if head.Head != nil || head.Length != 0 || head.Genesis != domain.GenesisHash {
+		t.Fatalf("empty ledger head = %+v, want no head, length 0 and the genesis hash", head)
+	}
+
+	completeOffchainTrade(t, seller, buyer, "1.00", "head-1")
+	completeOffchainTrade(t, seller, buyer, "2.00", "head-2")
+
+	var ledgerView struct {
+		Entries []domain.LedgerEntry `json:"entries"`
+	}
+	decodeInto(t, buyer.do(http.MethodGet, "/v1/ledger", nil, false), &ledgerView)
+	if len(ledgerView.Entries) != 2 {
+		t.Fatalf("ledger entries = %d, want 2", len(ledgerView.Entries))
+	}
+	last := ledgerView.Entries[len(ledgerView.Entries)-1]
+
+	head.Head = nil
+	decodeInto(t, buyer.do(http.MethodGet, "/v1/ledger/head", nil, false), &head)
+	if head.Length != int64(len(ledgerView.Entries)) {
+		t.Errorf("head length = %d, want %d", head.Length, len(ledgerView.Entries))
+	}
+	if head.Head == nil || head.Head.Hash != last.Hash || head.Head.Seq != last.Seq {
+		t.Errorf("head = %+v, want the ledger's last entry %s", head.Head, last.Hash)
+	}
+}
+
 type tesseraResult struct {
 	JWS             string `json:"jws"`
 	VerificationKey string `json:"verificationKey"`

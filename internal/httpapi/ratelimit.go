@@ -93,11 +93,30 @@ func (l *rateLimiter) allow(key string, now time.Time) (bool, time.Duration) {
 	return false, time.Duration((1-b.tokens)/l.rps*float64(time.Second)) + time.Second
 }
 
+// evictLocked makes room for one more key. Idle buckets go first. If every
+// bucket is still in use the least recently touched one goes instead, because
+// idleness alone is no bound: a caller rotating addresses faster than the idle
+// window keeps every bucket fresh, and the map then grows with the attack while
+// each new key pays for a scan of all of it. The evicted key starts again with a
+// full burst, which is less than a caller holding that many addresses already
+// has.
 func (l *rateLimiter) evictLocked(now time.Time) {
+	var (
+		oldestKey string
+		oldest    time.Time
+		found     bool
+	)
 	for k, b := range l.buckets {
 		if now.Sub(b.last) > l.idle {
 			delete(l.buckets, k)
+			continue
 		}
+		if !found || b.last.Before(oldest) {
+			oldestKey, oldest, found = k, b.last, true
+		}
+	}
+	if found && len(l.buckets) >= l.maxKeys {
+		delete(l.buckets, oldestKey)
 	}
 }
 

@@ -137,6 +137,13 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Issuing a challenge needs no session, so its table is the one an anonymous
+	// caller can grow. Sweeping once per challenge lifetime means a row outlives
+	// its deadline by at most one more lifetime.
+	go func() {
+		authSvc.RunChallengeSweeper(ctx, cfg.ChallengeTTL)
+		logger.Info("auth challenge sweeper stopped")
+	}()
 	// The governed mint set is scoped to a cluster, and there is no cluster when
 	// settlement is unconfigured. Passing nil is the honest answer: this process
 	// governs no mints, so it declines to check a price against a scale it does

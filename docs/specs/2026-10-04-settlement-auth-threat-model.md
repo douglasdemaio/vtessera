@@ -148,7 +148,28 @@ not the connection's address, because behind Fly every visitor would otherwise
 look like the proxy and be throttled together. Trusting that header assumes all
 traffic arrives through the proxy, which Fly states is the case because the
 service port is not directly reachable; a deployment that stops holding that
-assumption must change the header setting with it.
+assumption must change the header setting with it. Each limiter holds at most
+4096 buckets: idle ones are evicted first, and when every bucket is still in use
+the least recently touched one goes, so a caller rotating addresses cannot grow
+the map. An evicted key starts again with a full burst. The address bucket keys
+on the whole address, so a caller holding an IPv6 prefix holds one bucket per
+address in it; keying on the /64 is the fix and is not done.
+
+**Pending challenges are swept, not kept.** Starting a handshake needs no
+session and stores a row, which made `auth_challenges` the one table an
+anonymous caller could grow, on the volume that also holds the ledger and the
+signing key. A sweep now deletes challenges past their deadline once per
+challenge lifetime, so the table is bounded by the address buckets times two
+lifetimes rather than by how long the service has been up. A challenge presented
+after it was swept is `404 NOT_FOUND` where it used to be `409 CONFLICT`.
+
+**An idempotency key is deployment-wide, not per agent.** A replay returns the
+stored trade or offer only to a caller it belongs to: a party for a trade, the
+seller for an offer. Anybody else is told `409 CONFLICT` and nothing about the
+record. What remains is that the key space is shared, so one agent can occupy a
+key another would have chosen and can learn that a key is in use. A caller that
+uses unguessable keys is unaffected; scoping the unique index to the creating
+agent is the fix and needs a migration.
 
 **The database has no at-rest encryption.** Anyone who can read the volume has
 every trade, card, and agent ID. It is a public marketplace, so most of this is

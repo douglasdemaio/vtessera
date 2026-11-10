@@ -199,6 +199,44 @@ func TestPublishOfferIdempotency(t *testing.T) {
 	}
 }
 
+// A key is unique across the deployment, so a second seller reusing one must be
+// told it is taken. Answering with the first seller's offer would report a
+// listing as published that never was.
+func TestAnIdempotencyKeyTakenByAnotherSellerIsAConflict(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	for key, name := range map[string]string{aliceKey: "alice", bobKey: "bob"} {
+		if _, _, err := svc.Register(ctx, key, card(name), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	in := registry.NewOffer{
+		Direction:       domain.DirectionAsk,
+		Description:     "translate text",
+		Capabilities:    []string{"translate"},
+		PriceAmount:     "2.00",
+		PriceMint:       usdc,
+		SettlementModes: []domain.SettlementMode{domain.SettlementOffchain},
+	}
+	if _, _, err := svc.PublishOffer(ctx, aliceKey, in, "idem-1", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	got, isNew, err := svc.PublishOffer(ctx, bobKey, in, "idem-1", "", nil)
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("second seller reusing the key = %v, want ErrConflict", err)
+	}
+	if isNew || got.ID != "" {
+		t.Errorf("the refusal carried offer %q, want none", got.ID)
+	}
+	open, err := svc.Search(ctx, domain.OfferQuery{AgentID: bobKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Errorf("bob has %d offers after a refused publish, want none", len(open))
+	}
+}
+
 // TestPublishOfferWithExplicitIDReplaysOrConflicts covers the caller-supplied-ID
 // path, which the idempotency-key replay above never reaches: a client that
 // names its own offer ID gets the existing offer back only when the terms match

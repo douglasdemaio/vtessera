@@ -199,3 +199,46 @@ func TestChallengeExpiry(t *testing.T) {
 		t.Errorf("expired challenge = %v, want ErrStale", err)
 	}
 }
+
+// Issuing a challenge takes no session, so the purge is what bounds the one table
+// an anonymous caller can grow. It must take every expired row, across more than
+// one batch, and leave a live challenge redeemable.
+func TestPurgeRemovesExpiredChallengesAndKeepsLiveOnes(t *testing.T) {
+	ctx := context.Background()
+	svc, priv, agentID := newService(t)
+	start := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return start }
+	stale := purgeBatch + 5
+	var first domain.Challenge
+	for i := 0; i < stale; i++ {
+		c, err := svc.IssueChallenge(ctx, agentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = c
+		}
+	}
+
+	svc.now = func() time.Time { return start.Add(defaultTTL + time.Second) }
+	live, err := svc.IssueChallenge(ctx, agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	purged, err := svc.PurgeExpired(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if purged != int64(stale) {
+		t.Errorf("purged = %d, want every one of the %d expired challenges", purged, stale)
+	}
+	if _, err := svc.Redeem(ctx, first.ID, sign(t, priv, first)); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("redeeming a purged challenge = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.Redeem(ctx, live.ID, sign(t, priv, live)); err != nil {
+		t.Errorf("the purge took a live challenge: %v", err)
+	}
+	if again, err := svc.PurgeExpired(ctx); err != nil || again != 0 {
+		t.Errorf("second purge = %d, %v, want nothing left to take", again, err)
+	}
+}

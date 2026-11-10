@@ -893,14 +893,15 @@ func (s *Server) handleLedger(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLedgerHead(w http.ResponseWriter, r *http.Request) {
-	entries, err := s.ledger.Entries(r.Context())
+	head, found, err := s.ledger.Head(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	body := map[string]any{"genesis": domain.GenesisHash, "head": nil, "length": len(entries)}
-	if len(entries) > 0 {
-		body["head"] = entries[len(entries)-1]
+	body := map[string]any{"genesis": domain.GenesisHash, "head": nil, "length": 0}
+	if found {
+		body["head"] = head
+		body["length"] = head.Seq
 	}
 	writeJSON(w, http.StatusOK, body)
 }

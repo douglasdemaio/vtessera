@@ -205,6 +205,13 @@ func (l *Ledger) Entries(ctx context.Context) ([]domain.LedgerEntry, error) {
 	return l.store.ListLedgerEntries(ctx)
 }
 
+// Head returns the newest entry, and false for a ledger nothing has been
+// anchored in yet. Sequences are assigned as head+1 inside the append and no
+// entry is ever removed, so the head's sequence is also the chain's length.
+func (l *Ledger) Head(ctx context.Context) (domain.LedgerEntry, bool, error) {
+	return l.store.HeadLedgerEntry(ctx)
+}
+
 // PublishedReceipt is a delivered trade's receipt as the marketplace publishes
 // it: the signed tessera beside the claims this deployment reads out of it. The
 // signature is the thing a verifier checks; the claims are what the issuer says

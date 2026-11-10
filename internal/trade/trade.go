@@ -587,6 +587,14 @@ func (s *Service) Create(ctx context.Context, actorID, offerID string, mode doma
 	if idempotencyKey != "" {
 		existing, err := s.store.GetTradeByIdempotencyKey(ctx, idempotencyKey)
 		if err == nil {
+			// A key is unique across the deployment, not per agent, so the trade
+			// behind it can be somebody else's. Returning it would hand a caller
+			// the parties, amount and state of a trade partyTrade refuses to show
+			// it, for the price of guessing a key. The refusal names nothing about
+			// the trade for the same reason.
+			if !existing.Party(actorID) {
+				return domain.Trade{}, false, fmt.Errorf("%w: idempotency key is already in use", domain.ErrConflict)
+			}
 			return existing, false, nil
 		}
 		if !errors.Is(err, domain.ErrNotFound) {

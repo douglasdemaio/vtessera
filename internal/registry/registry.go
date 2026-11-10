@@ -459,6 +459,13 @@ func (s *Service) PublishOffer(ctx context.Context, agentID string, in NewOffer,
 	if idempotencyKey != "" {
 		existing, err := s.store.GetOfferByIdempotencyKey(ctx, idempotencyKey)
 		if err == nil {
+			// A key is unique across the deployment, not per agent. Answering with
+			// another seller's offer would tell this caller it had published a
+			// listing it did not, which is the same hazard a taken offer ID is
+			// refused for below.
+			if existing.AgentID != agentID {
+				return domain.Offer{}, false, fmt.Errorf("%w: idempotency key is already in use", domain.ErrConflict)
+			}
 			return existing, false, nil
 		}
 		if !errors.Is(err, domain.ErrNotFound) {

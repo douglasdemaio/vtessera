@@ -124,3 +124,8 @@ CREATE TABLE IF NOT EXISTS auth_challenges (
   expires_at INTEGER NOT NULL,
   consumed_at INTEGER
 );
+
+-- The challenge sweep deletes by deadline. Issuing a challenge needs no session,
+-- so this is the one table an unauthenticated caller can add rows to, and the
+-- sweep that bounds it must not cost a scan of whatever backlog it is clearing.
+CREATE INDEX IF NOT EXISTS auth_challenges_expiry_idx ON auth_challenges (expires_at);
