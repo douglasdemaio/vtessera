@@ -364,6 +364,33 @@ func TestCreateIdempotency(t *testing.T) {
 	}
 }
 
+// An idempotency key is unique across the deployment, so a replay has to check
+// whose trade it found. Without that an agent that guessed a key was handed a
+// trade partyTrade would have refused it.
+func TestAnIdempotencyKeyDoesNotHandAnOutsiderSomebodyElsesTrade(t *testing.T) {
+	ctx := context.Background()
+	h := setup(t)
+	mine, _, err := h.svc.Create(ctx, buyerKey, h.offerID, "", "order-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, isNew, err := h.svc.Create(ctx, outsider, h.offerID, "", "order-1")
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("outsider replaying the buyer's key = %v, want ErrConflict", err)
+	}
+	if isNew || got.ID != "" || got.BuyerAgentID != "" {
+		t.Errorf("the refusal carried trade %+v, want nothing about it", got)
+	}
+	if strings.Contains(err.Error(), mine.ID) || strings.Contains(err.Error(), buyerKey) {
+		t.Errorf("the refusal %q names the trade or its buyer", err)
+	}
+	// The counterparty is a party, so it reads the same trade it could read by ID.
+	seen, isNew, err := h.svc.Create(ctx, sellerKey, h.offerID, "", "order-1")
+	if err != nil || isNew || seen.ID != mine.ID {
+		t.Errorf("counterparty replay = %s, %v, %v, want the existing trade", seen.ID, isNew, err)
+	}
+}
+
 func TestBidSwapsParties(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

@@ -572,6 +572,43 @@ func TestChallengeIsSingleUse(t *testing.T) {
 	}
 }
 
+// The delete is by deadline and bounded, and it does not care whether a
+// challenge was consumed: past its deadline neither kind can be redeemed.
+func TestDeleteExpiredChallengesIsBoundedAndSparesLiveOnes(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Now().UTC()
+	for _, c := range []domain.Challenge{
+		{ID: "old-1", AgentID: "alice", Nonce: "bm9uY2U=", ExpiresAt: now.Add(-3 * time.Minute)},
+		{ID: "old-2", AgentID: "alice", Nonce: "bm9uY2U=", ExpiresAt: now.Add(-2 * time.Minute)},
+		{ID: "old-3", AgentID: "alice", Nonce: "bm9uY2U=", ExpiresAt: now.Add(-time.Minute)},
+		{ID: "live", AgentID: "alice", Nonce: "bm9uY2U=", ExpiresAt: now.Add(time.Minute)},
+	} {
+		if err := s.CreateChallenge(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := s.DeleteExpiredChallenges(ctx, now, 2); err != nil || n != 2 {
+		t.Fatalf("first batch = %d, %v, want 2", n, err)
+	}
+	// Oldest first, so a backlog is cleared in the order it expired.
+	if _, err := s.ConsumeChallenge(ctx, "old-3", now); err != ErrStale {
+		t.Errorf("the newest expired challenge = %v, want it still present after a batch of 2", err)
+	}
+	if n, err := s.DeleteExpiredChallenges(ctx, now, 2); err != nil || n != 1 {
+		t.Fatalf("second batch = %d, %v, want the 1 that was left", n, err)
+	}
+	if _, err := s.ConsumeChallenge(ctx, "old-1", now); err != ErrNotFound {
+		t.Errorf("a deleted challenge = %v, want ErrNotFound", err)
+	}
+	if _, err := s.ConsumeChallenge(ctx, "live", now); err != nil {
+		t.Errorf("the delete took a live challenge: %v", err)
+	}
+	if n, err := s.DeleteExpiredChallenges(ctx, now, 0); err != nil || n != 0 {
+		t.Errorf("a zero limit = %d, %v, want nothing deleted", n, err)
+	}
+}
+
 func TestUpdateAndListAgents(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -1150,8 +1187,8 @@ func TestRetirementIsRefusedByTheStoreItselfWhileATradeIsLive(t *testing.T) {
 }
 
 // A trade that has finished does not block a withdrawal. Recorded, settled,
-// disputed and cancelled are all finished, and refusing on those would make an
-// agent impossible to withdraw.
+// disputed, resolved and cancelled are all finished, and refusing on those would
+// make an agent impossible to withdraw.
 func TestAFinishedTradeDoesNotBlockARetirement(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -1166,7 +1203,7 @@ func TestAFinishedTradeDoesNotBlockARetirement(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	for _, state := range []domain.TradeState{
-		domain.TradeRecorded, domain.TradeSettled, domain.TradeDisputed, domain.TradeCancelled,
+		domain.TradeRecorded, domain.TradeSettled, domain.TradeDisputed, domain.TradeResolved, domain.TradeCancelled,
 	} {
 		trade := domain.Trade{
 			ID: "t-" + string(state), OfferID: "o1", BuyerAgentID: "bob", SellerAgentID: "alice",

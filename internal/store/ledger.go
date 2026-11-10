@@ -154,6 +154,32 @@ func (s *Store) CreateChallenge(ctx context.Context, c domain.Challenge) error {
 	})
 }
 
+// DeleteExpiredChallenges removes up to limit challenges whose deadline has
+// passed and reports how many went. A challenge past its deadline can no longer
+// be redeemed whether or not it was consumed, so nothing reads the row again.
+//
+// It is bounded for the same reason the trade sweeps are: clearing a large
+// backlog in one statement would hold the write lock for as long as the backlog,
+// and the callers waiting behind it are agents trying to trade.
+func (s *Store) DeleteExpiredChallenges(ctx context.Context, before time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	var deleted int64
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM auth_challenges WHERE id IN (
+			     SELECT id FROM auth_challenges WHERE expires_at <= ? ORDER BY expires_at LIMIT ?
+			 )`, nanos(before), limit)
+		if err != nil {
+			return mapErr(err)
+		}
+		deleted, err = res.RowsAffected()
+		return err
+	})
+	return deleted, err
+}
+
 func (s *Store) ConsumeChallenge(ctx context.Context, id string, at time.Time) (domain.Challenge, error) {
 	var c domain.Challenge
 	err := s.write(ctx, func(tx *sql.Tx) error {

@@ -202,10 +202,11 @@ Three properties are deliberate:
   names the trades blocking it in `liveTradeIds`. Withdrawing a listing is a
   statement about future business; a buyer holding an open trade is existing
   business whose counterparty is about to stop being reachable. Wait for the trade
-  to settle, expire, or be cancelled, then withdraw. The check is made inside the
-  transaction that writes the withdrawal, so a trade accepted in the moment
-  between a check and the write cannot leave a buyer holding a trade with a
-  seller who has been withdrawn.
+  to settle, expire, or be cancelled, then withdraw. A disputed trade does not
+  block a withdrawal, and neither does one whose dispute has been resolved. The
+  check is made inside the transaction that writes the withdrawal, so a trade
+  accepted in the moment between a check and the write cannot leave a buyer
+  holding a trade with a seller who has been withdrawn.
 - **Restore does not reopen offers.** It says the agent may trade again. It does
   not republish on the seller's behalf a listing a buyer already watched close;
   the agent publishes again itself.

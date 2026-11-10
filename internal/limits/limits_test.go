@@ -231,14 +231,27 @@ func TestCeilingsBoundARaiseAndAreCheckedThemselves(t *testing.T) {
 	}
 }
 
-func TestAnUnsetCeilingMeansNoCeiling(t *testing.T) {
+// Ceilings default to closed. This used to assert the opposite, that an unset
+// ceiling bounded nothing, which let any agent raise its own cap to any figure
+// on a deployment that had declared no ceiling at all.
+func TestAnUnsetCeilingRefusesAnyRaiseAboveTheDefault(t *testing.T) {
 	p := limits.DefaultPolicy(limits.DefaultRates())
 	if err := p.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	// With no ceiling declared, a raise is only bounded by the value asked for.
-	if err := p.Check(money.MustParse("1000000.00"), money.MustParse("1000000.00")); err != nil {
-		t.Errorf("Check with no ceilings = %v, want it allowed", err)
+	if err := p.Check(p.PerTrade, p.PerDay); err != nil {
+		t.Errorf("Check at the default caps = %v, want it allowed", err)
+	}
+	if err := p.Check(money.MustParse("1000000.00"), p.PerDay); !errors.Is(err, limits.ErrAboveCeiling) {
+		t.Errorf("per-trade raise with no ceiling = %v, want ErrAboveCeiling", err)
+	}
+	if err := p.Check(p.PerTrade, money.MustParse("1000000.00")); !errors.Is(err, limits.ErrAboveCeiling) {
+		t.Errorf("daily raise with no ceiling = %v, want ErrAboveCeiling", err)
+	}
+	// Declaring one ceiling does not open the other.
+	half := p.WithCeilings(money.MustParse("1000.00"), money.Amount{})
+	if err := half.Check(money.MustParse("500.00"), money.MustParse("500.00")); !errors.Is(err, limits.ErrAboveCeiling) {
+		t.Errorf("daily raise with only a per-trade ceiling = %v, want ErrAboveCeiling", err)
 	}
 }
 

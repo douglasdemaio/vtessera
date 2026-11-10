@@ -324,8 +324,10 @@ func (s *Store) LiveTradesForAgent(ctx context.Context, agentID string) ([]domai
 }
 
 // liveTradeIDs lists the trades of an agent that have not finished, against
-// either handle. Recorded, settled, disputed and cancelled are finished: a
-// dispute is finished with the marketplace's involvement, not pending on it.
+// either handle. Recorded, settled, disputed, resolved and cancelled are
+// finished: a dispute is finished with the marketplace's involvement, not
+// pending on it, and a resolved one has no transition left at all, so counting
+// it as live would make its parties impossible to withdraw.
 //
 // It takes a queryer rather than the context alone so the retirement path can ask
 // the same question inside its own transaction. That matters: an agent accepted
@@ -335,11 +337,12 @@ func (s *Store) liveTradeIDs(ctx context.Context, q liveTradeQueryer, agentID st
 	rows, err := q.QueryContext(ctx,
 		`SELECT id FROM trades
 		 WHERE (buyer_agent_id = ? OR seller_agent_id = ?)
-		   AND state NOT IN (?, ?, ?, ?)
+		   AND state NOT IN (?, ?, ?, ?, ?)
 		 ORDER BY created_at ASC`,
 		agentID, agentID,
 		string(domain.TradeRecorded), string(domain.TradeSettled),
-		string(domain.TradeDisputed), string(domain.TradeCancelled))
+		string(domain.TradeDisputed), string(domain.TradeResolved),
+		string(domain.TradeCancelled))
 	if err != nil {
 		return nil, fmt.Errorf("live trades for %s: %w", agentID, err)
 	}

@@ -34,7 +34,12 @@ var (
 type Store interface {
 	CreateChallenge(ctx context.Context, c domain.Challenge) error
 	ConsumeChallenge(ctx context.Context, id string, at time.Time) (domain.Challenge, error)
+	DeleteExpiredChallenges(ctx context.Context, before time.Time, limit int) (int64, error)
 }
+
+// purgeBatch bounds one delete so the sweep never holds the write lock for the
+// length of a backlog. A sweep runs batches until one comes back short.
+const purgeBatch = 1000
 
 type Service struct {
 	store        Store
@@ -108,6 +113,48 @@ func (s *Service) IssueChallenge(ctx context.Context, agentID string) (domain.Ch
 		return domain.Challenge{}, err
 	}
 	return challenge, nil
+}
+
+// PurgeExpired deletes every challenge past its deadline and reports how many.
+//
+// Issuing a challenge takes no session, so the table is the one place a caller
+// who has proved nothing can make this service store something. Left alone it
+// only grows, on the volume that also holds the ledger and the signing key, and
+// a full volume stops every write the marketplace makes. An expired challenge
+// can no longer be redeemed, so deleting it loses nothing but the distinction
+// between "expired" and "never existed" for a caller presenting one late.
+func (s *Service) PurgeExpired(ctx context.Context) (int64, error) {
+	cutoff := s.now().UTC()
+	var total int64
+	for {
+		n, err := s.store.DeleteExpiredChallenges(ctx, cutoff, purgeBatch)
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n < purgeBatch {
+			return total, nil
+		}
+	}
+}
+
+// RunChallengeSweeper purges expired challenges until the context is done. Like
+// the trade sweeps it is a plain interval loop, and a failed pass is retried on
+// the next tick: there is nothing to escalate to and the rows are still expired.
+func (s *Service) RunChallengeSweeper(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		return
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _ = s.PurgeExpired(ctx)
+		}
+	}
 }
 
 func (s *Service) Redeem(ctx context.Context, challengeID, signature string) (Session, error) {

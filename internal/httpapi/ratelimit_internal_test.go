@@ -64,6 +64,28 @@ func TestTheBucketMapDoesNotGrowWithoutBound(t *testing.T) {
 	}
 }
 
+// Idle eviction alone is not a bound: keys that arrive faster than the idle
+// window are all still in use, and those are the ones an attacker sends.
+func TestTheBucketMapIsBoundedWhenEveryKeyIsStillInUse(t *testing.T) {
+	l := newRateLimiter(1, 1)
+	l.maxKeys = 4
+	l.idle = time.Hour
+	base := time.Now()
+	for i := 0; i < 200; i++ {
+		l.allow(strconv.Itoa(i), base.Add(time.Duration(i)*time.Millisecond))
+	}
+	if len(l.buckets) > l.maxKeys {
+		t.Fatalf("buckets = %d, want at most %d", len(l.buckets), l.maxKeys)
+	}
+	// The newest keys are the ones kept, so a caller that is being limited right
+	// now does not get its bucket back by waiting for the map to fill.
+	for _, key := range []string{"196", "197", "198", "199"} {
+		if _, ok := l.buckets[key]; !ok {
+			t.Errorf("recent key %s was evicted ahead of older ones", key)
+		}
+	}
+}
+
 func TestClientAddressPrefersTheProxyHeader(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.RemoteAddr = "10.0.0.1:5000"

@@ -321,11 +321,21 @@ func (p Policy) Check(perTrade, perDay money.Amount) error {
 	if _, err := toMicro(perDay); err != nil {
 		return fmt.Errorf("daily cap: %w", err)
 	}
-	if !p.CeilingPerTrade.IsZero() && perTrade.Cmp(p.CeilingPerTrade) > 0 {
-		return fmt.Errorf("per-trade cap %s: %w of %s", perTrade, ErrAboveCeiling, p.CeilingPerTrade)
+	// An undeclared ceiling is the default cap, not the absence of one. Reading
+	// unset as unlimited would let every agent choose its own limit on a
+	// deployment whose operator never said how far a raise may go.
+	ceilTrade, ceilDay := p.CeilingPerTrade, p.CeilingPerDay
+	if ceilTrade.IsZero() {
+		ceilTrade = p.PerTrade
 	}
-	if !p.CeilingPerDay.IsZero() && perDay.Cmp(p.CeilingPerDay) > 0 {
-		return fmt.Errorf("daily cap %s: %w of %s", perDay, ErrAboveCeiling, p.CeilingPerDay)
+	if ceilDay.IsZero() {
+		ceilDay = p.PerDay
+	}
+	if perTrade.Cmp(ceilTrade) > 0 {
+		return fmt.Errorf("per-trade cap %s: %w of %s", perTrade, ErrAboveCeiling, ceilTrade)
+	}
+	if perDay.Cmp(ceilDay) > 0 {
+		return fmt.Errorf("daily cap %s: %w of %s", perDay, ErrAboveCeiling, ceilDay)
 	}
 	return nil
 }
