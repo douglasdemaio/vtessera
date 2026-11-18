@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/douglasdemaio/vtessera/internal/domain"
@@ -143,14 +144,17 @@ func (s *Store) AcceptedBefore(ctx context.Context, deadline time.Time, limit in
 		return nil, fmt.Errorf("expiring accepted trades rows: %w", err)
 	}
 	// The state predicate above is the index-friendly filter; the rows are read
-	// through GetTrade so a caller sees the same shape it gets everywhere else.
+	// through tradesByIDs so a caller sees the same shape it gets everywhere
+	// else, in one batched round trip instead of one GetTrade per ID.
+	trades, err := s.tradesByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]domain.Trade, 0, len(ids))
 	for _, id := range ids {
-		tr, err := s.GetTrade(ctx, id)
-		if err != nil {
-			return nil, err
+		if tr, ok := trades[id]; ok {
+			out = append(out, tr)
 		}
-		out = append(out, tr)
 	}
 	return out, nil
 }
@@ -182,14 +186,17 @@ func (s *Store) OpenTradesBefore(ctx context.Context, cutoff time.Time, limit in
 		return nil, fmt.Errorf("expiring open trades rows: %w", err)
 	}
 	// The state predicate above is the index-friendly filter; the rows are read
-	// through GetTrade so a caller sees the same shape it gets everywhere else.
+	// through tradesByIDs so a caller sees the same shape it gets everywhere
+	// else, in one batched round trip instead of one GetTrade per ID.
+	trades, err := s.tradesByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]domain.Trade, 0, len(ids))
 	for _, id := range ids {
-		tr, err := s.GetTrade(ctx, id)
-		if err != nil {
-			return nil, err
+		if tr, ok := trades[id]; ok {
+			out = append(out, tr)
 		}
-		out = append(out, tr)
 	}
 	return out, nil
 }
@@ -294,6 +301,56 @@ func nonNilBytes(b []byte) []byte {
 	return b
 }
 
+// tradesByIDs fetches every trade in ids with two queries total — one for the
+// trade rows, one for their acceptances, grouped in Go — instead of the two
+// round trips per ID that calling GetTrade in a loop costs. Missing IDs are
+// simply absent from the result map, same as ListAgentsByIDs.
+func (s *Store) tradesByIDs(ctx context.Context, ids []string) (map[string]domain.Trade, error) {
+	out := make(map[string]domain.Trade, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+
+	rows, err := s.db.QueryContext(ctx, tradeSelect+` WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		t, err := scanTrade(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[t.ID] = t
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	acceptRows, err := s.db.QueryContext(ctx,
+		`SELECT trade_id, agent_id FROM trade_acceptances WHERE trade_id IN (`+placeholders+`) ORDER BY trade_id, created_at, agent_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer acceptRows.Close()
+	for acceptRows.Next() {
+		var tradeID, agentID string
+		if err := acceptRows.Scan(&tradeID, &agentID); err != nil {
+			return nil, err
+		}
+		t := out[tradeID]
+		t.Acceptances = append(t.Acceptances, agentID)
+		out[tradeID] = t
+	}
+	return out, acceptRows.Err()
+}
+
 // liveTradeQueryer is the read side a *sql.DB and a *sql.Tx both satisfy.
 type liveTradeQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
@@ -312,13 +369,15 @@ func (s *Store) LiveTradesForAgent(ctx context.Context, agentID string) ([]domai
 	if err != nil {
 		return nil, err
 	}
+	trades, err := s.tradesByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]domain.Trade, 0, len(ids))
 	for _, id := range ids {
-		tr, err := s.GetTrade(ctx, id)
-		if err != nil {
-			return nil, err
+		if tr, ok := trades[id]; ok {
+			out = append(out, tr)
 		}
-		out = append(out, tr)
 	}
 	return out, nil
 }
